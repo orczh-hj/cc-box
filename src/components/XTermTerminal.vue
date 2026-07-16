@@ -35,6 +35,7 @@ import {
 } from '@/api/tauri'
 import { registerTerminalCommand } from '@/composables/useTerminalCommand'
 import { safeDispose } from '@/utils/dispose'
+import { patchClearTextureAtlas } from '@/utils/webglAtlasPatch'
 import { relativizePath } from '@/utils/path'
 import { readText, writeText } from '@tauri-apps/plugin-clipboard-manager'
 import { getCurrentWindow } from '@tauri-apps/api/window'
@@ -204,20 +205,10 @@ function pickFontFamily(): string {
 
 // 在 term.open(el) 之后加载 Unicode 11 + WebGL addon
 //
-// @xterm/addon-webgl@0.19.0 的 glyph atlas 在长会话累积大量字符后会出现 race
-// condition 导致 glyph 错位（xtermjs/xterm.js#4325）。
-//
-// 规避方法：每 5 分钟 dispose + reload 整个 WebGL addon。这是 xterm.js 设计内
-// 的"renderer 切换"路径：
-//   - dispose 触发 setRenderer 回退到 DOM renderer（buffer / cols / rows 不动）
-//   - 新建并 loadAddon 再次 setRenderer 到新 WebGL renderer（atlas 全新重建）
-//
-// 关键点：
-//   1. 完全不触碰 buffer，避免 v0.12.7 resize(rows-1)+resize(rows) 导致的最后
-//      两行重复（xterm.js Buffer.resize 在 rows round-trip 时不是无损的）
-//   2. onContextLoss 也走 reload（不再只 dispose），修复 GPU context 丢失后
-//      黑屏隐患
-//   3. 副作用：dispose → DOM 渲染 1-2 帧 → WebGL 接管，闪烁 < 50ms
+// 不再定时 dispose + reload 整个 addon：这条路径会触发 atlas page merge /
+// clearTextureAtlas，多 Tab 共享 atlas 时直接污染其他 Tab（见
+// xtermjs/xterm.js#6014 / #6038）。乱码由 patchClearTextureAtlas 统一兜底。
+// WebGL context loss 是确定性事件，仍走重建路径。
 function loadRendererAddons(term: Terminal) {
   try {
     const unicode11 = new Unicode11Addon()
@@ -227,43 +218,38 @@ function loadRendererAddons(term: Terminal) {
     console.warn('[XTerm] Unicode 11 addon unavailable, fallback to default:', err)
   }
 
-  let webglAddon: WebglAddon | null = null
-
-  const reloadWebgl = () => {
-    if (webglAddon) {
-      try { webglAddon.dispose() } catch { /* 已 dispose */ }
-      webglAddon = null
-    }
+  const attachWebgl = () => {
     try {
-      webglAddon = new WebglAddon()
-      // context loss 也走 reload（修复之前只 dispose 导致的黑屏隐患）
-      webglAddon.onContextLoss(() => reloadWebgl())
+      const webglAddon = new WebglAddon()
+      webglAddon.onContextLoss(() => {
+        try { webglAddon.dispose() } catch { /* 已 dispose */ }
+        attachWebgl()
+      })
       term.loadAddon(webglAddon)
     } catch (err) {
-      console.warn('[XTerm] WebGL reload failed, fallback to DOM renderer:', err)
-      webglAddon = null
+      console.warn('[XTerm] WebGL init failed, fallback to DOM renderer:', err)
     }
   }
 
-  try {
-    reloadWebgl()
-    const timer = setInterval(reloadWebgl, 5 * 60 * 1000)
-    atlasTimers.set(term, timer)
-  } catch (err) {
-    console.warn('[XTerm] WebGL init failed:', err)
-  }
+  attachWebgl()
 }
 
-// 跟踪每个 Terminal 实例的 WebGL reload timer
-const atlasTimers = new WeakMap<Terminal, ReturnType<typeof setInterval>>()
-
-// 统一清理 terminal：先停 timer，再 dispose
-async function disposeTerminal(term: Terminal, context: string) {
-  const timer = atlasTimers.get(term)
-  if (timer) {
-    clearInterval(timer)
-    atlasTimers.delete(term)
+// 修复 xtermjs/xterm.js#6014：多 Tab 共享 glyph atlas 时，clearTextureAtlas
+// 不会传播 model 重建信号，其他 Tab 会用旧纹理坐标渲染乱码。
+// 调用原方法后强制所有 Terminal 实例全量 refresh，模拟 _requestClearModel。
+// 幂等：内部基于 Symbol 标记，重复调用不会重复 patch。
+patchClearTextureAtlas(WebglAddon.prototype, () => {
+  for (const inst of terminalInstances.values()) {
+    try {
+      inst.term.refresh(0, inst.term.rows - 1)
+    } catch {
+      // 单个实例 refresh 失败不阻断其他实例
+    }
   }
+})
+
+// 统一清理 terminal：仅 dispose（已无 timer 需要清理）
+async function disposeTerminal(term: Terminal, context: string) {
   await safeDispose(term, context)
 }
 

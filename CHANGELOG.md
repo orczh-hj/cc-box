@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.13.2] - 2026-07-16
+
+### Fixed
+- Fix multi-tab terminal garbled text caused by WebGL glyph atlas sharing (xtermjs/xterm.js#6014) by patching clearTextureAtlas to propagate model rebuild to all sharing renderers
+- Remove 5-minute WebGL addon reload timer that was itself polluting shared atlas across tabs
+
 ## [0.13.1] - 2026-07-03
 
 ### Features
