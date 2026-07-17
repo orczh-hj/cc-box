@@ -35,7 +35,6 @@ import {
 } from '@/api/tauri'
 import { registerTerminalCommand } from '@/composables/useTerminalCommand'
 import { safeDispose } from '@/utils/dispose'
-import { patchClearTextureAtlas } from '@/utils/webglAtlasPatch'
 import { relativizePath } from '@/utils/path'
 import { readText, writeText } from '@tauri-apps/plugin-clipboard-manager'
 import { getCurrentWindow } from '@tauri-apps/api/window'
@@ -205,9 +204,16 @@ function pickFontFamily(): string {
 
 // 在 term.open(el) 之后加载 Unicode 11 + WebGL addon
 //
-// 不再定时 dispose + reload 整个 addon：这条路径会触发 atlas page merge /
-// clearTextureAtlas，多 Tab 共享 atlas 时直接污染其他 Tab（见
-// xtermjs/xterm.js#6014 / #6038）。乱码由 patchClearTextureAtlas 统一兜底。
+// @xterm/addon-webgl@0.19.0 在长会话 + 多 Tab 共享 atlas 下会出现 glyph atlas
+// corruption（xtermjs/xterm.js#6014 / #6038），由于上游尚未修复，且 cc-box
+// 必须使用 WebGL renderer，采取定时全量 refresh 兜底：每 10 秒对所有可见行
+// 调用 term.refresh，强制 renderer 用当前 buffer 状态重建每行的纹理坐标，
+// 视觉上覆盖 atlas corruption 的错位 / 空白 / 替换字符表现。
+//
+// 不再使用 dispose + reload 整个 WebGL addon 的方案：reload 路径本身会触发
+// atlas page merge / clearTextureAtlas，多 Tab 共享 atlas 时反而污染其他 Tab，
+// 加剧乱码（v0.13.3 即因此回滚）。
+//
 // WebGL context loss 是确定性事件，仍走重建路径。
 function loadRendererAddons(term: Terminal) {
   try {
@@ -232,24 +238,29 @@ function loadRendererAddons(term: Terminal) {
   }
 
   attachWebgl()
+
+  // 每 10 秒全量 refresh：让 renderer 用当前 buffer 重建每行纹理坐标，
+  // 视觉上覆盖 atlas corruption（错位 / 空白 / 替换字符）。
+  const timer = setInterval(() => {
+    try {
+      term.refresh(0, term.rows - 1)
+    } catch {
+      // terminal 已 dispose 等边界场景，忽略
+    }
+  }, 10_000)
+  refreshTimers.set(term, timer)
 }
 
-// 修复 xtermjs/xterm.js#6014：多 Tab 共享 glyph atlas 时，clearTextureAtlas
-// 不会传播 model 重建信号，其他 Tab 会用旧纹理坐标渲染乱码。
-// 调用原方法后强制所有 Terminal 实例全量 refresh，模拟 _requestClearModel。
-// 幂等：内部基于 Symbol 标记，重复调用不会重复 patch。
-patchClearTextureAtlas(WebglAddon.prototype, () => {
-  for (const inst of terminalInstances.values()) {
-    try {
-      inst.term.refresh(0, inst.term.rows - 1)
-    } catch {
-      // 单个实例 refresh 失败不阻断其他实例
-    }
-  }
-})
+// 跟踪每个 Terminal 实例的定时 refresh timer
+const refreshTimers = new WeakMap<Terminal, ReturnType<typeof setInterval>>()
 
-// 统一清理 terminal：仅 dispose（已无 timer 需要清理）
+// 统一清理 terminal：先停 timer，再 dispose
 async function disposeTerminal(term: Terminal, context: string) {
+  const timer = refreshTimers.get(term)
+  if (timer) {
+    clearInterval(timer)
+    refreshTimers.delete(term)
+  }
   await safeDispose(term, context)
 }
 

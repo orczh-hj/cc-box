@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.13.4] - 2026-07-17
+
+### Fixed
+- Revert v0.13.3 atlas corruption workaround (patchClearTextureAtlas was insufficient for the page-overflow corruption path, xtermjs/xterm.js#6038)
+- Switch to a periodic full refresh (every 10s) that forces the WebGL renderer to rebuild each row's texture coordinates from the current buffer, visually covering glyph atlas corruption without triggering the cross-tab atlas pollution path that dispose+reload or clearTextureAtlas would cause
+
 ## [0.13.3] - 2026-07-16
 
 ### Fixed
