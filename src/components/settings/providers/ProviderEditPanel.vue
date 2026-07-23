@@ -137,6 +137,7 @@
           />
         </div>
         <p class="json-status" v-if="jsonError">{{ jsonError }}</p>
+        <p class="json-hint">{{ t('ignoredFieldsHint') }}</p>
       </div>
 
       </div>
@@ -690,6 +691,14 @@ function handleSave() {
   padding: 6px 0 0 0;
   color: var(--error-color, #c0392b);
   flex-shrink: 0;
+}
+
+.json-hint {
+  font-size: 11px;
+  padding: 4px 0 0 0;
+  color: var(--text-tertiary, #999);
+  flex-shrink: 0;
+  line-height: 1.5;
 }
 
 .panel-footer {

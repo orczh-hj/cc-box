@@ -1025,3 +1025,45 @@
 - Skills / Agents / MCP 面板中该 plugin 的子项仍然展示（未被错误移除）
 
 
+## Provider 激活不回滚 Claude Code 状态字段
+
+### Provider_Activate_PreservesPluginToggle_001 — 切换/重新激活 Provider 不回滚 plugin 开关
+
+**目标**：验证 activate Provider 走 deep merge + 剥离状态字段，不会用 Provider 快照覆盖用户后续 `claude plugin enable/disable` 的修改
+
+**前置条件**：
+- 已安装至少 2 个 Provider（设置 → Providers 列表非空）
+- 已安装至少 1 个 Claude Code plugin（侧边栏 Plugins 面板有 user scope 项）
+- 关闭其他 cc-box 实例避免干扰
+
+**操作步骤**：
+1. 用编辑器打开 `~/.claude/settings.json`，记录当前 `enabledPlugins` 中某个 plugin（如 `user-tool@orczh`）的值
+2. 在 cc-box Plugins 面板切换该 plugin 开关（开启↔关闭）
+3. 立即查看 `~/.claude/settings.json`，确认 `enabledPlugins` 已变化
+4. 进入 Settings → Providers，**保存通用配置**（即使没改动也点保存，触发 `updateCommon` → 重新 activate）
+5. 再次查看 `~/.claude/settings.json` 的 `enabledPlugins`
+6. 在 Providers 列表切换到另一个 Provider，再切回原 Provider
+7. 再次查看 `~/.claude/settings.json` 的 `enabledPlugins`
+
+**预期结果**：
+- 步骤 3：`enabledPlugins` 中目标 plugin 的值与 UI 开关一致
+- 步骤 5：`enabledPlugins` 中目标 plugin 的值保持步骤 3 的状态（**未被 Provider 快照回滚**）
+- 步骤 6/7：`enabledPlugins` 中目标 plugin 的值仍保持步骤 3 的状态
+
+**回归标志**：若步骤 5/6/7 中目标 plugin 的值变回 Provider 创建时的快照值，说明 bug 复现。
+
+### Provider_Activate_MergesEnvFields_001 — 切换 Provider 仍正确覆盖 env/model
+
+**目标**：验证剥离状态字段不影响 Provider 应管的字段（env、model 等）的覆盖语义
+
+**前置条件**：两个 Provider 的 `env.ANTHROPIC_BASE_URL` 不同
+
+**操作步骤**：
+1. 激活 Provider A，记录 `~/.claude/settings.json` 的 `env.ANTHROPIC_BASE_URL`
+2. 激活 Provider B
+3. 查看 `env.ANTHROPIC_BASE_URL`
+
+**预期结果**：
+- 步骤 3：`env.ANTHROPIC_BASE_URL` 已切换为 Provider B 的值
+- A 独有的 env 子键（如有）保留，不被整体清空
+

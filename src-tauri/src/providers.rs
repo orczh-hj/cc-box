@@ -163,6 +163,25 @@ pub(crate) fn strip_core_env(settings: &serde_json::Value) -> serde_json::Value 
     result
 }
 
+/// Claude Code 自管的状态字段，activate 时不得用 Provider 快照覆盖
+/// 否则会回滚用户后续通过 CLI（如 `claude plugin enable/disable`）做的修改
+const CC_STATE_KEYS: &[&str] = &[
+    "enabledPlugins",
+    "disabledPlugins",
+    "extraKnownMarketplaces",
+    "hooks",
+];
+
+pub(crate) fn strip_cc_state_fields(settings: &serde_json::Value) -> serde_json::Value {
+    let mut result = settings.clone();
+    if let Some(obj) = result.as_object_mut() {
+        for key in CC_STATE_KEYS {
+            obj.remove(*key);
+        }
+    }
+    result
+}
+
 /// 深度合并两个 JSON 对象（与 cc-switch json_deep_merge 兼容）
 /// source 的值覆盖 target 中同名键，对象递归合并，非对象直接覆盖
 pub(crate) fn deep_merge_json(target: &serde_json::Value, source: &serde_json::Value) -> serde_json::Value {
@@ -185,8 +204,18 @@ pub(crate) fn deep_merge_json(target: &serde_json::Value, source: &serde_json::V
     }
 }
 
+/// activate 时把 Provider 配置 merge 进当前 settings.json 的纯计算逻辑
+/// current = 磁盘现状；provider_cfg 应已通过 strip_cc_state_fields 剥离状态字段
+pub(crate) fn merge_provider_into_settings(
+    current: &serde_json::Value,
+    provider_cfg: &serde_json::Value,
+) -> serde_json::Value {
+    deep_merge_json(current, provider_cfg)
+}
+
 /// 激活 Provider
-/// 直接将 Provider 的 settingsConfig 写入 ~/.claude/settings.json（不执行通用配置合并）
+/// 把 Provider 的 settingsConfig deep merge 进当前 ~/.claude/settings.json
+/// 剥离 Claude Code 状态字段（enabledPlugins 等），避免覆盖用户后续 CLI 修改
 pub fn activate_provider(provider_id: &str) -> Result<()> {
     let config = get_providers_config()?;
 
@@ -205,7 +234,17 @@ pub fn activate_provider(provider_id: &str) -> Result<()> {
         fs::create_dir_all(settings_dir)?;
     }
 
-    let content = serde_json::to_string_pretty(&provider.settings_config)?;
+    // 读取当前 settings.json（不存在或解析失败视为空对象，保留 Provider 全量字段）
+    let current_settings = fs::read_to_string(&settings_path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .unwrap_or(serde_json::json!({}));
+
+    // 剥离状态字段后 merge 进当前 settings，避免覆盖 CLI 后续修改
+    let stripped = strip_cc_state_fields(&provider.settings_config);
+    let merged = merge_provider_into_settings(&current_settings, &stripped);
+
+    let content = serde_json::to_string_pretty(&merged)?;
     fs::write(&settings_path, content)?;
 
     let mut updated_config = config;
@@ -328,10 +367,12 @@ pub fn update_provider_sort_order(provider_ids: Vec<String>) -> Result<()> {
 
 /// 更新通用配置
 /// 保存通用配置后，将新内容 deepMerge 到所有 meta.commonConfigEnabled === true 的 Provider
+/// 入参中的 Claude Code 状态字段会被剥离，避免后续 activate 写回 settings.json 时覆盖 CLI 修改
 pub fn update_common_config(enabled: bool, settings: serde_json::Value) -> Result<()> {
     let mut config = get_providers_config()?;
+    let safe_settings = strip_cc_state_fields(&settings);
     config.common_config.enabled = enabled;
-    config.common_config.settings = settings.clone();
+    config.common_config.settings = safe_settings.clone();
 
     // 批量合并：遍历所有勾选了"应用通用配置"的 Provider
     for provider in &mut config.providers {
@@ -342,7 +383,7 @@ pub fn update_common_config(enabled: bool, settings: serde_json::Value) -> Resul
             .unwrap_or(false);
 
         if should_merge {
-            provider.settings_config = deep_merge_json(&provider.settings_config, &settings);
+            provider.settings_config = deep_merge_json(&provider.settings_config, &safe_settings);
         }
     }
 
@@ -471,7 +512,8 @@ pub fn import_from_cc_switch() -> Result<ImportResult> {
                 imported_common_config = true;
 
                 // 剥离核心 env 字段后再合并，防止覆盖各 Provider 独有的 API Key / 模型等
-                let safe_settings = strip_core_env(&common_settings);
+                // 同时剥离 Claude Code 状态字段，避免 commonConfig 污染 Provider 后再被 activate 写回
+                let safe_settings = strip_cc_state_fields(&strip_core_env(&common_settings));
 
                 // 按原则：将通用配置合并到所有 commonConfigEnabled === true 的 Provider
                 for provider in &mut config.providers {

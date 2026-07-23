@@ -343,6 +343,7 @@ export default {
   format: 'Format',
   jsonFormatError: 'Invalid JSON format',
   jsonParseError: 'Failed to parse JSON',
+  ignoredFieldsHint: 'The following fields will not be applied (managed by Claude Code): enabledPlugins, disabledPlugins, extraKnownMarketplaces, hooks',
 
   // Provider preset panel
   selectPreset: 'Select Preset Template',

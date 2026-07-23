@@ -343,6 +343,7 @@ export default {
   format: '格式化',
   jsonFormatError: 'JSON 格式错误',
   jsonParseError: 'JSON 解析失败',
+  ignoredFieldsHint: '以下字段不会被应用（由 Claude Code 管理）：enabledPlugins、disabledPlugins、extraKnownMarketplaces、hooks',
 
   // Provider preset panel
   selectPreset: '选择预设模板',

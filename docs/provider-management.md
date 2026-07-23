@@ -31,9 +31,14 @@ Provider 保留当前配置（含之前已合并的通用配置字段）。只�
 
 保存通用配置时，后端将新内容 `deepMerge` 到 **所有** `meta.commonConfigEnabled === true` 的 Provider 的 `settingsConfig` 中，一并持久化到 `providers.json`，并重新激活当前活跃的 Provider。
 
-### 六、激活 = 直接写入，不合并
+### 六、激活 = Deep Merge 写入 + 剥离状态字段
 
-`activate_provider` 直接将 Provider 的 `settingsConfig` 完整写入 `~/.claude/settings.json`，不执行通用配置合并。合并已在编辑时完成。
+`activate_provider` 读取当前 `~/.claude/settings.json`，对 Provider 的 `settingsConfig` 执行以下处理后再 merge 写回：
+
+1. **剥离 Claude Code 状态字段**（`strip_cc_state_fields`）：移除 `enabledPlugins`、`disabledPlugins`、`extraKnownMarketplaces`、`hooks` 四个键，避免覆盖用户后续通过 CLI（如 `claude plugin enable/disable`）做的修改。
+2. **Deep Merge**（`deep_merge_json`）：Provider 配置作为 source 覆盖 target（磁盘现状）的同名叶值，target 独有的键保留。
+
+合并已在编辑时完成（通用配置 → Provider），activate 阶段不再做通用配置合并。
 
 ### 七、不自动保存
 
@@ -191,14 +196,34 @@ Provider 保留当前配置（含之前已合并的通用配置字段）。只�
     → Rust activate_provider(provider_id)
         ├── 1) 读取 providers.json
         ├── 2) 查找 Provider
-        ├── 3) 直接将 settingsConfig 写入 ~/.claude/settings.json（不合并）
-        └── 4) 更新 activeProviderId，保存 providers.json
+        ├── 3) 读取当前 ~/.claude/settings.json（不存在视为 {}）
+        ├── 4) strip_cc_state_fields(provider.settings_config) 剥离状态字段
+        ├── 5) merge_provider_into_settings(current, stripped) deep merge
+        ├── 6) 写回 ~/.claude/settings.json
+        └── 7) 更新 activeProviderId，保存 providers.json
 ```
 
 **关键规则**：
-- 激活 = 直接写入 Provider 的 `settingsConfig`（已包含合并后的通用配置）
+- 激活 = Deep Merge 写入（保留 settings.json 现有字段，Provider 字段覆盖同名叶值）
+- 状态字段（`enabledPlugins` 等）不会被 Provider 快照覆盖，避免回滚 CLI 修改
 - 新启动的终端会话使用新配置
 - 已运行的终端不受影响
+
+### 被剥离的字段（CC_STATE_KEYS）
+
+| 字段 | 剥离原因 |
+|------|---------|
+| `enabledPlugins` | Claude Code 通过 `claude plugin enable/disable` 维护，Provider 快照不得覆盖 |
+| `disabledPlugins` | 同上（防御性纳入） |
+| `extraKnownMarketplaces` | 由 `claude plugin marketplace add/remove` 维护 |
+| `hooks` | Claude Code 运行时 hook 配置，独立于 Provider |
+
+剥离发生在三个位置：
+- `activate_provider`：写 settings.json 前剥离 Provider settingsConfig（运行时净化）
+- `update_common_config`：保存通用配置前剥离（防止用户在 commonConfig 误填污染所有 Provider）
+- `import_from_cc_switch`：导入 cc-switch 通用配置时串联剥离（与 `strip_core_env` 配合）
+
+`create_provider` / `update_provider` 不剥离，保留用户编辑器中的原始输入。
 
 ## 通用配置合并
 
@@ -255,13 +280,14 @@ Provider 保留当前配置（含之前已合并的通用配置字段）。只�
 用户修改通用配置并保存
   → providersStore.updateCommon(settings)
     → Rust update_common_config(enabled, settings)
-        ├── 1) 保存通用配置到 providers.json
-        ├── 2) 遍历所有 providers
-        ├── 3) 若 meta.commonConfigEnabled === true
-        │     → deep_merge_json(provider.settings_config, common_settings)
+        ├── 1) strip_cc_state_fields(settings) 剥离状态字段
+        ├── 2) 保存剥离后的通用配置到 providers.json
+        ├── 3) 遍历所有 providers
+        ├── 4) 若 meta.commonConfigEnabled === true
+        │     → deep_merge_json(provider.settings_config, stripped_settings)
         │     → 更新 provider.settings_config
-        ├── 4) 保存 providers.json（含所有已更新的 Provider）
-        └── 5) 返回
+        ├── 5) 保存 providers.json（含所有已更新的 Provider）
+        └── 6) 返回
   → Store 重载 providers（获取后端批量合并后的最新数据）
   → Store 重新激活当前活跃的 Provider（写入 settings.json）
   → ProviderEditPanel watch props.commonConfig → 重复合并到编辑内容

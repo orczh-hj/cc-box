@@ -1,6 +1,8 @@
 use serde_json::json;
 use crate::providers::deep_merge_json;
 use crate::providers::extract_test_params;
+use crate::providers::merge_provider_into_settings;
+use crate::providers::strip_cc_state_fields;
 use crate::providers::strip_core_env;
 
 // source 覆盖 target 中同名的叶值
@@ -266,6 +268,145 @@ fn StripCoreEnv_NoEnvField_001() {
     let common = json!({ "permissions": { "allow": [] } });
     let result = strip_core_env(&common);
     assert_eq!(result, common);
+}
+
+// ---------- strip_cc_state_fields ----------
+
+// 4 个 Claude Code 状态字段同时存在时全部被剥离
+#[test]
+fn StripCcState_RemovesAllKnownKeys_01() {
+    let settings = json!({
+        "enabledPlugins": { "paper-tool@orczh": true },
+        "disabledPlugins": { "foo@bar": true },
+        "extraKnownMarketplaces": { "orczh-plugins": { "source": { "source": "directory", "path": "C:/x" } } },
+        "hooks": { "PreToolUse": [] },
+        "env": { "ANTHROPIC_MODEL": "glm-5" },
+        "permissions": { "deny": ["WebSearch"] }
+    });
+    let result = strip_cc_state_fields(&settings);
+    assert!(result.get("enabledPlugins").is_none(), "enabledPlugins should be stripped");
+    assert!(result.get("disabledPlugins").is_none(), "disabledPlugins should be stripped");
+    assert!(result.get("extraKnownMarketplaces").is_none(), "extraKnownMarketplaces should be stripped");
+    assert!(result.get("hooks").is_none(), "hooks should be stripped");
+    assert!(result.get("env").is_some(), "env should remain");
+    assert!(result.get("permissions").is_some(), "permissions should remain");
+}
+
+// 单独剥离 enabledPlugins，保留 env
+#[test]
+fn StripCcState_RemovesEnabledPlugins_02() {
+    let settings = json!({
+        "enabledPlugins": { "paper-tool@orczh": true, "user-tool@orczh": false },
+        "env": { "ANTHROPIC_BASE_URL": "https://api.example.com" }
+    });
+    let result = strip_cc_state_fields(&settings);
+    assert!(result.get("enabledPlugins").is_none());
+    assert_eq!(
+        result.get("env").unwrap().get("ANTHROPIC_BASE_URL").unwrap(),
+        "https://api.example.com"
+    );
+}
+
+// permissions、theme、attribution 等用户偏好字段保留不变
+#[test]
+fn StripCcState_PreservesPermissions_03() {
+    let settings = json!({
+        "permissions": { "allow": ["Bash(ls:*)"], "deny": ["WebSearch"] },
+        "theme": "dark",
+        "attribution": { "commit": "Author <a@b.c>" },
+        "statusLine": { "type": "command", "command": "echo hi" }
+    });
+    let result = strip_cc_state_fields(&settings);
+    assert_eq!(result, settings, "non-state fields should be preserved verbatim");
+}
+
+// 无任何状态键时原样返回
+#[test]
+fn StripCcState_NoStateKeys_04() {
+    let settings = json!({
+        "env": { "FOO": "bar" },
+        "model": "claude-sonnet-4-6"
+    });
+    let result = strip_cc_state_fields(&settings);
+    assert_eq!(result, settings);
+}
+
+// 非对象输入（数组、字符串、数字）原样返回，不报错
+#[test]
+fn StripCcState_NonObjectInput_05() {
+    let arr = json!([1, 2, 3]);
+    assert_eq!(strip_cc_state_fields(&arr), arr);
+
+    let str_val = json!("hello");
+    assert_eq!(strip_cc_state_fields(&str_val), str_val);
+
+    let num = json!(42);
+    assert_eq!(strip_cc_state_fields(&num), num);
+}
+
+// 不修改传入的原始 Value（不可变性）
+#[test]
+fn StripCcState_DoesNotMutateInput_06() {
+    let settings = json!({
+        "enabledPlugins": { "foo": true },
+        "env": { "X": "1" }
+    });
+    let snapshot = settings.clone();
+    let _ = strip_cc_state_fields(&settings);
+    assert_eq!(settings, snapshot, "input must not be mutated");
+}
+
+// ---------- merge_provider_into_settings ----------
+
+// 核心 bug 回归：current 的 enabledPlugins 在 provider 配置（已剥离）merge 后保留
+// 这覆盖了"用户禁用 plugin → 切换 Provider → plugin 状态被回滚"的原始 bug
+#[test]
+fn MergeSettings_PreservesEnabledPlugins_01() {
+    let current = json!({
+        "enabledPlugins": { "paper-tool@orczh": false, "user-tool@orczh": true },
+        "env": { "ANTHROPIC_MODEL": "glm-5" }
+    });
+    // 模拟 activate 内部 strip 后的 provider 配置（无 enabledPlugins）
+    let provider_cfg = strip_cc_state_fields(&json!({
+        "enabledPlugins": { "paper-tool@orczh": true, "user-tool@orczh": true },
+        "env": { "ANTHROPIC_AUTH_TOKEN": "new-token" }
+    }));
+    let merged = merge_provider_into_settings(&current, &provider_cfg);
+    assert_eq!(
+        merged.get("enabledPlugins").unwrap(),
+        &json!({ "paper-tool@orczh": false, "user-tool@orczh": true }),
+        "用户 CLI 改的禁用状态必须保留"
+    );
+    assert_eq!(
+        merged.get("env").unwrap().get("ANTHROPIC_AUTH_TOKEN").unwrap(),
+        "new-token",
+        "Provider 的 API 字段应覆盖"
+    );
+}
+
+// Provider 的 model 字段覆盖 current
+#[test]
+fn MergeSettings_OverwritesModel_02() {
+    let current = json!({ "model": "old-model" });
+    let provider_cfg = json!({ "model": "new-model" });
+    let merged = merge_provider_into_settings(&current, &provider_cfg);
+    assert_eq!(merged.get("model").unwrap(), "new-model");
+}
+
+// env 子键深度合并，而非整体替换
+#[test]
+fn MergeSettings_MergesEnvDeep_03() {
+    let current = json!({
+        "env": { "ANTHROPIC_MODEL": "glm-5", "CUSTOM_VAR": "keep-me" }
+    });
+    let provider_cfg = json!({
+        "env": { "ANTHROPIC_MODEL": "glm-6", "ANTHROPIC_AUTH_TOKEN": "tok" }
+    });
+    let merged = merge_provider_into_settings(&current, &provider_cfg);
+    let env = merged.get("env").unwrap().as_object().unwrap();
+    assert_eq!(env.get("ANTHROPIC_MODEL").unwrap(), "glm-6", "provider 应覆盖");
+    assert_eq!(env.get("CUSTOM_VAR").unwrap(), "keep-me", "current 独有键应保留");
+    assert_eq!(env.get("ANTHROPIC_AUTH_TOKEN").unwrap(), "tok");
 }
 
 // ---------- 导入合并场景复现 ----------

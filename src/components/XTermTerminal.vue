@@ -204,17 +204,14 @@ function pickFontFamily(): string {
 
 // 在 term.open(el) 之后加载 Unicode 11 + WebGL addon
 //
-// @xterm/addon-webgl@0.19.0 在长会话 + 多 Tab 共享 atlas 下会出现 glyph atlas
-// corruption（xtermjs/xterm.js#6014 / #6038），由于上游尚未修复，且 cc-box
-// 必须使用 WebGL renderer，采取定时全量 refresh 兜底：每 10 秒对所有可见行
-// 调用 term.refresh，强制 renderer 用当前 buffer 状态重建每行的纹理坐标，
-// 视觉上覆盖 atlas corruption 的错位 / 空白 / 替换字符表现。
+// @xterm/addon-webgl@0.19.0 / 0.20.0-beta 在长会话 + 多 Tab 共享 atlas 下会出现
+// glyph atlas corruption(xtermjs/xterm.js#6038),上游尚未修复。
 //
-// 不再使用 dispose + reload 整个 WebGL addon 的方案：reload 路径本身会触发
-// atlas page merge / clearTextureAtlas，多 Tab 共享 atlas 时反而污染其他 Tab，
-// 加剧乱码（v0.13.3 即因此回滚）。
+// 本项目的应对:每次切到 Tab 时主动 reload 该 Tab 的 WebGL addon(见 reloadWebgl)。
+// reload 是唯一能消除已发生 corruption 的方式;放在「Tab 切入」时机执行,
+// 切换动画遮盖了 reload 的几十毫秒重建,用户无感。
 //
-// WebGL context loss 是确定性事件，仍走重建路径。
+// 详见 docs/webgl-corruption-fix.md
 function loadRendererAddons(term: Terminal) {
   try {
     const unicode11 = new Unicode11Addon()
@@ -224,43 +221,47 @@ function loadRendererAddons(term: Terminal) {
     console.warn('[XTerm] Unicode 11 addon unavailable, fallback to default:', err)
   }
 
-  const attachWebgl = () => {
-    try {
-      const webglAddon = new WebglAddon()
-      webglAddon.onContextLoss(() => {
-        try { webglAddon.dispose() } catch { /* 已 dispose */ }
-        attachWebgl()
-      })
-      term.loadAddon(webglAddon)
-    } catch (err) {
-      console.warn('[XTerm] WebGL init failed, fallback to DOM renderer:', err)
-    }
-  }
-
-  attachWebgl()
-
-  // 每 10 秒全量 refresh：让 renderer 用当前 buffer 重建每行纹理坐标，
-  // 视觉上覆盖 atlas corruption（错位 / 空白 / 替换字符）。
-  const timer = setInterval(() => {
-    try {
-      term.refresh(0, term.rows - 1)
-    } catch {
-      // terminal 已 dispose 等边界场景，忽略
-    }
-  }, 10_000)
-  refreshTimers.set(term, timer)
+  attachWebgl(term)
 }
 
-// 跟踪每个 Terminal 实例的定时 refresh timer
-const refreshTimers = new WeakMap<Terminal, ReturnType<typeof setInterval>>()
+// 跟踪每个 Terminal 的 WebGL addon 实例(用于 reload)
+const webglAddons = new WeakMap<Terminal, WebglAddon>()
 
-// 统一清理 terminal：先停 timer，再 dispose
-async function disposeTerminal(term: Terminal, context: string) {
-  const timer = refreshTimers.get(term)
-  if (timer) {
-    clearInterval(timer)
-    refreshTimers.delete(term)
+function attachWebgl(term: Terminal) {
+  try {
+    const webglAddon = new WebglAddon()
+    webglAddon.onContextLoss(() => {
+      try { webglAddon.dispose() } catch { /* 已 dispose */ }
+      webglAddons.delete(term)
+      setTimeout(() => attachWebgl(term), 0)
+    })
+    term.loadAddon(webglAddon)
+    webglAddons.set(term, webglAddon)
+  } catch (err) {
+    console.warn('[XTerm] WebGL init failed, fallback to DOM renderer:', err)
   }
+}
+
+/**
+ * Reload Terminal 的 WebGL addon。
+ * 用途:清除 glyph atlas corruption(详见 docs/webgl-corruption-fix.md)。
+ *
+ * 副作用:reload 时会触发 atlas page merge,可能短暂污染共享 atlas 的其他 Tab。
+ * 因此只在「Tab 即将成为活跃 Tab」时调用 —— 此时其他 Tab 处于不可见状态,
+ * 即使被污染用户也看不见。
+ */
+function reloadWebgl(term: Terminal) {
+  const old = webglAddons.get(term)
+  if (old) {
+    try { old.dispose() } catch { /* ignore */ }
+    webglAddons.delete(term)
+  }
+  attachWebgl(term)
+}
+
+// 统一清理 terminal
+async function disposeTerminal(term: Terminal, context: string) {
+  webglAddons.delete(term)
   await safeDispose(term, context)
 }
 
@@ -487,6 +488,10 @@ watch(() => sessionStore.activeTabId, async (newTabId, oldTabId) => {
   const existingInstance = terminalInstances.get(newTabId)
 
   if (existingInstance) {
+    // ⚡ 切到的 Tab 主动 reload WebGL,清除可能的 atlas corruption
+    // 详见 docs/webgl-corruption-fix.md
+    reloadWebgl(existingInstance.term)
+
     const buf = existingInstance.term.buffer.active
     existingInstance.term.refresh(0, Math.max(buf.length - 1, 0))
     requestAnimationFrame(() => existingInstance.fitAddon.fit())

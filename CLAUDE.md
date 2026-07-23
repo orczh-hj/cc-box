@@ -46,7 +46,7 @@ cc-box/
 │   │   ├── pty.rs              # PTY 管理（portable-pty 封装）
 │   │   ├── commands.rs         # Tauri IPC 命令
 │   │   ├── store.rs            # Claude Code 原生数据读取
-│   │   ├── providers.rs        # **Provider 管理**（存储、合并、激活、cc-switch 导入）
+│   │   ├── providers.rs        # **Provider 管理**（存储、合并、激活、cc-switch 导入）。激活走 deep merge，剥离 `enabledPlugins`/`disabledPlugins`/`extraKnownMarketplaces`/`hooks` 状态字段，不整文件覆盖 settings.json
 │   │   ├── mcp.rs              # MCP 协议客户端（HTTP/SSE + stdio）
 │   │   ├── hook_events.rs      # Hook 事件数据结构与提取
 │   │   ├── hook_server.rs      # Hook HTTP 服务器（接收 Claude 运行时事件）
@@ -199,6 +199,7 @@ npm run release -- --oss-only v0.5.1
 | [docs/测试编写原则.md](docs/测试编写原则.md)   | 项目如何编写测试                                              |
 | [docs/manual-test-cases.md](docs/manual-test-cases.md)   | **手动测试条目**：自动化无法覆盖的 UI 交互与端到端测试                  |
 | [docs/terminal-integration.md](docs/terminal-integration.md) | 终端集成架构、PTY 生命周期、IPC 命令与事件对照                           |
+| [docs/webgl-corruption-fix.md](docs/webgl-corruption-fix.md) | **WebGL Renderer 乱码修复方案**：atlas corruption 根因、方案对比、切 Tab reload 实施 |
 | [docs/hook-monitor.md](docs/hook-monitor.md)                 | **Hook 监控系统**：Plugin 注入、事件采集、状态机、多终端区分                |
 | [docs/provider-management.md](docs/provider-management.md)   | **Provider 管理**：数据结构、激活流程、通用配置合并、CRUD、cc-switch 导入    |
 | [docs/provider-test-cases.md](docs/provider-test-cases.md)   | **Provider 测试条目**：9 大类 80+ 测试用例，覆盖 CRUD、激活合并、导入、UI 交互 |
