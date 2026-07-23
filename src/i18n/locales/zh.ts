@@ -86,8 +86,6 @@ export default {
   installCancelled: '已取消',
   installCancelFailed: '取消失败：{error}',
   installingVersion: '正在安装 v{version}...',
-  installComplete: '安装完成',
-  installFailed: '安装失败：{error}',
   claudeRunningTitle: '检测到 Claude 进程正在运行',
   claudeRunningHint: '继续安装需要终止所有正在运行的 Claude 终端会话，确定要继续吗？',
   killAndInstall: '终止并安装',
@@ -185,9 +183,10 @@ export default {
 
   // Welcome view
   claudeCode: 'Claude Code',
-  aiPoweredAssistant: 'AI 驱动的编程助手',
+  aiPoweredAssistant: '面向 Claude Code 重度用户的多终端管理器',
   selectProjectDir: '选择项目目录',
   chooseDirHint: '选择一个目录来开始新会话',
+  welcomeSetupHint: '提示：启动会话前可先在「设置 → 接口」中配置 API Provider。',
 
   // Project select view
   recentSessions: '近期会话',
@@ -372,6 +371,24 @@ export default {
   installComplete: '安装完成',
   installVerifyFailed: '安装后验证失败',
   installFailed: '安装失败：{error}',
+  customPathLabel: '自定义路径',
+  customPathPlaceholder: '在此粘贴可执行文件的绝对路径',
+  customPathApply: '保存并重试',
+  customPathApplied: '已保存，正在重新检查...',
+  customPathInvalid: '路径不存在',
+  viewDocs: '查看文档',
+  envCheckHint: '自动安装会将 Claude CLI 和 Git Bash 下载到用户目录。你也可以在下面对已有的可执行文件指定路径。',
+
+  // Install stages
+  stageFetching: '获取版本信息...',
+  stageDownloading: '下载中...',
+  stageExtracting: '解压中...',
+  stagePlacing: '添加到 PATH...',
+  stageVerifying: '校验中...',
+  stageDone: '完成',
+  stageError: '失败',
+  stageCancelled: '已取消',
+  stageWaiting: '等待',
 
   // Select directory dialog
   selectProjectDirectory: '选择项目目录',

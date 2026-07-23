@@ -86,8 +86,6 @@ export default {
   installCancelled: 'Cancelled',
   installCancelFailed: 'Cancel failed: {error}',
   installingVersion: 'Installing v{version}...',
-  installComplete: 'Install complete',
-  installFailed: 'Install failed: {error}',
   claudeRunningTitle: 'Claude process is running',
   claudeRunningHint: 'Continuing will terminate all running Claude sessions. Are you sure?',
   killAndInstall: 'Kill and install',
@@ -185,9 +183,10 @@ export default {
 
   // Welcome view
   claudeCode: 'Claude Code',
-  aiPoweredAssistant: 'AI-powered coding assistant',
+  aiPoweredAssistant: 'Multi-terminal manager for Claude Code power users',
   selectProjectDir: 'Select Project Directory',
   chooseDirHint: 'Choose a directory to start a new session',
+  welcomeSetupHint: 'Tip: configure API Provider in Settings before launching a session.',
 
   // Project select view
   recentSessions: 'Recent Sessions',
@@ -372,6 +371,24 @@ export default {
   installComplete: 'Installation complete',
   installVerifyFailed: 'Post-install verification failed',
   installFailed: 'Installation failed: {error}',
+  customPathLabel: 'Custom path',
+  customPathPlaceholder: 'Paste the absolute path here',
+  customPathApply: 'Save & Retry',
+  customPathApplied: 'Saved. Re-checking...',
+  customPathInvalid: 'Path does not exist',
+  viewDocs: 'View Docs',
+  envCheckHint: 'Auto Install downloads Claude CLI and Git Bash to the user directory. You can also point to an existing binary below.',
+
+  // Install stages
+  stageFetching: 'Fetching version info...',
+  stageDownloading: 'Downloading...',
+  stageExtracting: 'Extracting...',
+  stagePlacing: 'Adding to PATH...',
+  stageVerifying: 'Verifying...',
+  stageDone: 'Done',
+  stageError: 'Failed',
+  stageCancelled: 'Cancelled',
+  stageWaiting: 'Waiting',
 
   // Select directory dialog
   selectProjectDirectory: 'Select Project Directory',

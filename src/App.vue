@@ -6,6 +6,7 @@
   <div v-if="appStore.checkFailed" class="check-failed-overlay">
     <div class="check-failed-card">
       <h2>{{ t('environmentCheck') }}</h2>
+      <p class="check-hint">{{ t('envCheckHint') }}</p>
       <div class="check-list">
         <div v-for="check in appStore.checkResults" :key="check.name"
           class="check-item" :class="{ passed: check.passed, failed: !check.passed }">
@@ -18,6 +19,30 @@
             <div v-if="check.passed && check.detectedPath" class="check-detected-path">
               {{ check.detectedPath }}
             </div>
+
+            <!-- 失败项：自定义路径输入 + 文档链接 -->
+            <template v-if="!check.passed">
+              <div class="check-custom-path">
+                <input
+                  type="text"
+                  class="custom-path-input"
+                  v-model="customPathInputs[configKeyFor(check.name)]"
+                  :placeholder="t('customPathPlaceholder')"
+                  :disabled="isInstalling"
+                />
+                <button
+                  class="custom-path-apply-btn"
+                  @click="applyCustomPath(check.name, configKeyFor(check.name))"
+                  :disabled="isInstalling"
+                >
+                  {{ t('customPathApply') }}
+                </button>
+              </div>
+              <p v-if="customPathErrors[check.name]" class="custom-path-error">{{ customPathErrors[check.name] }}</p>
+              <a v-if="check.url" href="javascript:void(0)" class="check-doc-link" @click="openUrl(check.url)">
+                {{ check.action || t('viewDocs') }} →
+              </a>
+            </template>
           </div>
         </div>
       </div>
@@ -25,22 +50,26 @@
       <!-- 安装进度显示（多任务） -->
       <div v-if="isInstalling" class="install-progress-section">
         <div class="install-tasks">
-          <div v-for="task in installTasks" :key="task.name" class="install-task">
+          <div v-for="task in installTasks" :key="task.name" class="install-task" :class="{ 'install-task-error': task.status === 'error' || task.status === 'cancelled' }">
             <div class="install-task-header">
               <span class="install-task-name">{{ task.name }}</span>
-              <span class="install-task-status">{{ task.status }}</span>
+              <span class="install-task-status" :class="{ 'status-error': task.status === 'error', 'status-cancelled': task.status === 'cancelled' }">{{ stageLabel(task.status) }}</span>
             </div>
             <div class="install-task-progress-bar">
-              <div class="install-task-progress-fill" :style="{ width: task.progress + '%' }"></div>
+              <div class="install-task-progress-fill" :class="{ 'progress-fill-error': task.status === 'error', 'progress-fill-cancelled': task.status === 'cancelled' }" :style="{ width: task.progress + '%' }"></div>
             </div>
+            <p v-if="task.message && (task.status === 'error' || task.status === 'cancelled')" class="install-task-message">{{ task.message }}</p>
           </div>
         </div>
       </div>
 
-      <!-- 按钮：Auto Install 和 Retry -->
+      <!-- 按钮：Auto Install / Cancel / Retry -->
       <div class="check-btn-row">
-        <button class="check-auto-btn" @click="autoInstall" :disabled="isInstalling">
-          {{ isInstalling ? t('installing') : t('autoInstall') }}
+        <button v-if="!isInstalling" class="check-auto-btn" @click="autoInstall">
+          {{ t('autoInstall') }}
+        </button>
+        <button v-if="isInstalling" class="check-cancel-btn" @click="cancelInstall">
+          {{ t('cancelInstall') }}
         </button>
         <button class="check-retry-btn" @click="retryChecks" :disabled="isInstalling">
           {{ t('retry') }}
@@ -81,7 +110,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, defineAsyncComponent, nextTick } from 'vue'
+import { ref, onMounted, onUnmounted, defineAsyncComponent, nextTick, reactive } from 'vue'
 import { useAppStore } from '@/stores/app'
 import { useHookStore } from '@/stores/hook'
 import { useSessionStore } from '@/stores/session'
@@ -100,6 +129,8 @@ import {
   getInstalledClaudeVersion,
   downloadAndInstallClaude,
   downloadAndInstallGit,
+  cancelAutoInstall,
+  updateAppConfig,
   onInstallProgress,
   onOpenDirectory
 } from '@/api/tauri'
@@ -128,12 +159,68 @@ const isInstalling = ref(false)
 // 多任务进度跟踪
 interface InstallTask {
   name: string       // "Claude CLI" | "Git"
-  status: string     // "waiting" | "fetching" | "downloading" | "extracting" | "done" | "error"
+  status: string     // "waiting" | "fetching" | "downloading" | "extracting" | "placing" | "verifying" | "done" | "error" | "cancelled"
   progress: number   // 0-100
   message: string
 }
 
 const installTasks = ref<InstallTask[]>([])
+
+// 失败项的自定义路径输入（key = claudePath / gitBashPath）
+const customPathInputs = reactive<Record<string, string>>({})
+const customPathErrors = reactive<Record<string, string>>({})
+
+/** check.name → app config key 的映射 */
+function configKeyFor(checkName: string): string {
+  if (checkName === 'Claude CLI') return 'claudePath'
+  if (checkName === 'Git Bash') return 'gitBashPath'
+  return ''
+}
+
+/** 把后端 stage 字符串翻译为当前语言展示 */
+function stageLabel(stage: string): string {
+  const map: Record<string, string> = {
+    waiting: t('stageWaiting'),
+    fetching: t('stageFetching'),
+    downloading: t('stageDownloading'),
+    extracting: t('stageExtracting'),
+    placing: t('stagePlacing'),
+    verifying: t('stageVerifying'),
+    done: t('stageDone'),
+    error: t('stageError'),
+    cancelled: t('stageCancelled'),
+  }
+  return map[stage] ?? stage
+}
+
+/** 应用自定义路径：保存到 config 后立即重试检查 */
+async function applyCustomPath(checkName: string, configKey: string) {
+  const value = (customPathInputs[configKey] || '').trim()
+  if (!value) {
+    customPathErrors[checkName] = t('customPathInvalid')
+    return
+  }
+  delete customPathErrors[checkName]
+  try {
+    await updateAppConfig({ [configKey]: value })
+    customPathInputs[configKey] = ''
+    await appStore.runChecks(true)
+    if (!appStore.checkFailed) {
+      initAfterChecks()
+    }
+  } catch (e) {
+    customPathErrors[checkName] = String(e)
+  }
+}
+
+/** 取消正在进行的自动安装 */
+async function cancelInstall() {
+  try {
+    await cancelAutoInstall()
+  } catch (e) {
+    console.error('Failed to cancel auto install:', e)
+  }
+}
 
 let unlistenInstallProgress: (() => void) | null = null
 let unlistenOpenDir: (() => void) | null = null
@@ -356,7 +443,7 @@ async function autoInstall() {
       installPromises.push(
         downloadAndInstallClaude().then(() => {
           const task = installTasks.value.find(item => item.name === 'Claude CLI')
-          if (task) {
+          if (task && task.status !== 'cancelled' && task.status !== 'error') {
             task.status = 'done'
             task.progress = 100
             task.message = t('installComplete')
@@ -370,7 +457,7 @@ async function autoInstall() {
       installPromises.push(
         downloadAndInstallGit().then(() => {
           const task = installTasks.value.find(item => item.name === 'Git Bash')
-          if (task) {
+          if (task && task.status !== 'cancelled' && task.status !== 'error') {
             task.status = 'done'
             task.progress = 100
             task.message = t('installComplete')
@@ -379,7 +466,7 @@ async function autoInstall() {
       )
     }
 
-    // 等待所有安装完成
+    // 等待所有安装完成（任何一个失败/取消都会 reject）
     await Promise.all(installPromises)
 
     // 延迟一秒后重新检查
@@ -392,23 +479,28 @@ async function autoInstall() {
     if (!appStore.checkFailed) {
       initAfterChecks()
     } else {
-      // 如果仍有失败项，更新错误信息
+      // 如果仍有失败项，更新错误信息（保留 error/cancelled 任务的原始 message）
       for (const task of installTasks.value) {
-        if (task.status !== 'done') {
-          task.status = 'error'
-          task.message = t('installVerifyFailed')
-        }
+        if (task.status === 'done') continue
+        if (task.status === 'error' || task.status === 'cancelled') continue
+        task.status = 'error'
+        task.message = t('installVerifyFailed')
       }
     }
   } catch (e) {
-    // 更新错误状态
+    const errorMsg = String(e)
+    // 区分取消与其他错误
+    const isCancelled = errorMsg === 'cancelled'
     for (const task of installTasks.value) {
-      if (task.status !== 'done') {
-        task.status = 'error'
-        task.message = t('installFailed', { error: String(e) })
-      }
+      if (task.status === 'done') continue
+      // 已被 progress 事件标记为 error/cancelled 的，保留其具体 message
+      if (task.status === 'error' || task.status === 'cancelled') continue
+      task.status = isCancelled ? 'cancelled' : 'error'
+      task.message = isCancelled ? t('stageCancelled') : (errorMsg || t('installFailed', { error: errorMsg }))
     }
-    console.error('Auto install failed:', e)
+    if (!isCancelled) {
+      console.error('Auto install failed:', e)
+    }
   } finally {
     isInstalling.value = false
     unlistenInstallProgress?.()
@@ -461,9 +553,18 @@ async function autoInstall() {
   background: var(--bg-primary);
   border-radius: var(--radius-lg);
   padding: 24px 32px;
-  max-width: 420px;
+  max-width: 480px;
   width: 90%;
   box-shadow: var(--shadow-lg);
+  max-height: 90vh;
+  overflow-y: auto;
+}
+
+.check-hint {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-bottom: 16px;
+  line-height: 1.5;
 }
 
 .check-failed-card h2 {
@@ -550,6 +651,73 @@ async function autoInstall() {
   word-break: break-all;
 }
 
+/* 失败项自定义路径输入 */
+.check-custom-path {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.custom-path-input {
+  flex: 1;
+  min-width: 0;
+  padding: 6px 8px;
+  font-size: 12px;
+  font-family: var(--font-mono);
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+}
+
+.custom-path-input:focus {
+  outline: none;
+  border-color: var(--accent-primary);
+}
+
+.custom-path-input:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.custom-path-apply-btn {
+  padding: 6px 10px;
+  font-size: 12px;
+  background: var(--accent-primary);
+  color: var(--text-inverse);
+  border: none;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.custom-path-apply-btn:hover:not(:disabled) {
+  opacity: 0.9;
+}
+
+.custom-path-apply-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.custom-path-error {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--status-error, #ef5350);
+}
+
+.check-doc-link {
+  display: inline-block;
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--accent-primary);
+  text-decoration: none;
+}
+
+.check-doc-link:hover {
+  text-decoration: underline;
+}
+
 .check-btn-row {
   display: flex;
   gap: 8px;
@@ -597,6 +765,24 @@ async function autoInstall() {
 .check-retry-btn:disabled {
   opacity: 0.5;
   cursor: wait;
+}
+
+.check-cancel-btn {
+  flex: 1;
+  padding: 10px;
+  background: transparent;
+  border: 1px solid var(--status-error, #ef5350);
+  color: var(--status-error, #ef5350);
+  border-radius: var(--radius-md);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.check-cancel-btn:hover {
+  background: var(--status-error, #ef5350);
+  color: var(--text-inverse);
+  opacity: 0.9;
 }
 
 /* 多任务进度 */
@@ -647,5 +833,29 @@ async function autoInstall() {
   height: 100%;
   background: var(--accent-primary);
   transition: width 0.3s ease;
+}
+
+.install-task-message {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  word-break: break-word;
+  line-height: 1.4;
+}
+
+.status-error {
+  color: var(--status-error, #ef5350);
+}
+
+.status-cancelled {
+  color: var(--text-tertiary);
+}
+
+.progress-fill-error {
+  background: var(--status-error, #ef5350);
+}
+
+.progress-fill-cancelled {
+  background: var(--text-tertiary);
 }
 </style>

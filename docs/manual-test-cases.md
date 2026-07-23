@@ -587,6 +587,73 @@
 - 版本号区域显示 `vX.Y.Z`（而非"未安装"）
 - 检查结果正确显示是否有更新可用
 
+### ClaudeCli_Startup_WinNpm_002 — Windows npm 安装的 claude 能在 CC-Box 终端启动
+
+**目标**：验证 npm 全局安装的 claude（`%APPDATA%\npm\claude.cmd`）通过 git bash 调用时能正确进入 Claude 提示符，而不会被 PATH/PATHEXT 影响
+
+**前置条件**：Windows 系统，claude 通过 `npm install -g @anthropic-ai/claude-code` 安装，`where claude` 返回结果包含 `.cmd` 文件，CC-Box 启动检查通过
+
+**操作步骤**：
+1. 启动 CC-Box
+2. 在欢迎页点击「选择项目目录」，选择一个项目
+3. 等待默认新建的 Claude 会话初始化
+4. 观察终端输出，等待 Claude 提示符出现
+
+**预期结果**：
+- 终端不报「command not found」或类似错误
+- 显示 Claude Code 版本号横幅与提示符（`>`）
+- 可以输入消息并收到回复
+
+### ClaudeCli_CustomPath_003 — 失败 overlay 中输入自定义路径后通过检查
+
+**目标**：验证启动检查失败时，在 overlay 中粘贴已有 claude.exe 路径后能保存并立即通过检查
+
+**前置条件**：把已有 claude.exe 移到非 PATH 路径（如 `D:\tools\claude.exe`），或保留它但不让 `where claude` 命中（如临时重命名 PATH 中的 claude → `claude_bak`）
+
+**操作步骤**：
+1. 启动 CC-Box，确认启动检查显示 Claude CLI ✗
+2. 在 Claude CLI 失败项下的输入框中粘贴 `D:\tools\claude.exe`
+3. 点击「保存并重试」按钮
+
+**预期结果**：
+- 输入框被清空
+- 启动检查立即重新执行
+- Claude CLI 变为 ✓，路径显示为 `D:\tools\claude.exe`
+- overlay 关闭，进入欢迎页
+
+### ClaudeCli_AutoInstallCancel_004 — Auto Install 取消按钮立即生效
+
+**目标**：验证 Auto Install 过程中点击「取消」能立即停止下载并清理半成品文件
+
+**前置条件**：删除 `~/.local/bin/claude.exe`（或 `claude`），让启动检查失败；网络需要稍慢以便有取消时机
+
+**操作步骤**：
+1. 启动 CC-Box，确认启动检查显示 Claude CLI ✗
+2. 点击「自动安装」
+3. 等下载进度走到 30%~70% 之间时，点击「取消」按钮
+
+**预期结果**：
+- 进度条立即停止增长，状态变为「已取消」（灰色）
+- 任务条下方显示"已取消"消息
+- `~/.local/bin/` 目录下没有半成品 `claude.exe` 或临时文件
+- 「自动安装」按钮重新可点
+
+### ClaudeCli_AutoInstallError_005 — Auto Install 失败显示具体错误
+
+**目标**：验证 Auto Install 失败时显示具体错误原因（网络/HTTP/磁盘）而非通用 installFailed 文案
+
+**前置条件**：断网或配置不可达的 OSS（如修改 hosts 把 `cc-box.oss-cn-beijing.aliyuncs.com` 指向 127.0.0.1）
+
+**操作步骤**：
+1. 启动 CC-Box，确认启动检查显示 Claude CLI ✗
+2. 点击「自动安装」
+3. 等待失败
+
+**预期结果**：
+- 状态显示「失败」（红色）
+- 任务条下方显示具体错误，如「请求失败：...」「HTTP 错误：502」等
+- 控制台同步打印错误堆栈
+
 ### ClaudeCli_VersionDetect_MacArm_002 — macOS ARM 版本检测
 
 **目标**：验证 Apple Silicon Mac 上 claude 版本能被正确检测

@@ -10,6 +10,7 @@ import {
   getProjects,
   getCheckResults,
   runChecks,
+  getSystemLocale,
 } from '@/api/tauri'
 import i18n from '@/i18n'
 
@@ -85,7 +86,7 @@ export const useAppStore = defineStore('app', () => {
       const config = await getAppConfig()
       theme.value = config.theme || 'light'
       fontSize.value = config.fontSize || 12
-      language.value = config.language || detectSystemLocale()
+      language.value = config.language || (await detectSystemLocale())
       i18n.global.locale.value = language.value
 
       // 加载环境变量（首次使用默认值）
@@ -200,7 +201,15 @@ export const useAppStore = defineStore('app', () => {
     updateAppConfig({ fontSize: size })
   }
 
-  function detectSystemLocale(): string {
+  /** 通过 Tauri 命令获取系统 locale，回退到 navigator.language */
+  async function detectSystemLocale(): Promise<'en' | 'zh'> {
+    try {
+      const locale = await getSystemLocale()
+      if (locale && locale.toLowerCase().startsWith('zh')) return 'zh'
+      if (locale) return 'en'
+    } catch {
+      // 命令失败时回退到浏览器语言
+    }
     const browserLang = navigator.language || 'en'
     return browserLang.toLowerCase().startsWith('zh') ? 'zh' : 'en'
   }

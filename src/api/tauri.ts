@@ -323,6 +323,14 @@ export const downloadAndInstallClaude = (): Promise<void> =>
 export const downloadAndInstallGit = (): Promise<void> =>
   invoke<void>('download_and_install_git');
 
+// 取消正在进行的自动安装（首次启动 Auto Install 触发的）
+export const cancelAutoInstall = (): Promise<boolean> =>
+  invoke<boolean>('cancel_auto_install');
+
+// 获取系统 locale（BCP-47 标签，如 "zh-CN"、"en-US"）
+export const getSystemLocale = (): Promise<string> =>
+  invoke<string>('get_system_locale');
+
 export const onInstallProgress = (callback: (progress: InstallProgress) => void): Promise<Unlisten> =>
   listen<InstallProgress>('download-progress', (event) => callback(event.payload));
 

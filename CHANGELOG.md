@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.13.5] - 2026-07-23
+
+### Fixed
+- Fix Provider activation overwriting Claude Code state fields (enabledPlugins, disabledPlugins, extraKnownMarketplaces, hooks) modified via CLI by switching to deep merge into current settings.json
+- Fix terminal glyph atlas corruption by reloading WebGL renderer on tab switch instead of the periodic refresh approach that was reverted in v0.13.3
+- Fix environment check failure overlay missing the custom path input and docs link that the failure message promised
+- Fix Auto Install swallowing specific error messages behind a generic banner; concrete HTTP/network errors now surface per task
+- Fix install stage labels rendered as raw English (fetching/downloading/extracting/...) instead of localized text
+- Fix welcome screen copy describing CC-Box as 'AI-powered assistant' instead of the multi-terminal manager positioning
+
+### Features
+- Add cancel button to Auto Install with proper half-downloaded file cleanup via cancel_auto_install command
+- Add custom path input on environment check failure overlay for Claude CLI / Git Bash
+- Add Tauri-native system locale detection via sys-locale crate for accurate language auto-select on Windows WebView2
+
 ## [0.13.4] - 2026-07-17
 
 ### Fixed

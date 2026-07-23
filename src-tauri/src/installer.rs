@@ -27,6 +27,13 @@ const OSS_BASE_URL: &str = "https://cc-box.oss-cn-beijing.aliyuncs.com";
 static ACTIVE_CLAUDE_DOWNLOADS: LazyLock<Mutex<HashMap<String, Arc<AtomicBool>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
+/// 正在进行的自动安装（首次启动 Auto Install）：单一取消标志
+///
+/// 同一时间最多一次自动安装（Auto Install 按钮触发），不存在并发，用单一 Option 即可。
+/// `cancel_auto_install` 命令把它置为 true，下载循环检测后立即中断。
+static ACTIVE_AUTO_INSTALL: LazyLock<Mutex<Option<Arc<AtomicBool>>>> =
+    LazyLock::new(|| Mutex::new(None));
+
 /// 安装路径
 #[cfg(target_os = "windows")]
 fn get_install_dirs() -> (PathBuf, PathBuf) {
@@ -131,18 +138,22 @@ fn download_file(
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(600))
         .build()
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+        .map_err(|e| {
+            let msg = format!("构建 HTTP 客户端失败：{}", e);
+            emit_progress(app, item, "error", 0, msg.as_str());
+            io::Error::new(io::ErrorKind::Other, msg)
+        })?;
 
-    let mut response = client
-        .get(url)
-        .send()
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+    let mut response = client.get(url).send().map_err(|e| {
+        let msg = format!("请求失败：{}", e);
+        emit_progress(app, item, "error", 0, msg.as_str());
+        io::Error::new(io::ErrorKind::Other, msg)
+    })?;
 
     if !response.status().is_success() {
-        return Err(io::Error::new(
-            io::ErrorKind::Other,
-            format!("HTTP error: {}", response.status()),
-        ));
+        let msg = format!("HTTP 错误：{}", response.status());
+        emit_progress(app, item, "error", 0, msg.as_str());
+        return Err(io::Error::new(io::ErrorKind::Other, msg));
     }
 
     let total_size = response.content_length().unwrap_or(0);
@@ -238,22 +249,58 @@ fn get_current_platform() -> String {
 pub async fn download_and_install_claude(app: AppHandle) -> Result<(), String> {
     log::info!("[Installer] Starting Claude CLI installation");
 
+    // 注册取消标志到全局 AUTO INSTALL map
+    let cancel_flag = Arc::new(AtomicBool::new(false));
+    {
+        let mut map = ACTIVE_AUTO_INSTALL.lock().unwrap();
+        *map = Some(cancel_flag.clone());
+    }
+
+    // 退出时清理标志
+    let cleanup = || {
+        let mut map = ACTIVE_AUTO_INSTALL.lock().unwrap();
+        *map = None;
+    };
+
     emit_progress(&app, "claude", "fetching", 0, "获取版本信息...");
 
     // 获取最新版本信息
-    let latest = tokio::task::spawn_blocking(|| fetch_claude_latest())
-        .await
-        .map_err(|e| e.to_string())?
-        .map_err(|e| e.to_string())?;
+    let latest = match tokio::task::spawn_blocking(fetch_claude_latest).await {
+        Ok(Ok(info)) => info,
+        Ok(Err(e)) => {
+            let msg = format!("获取版本信息失败：{}", e);
+            emit_progress(&app, "claude", "error", 0, msg.as_str());
+            cleanup();
+            return Err(msg);
+        }
+        Err(e) => {
+            let msg = format!("任务调度失败：{}", e);
+            emit_progress(&app, "claude", "error", 0, msg.as_str());
+            cleanup();
+            return Err(msg);
+        }
+    };
+
+    // 检查取消
+    if cancel_flag.load(Ordering::SeqCst) {
+        emit_progress(&app, "claude", "cancelled", 0, "已取消");
+        cleanup();
+        return Err("cancelled".to_string());
+    }
 
     emit_progress(&app, "claude", "fetching", 100, format!("版本: {}", latest.version));
 
     // 获取平台信息
     let platform = get_current_platform();
-    let platform_info = latest
-        .platforms
-        .get(&platform)
-        .ok_or_else(|| format!("Platform {} not supported", platform))?;
+    let platform_info = match latest.platforms.get(&platform) {
+        Some(info) => info,
+        None => {
+            let msg = format!("当前平台 {} 暂不支持", platform);
+            emit_progress(&app, "claude", "error", 0, msg.as_str());
+            cleanup();
+            return Err(msg);
+        }
+    };
 
     let download_url = format!("{}/{}", OSS_BASE_URL, platform_info.url);
     let filename = if platform.starts_with("win32") {
@@ -264,30 +311,55 @@ pub async fn download_and_install_claude(app: AppHandle) -> Result<(), String> {
 
     // 创建安装目录
     let (claude_dir, _) = get_install_dirs();
-    fs::create_dir_all(&claude_dir)
-        .map_err(|e| format!("Failed to create Claude dir: {}", e))?;
+    if let Err(e) = fs::create_dir_all(&claude_dir) {
+        let msg = format!("创建安装目录失败：{}", e);
+        emit_progress(&app, "claude", "error", 0, msg.as_str());
+        cleanup();
+        return Err(msg);
+    }
 
     let claude_path = claude_dir.join(filename);
 
-    // 下载文件
+    // 下载文件（带取消标志）
     emit_progress(&app, "claude", "downloading", 0, "开始下载...");
     let claude_path_clone = claude_path.clone();
     let app_clone = app.clone();
-    tokio::task::spawn_blocking(move || download_file(&download_url, &claude_path_clone, &app_clone, "claude", None))
-        .await
-        .map_err(|e| e.to_string())?
-        .map_err(|e| e.to_string())?;
+    let cancel_for_task = cancel_flag.clone();
+    let download_result = tokio::task::spawn_blocking(move || {
+        download_file(
+            &download_url,
+            &claude_path_clone,
+            &app_clone,
+            "claude",
+            Some(&cancel_for_task),
+        )
+    })
+    .await
+    .map_err(|e| {
+        let msg = format!("任务调度失败：{}", e);
+        emit_progress(&app, "claude", "error", 0, msg.as_str());
+        msg
+    })?;
 
-    // 验证 checksum（可选）
-    emit_progress(&app, "claude", "verifying", 50, "验证文件...");
-    // TODO: 实现 checksum 验证
+    if let Err(e) = download_result {
+        cleanup();
+        if e.kind() == io::ErrorKind::Interrupted {
+            return Err("cancelled".to_string());
+        }
+        // download_file 已经 emit 了 error 事件和具体原因
+        return Err(e.to_string());
+    }
 
     // 设置权限（Unix）
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&claude_path, fs::Permissions::from_mode(0o755))
-            .map_err(|e| format!("Failed to set permissions: {}", e))?;
+        if let Err(e) = fs::set_permissions(&claude_path, fs::Permissions::from_mode(0o755)) {
+            let msg = format!("设置可执行权限失败：{}", e);
+            emit_progress(&app, "claude", "error", 0, msg.as_str());
+            cleanup();
+            return Err(msg);
+        }
     }
 
     // 添加到 PATH（进程级 + 用户级持久化）
@@ -299,9 +371,29 @@ pub async fn download_and_install_claude(app: AppHandle) -> Result<(), String> {
     save_install_path_to_config("claudePath", &claude_path);
 
     emit_progress(&app, "claude", "done", 100, "安装完成");
+    cleanup();
 
     log::info!("[Installer] Claude CLI installed to {}", claude_path.display());
     Ok(())
+}
+
+/// 取消正在进行的自动安装（首次启动 Auto Install 触发的）
+///
+/// 返回 true 表示找到了活动安装并已标记取消；false 表示当前没有活动安装。
+#[tauri::command]
+pub async fn cancel_auto_install() -> Result<bool, String> {
+    let flag = {
+        let map = ACTIVE_AUTO_INSTALL.lock().unwrap();
+        map.as_ref().cloned()
+    };
+    if let Some(f) = flag {
+        f.store(true, Ordering::SeqCst);
+        log::info!("[Installer] Cancel requested for auto install");
+        Ok(true)
+    } else {
+        log::info!("[Installer] Cancel requested but no active auto install");
+        Ok(false)
+    }
 }
 
 // ============================================
@@ -411,13 +503,43 @@ fn extract_portable_git(archive_path: &Path, target_dir: &Path, app: &AppHandle)
 pub async fn download_and_install_git(app: AppHandle) -> Result<(), String> {
     log::info!("[Installer] Starting Git portable installation");
 
+    // 注册取消标志到全局 AUTO INSTALL map
+    let cancel_flag = Arc::new(AtomicBool::new(false));
+    {
+        let mut map = ACTIVE_AUTO_INSTALL.lock().unwrap();
+        *map = Some(cancel_flag.clone());
+    }
+
+    let cleanup = || {
+        let mut map = ACTIVE_AUTO_INSTALL.lock().unwrap();
+        *map = None;
+    };
+
     emit_progress(&app, "git", "fetching", 0, "获取版本信息...");
 
     // 获取最新版本信息
-    let latest = tokio::task::spawn_blocking(|| fetch_git_latest())
-        .await
-        .map_err(|e| e.to_string())?
-        .map_err(|e| e.to_string())?;
+    let latest = match tokio::task::spawn_blocking(fetch_git_latest).await {
+        Ok(Ok(info)) => info,
+        Ok(Err(e)) => {
+            let msg = format!("获取 Git 版本信息失败：{}", e);
+            emit_progress(&app, "git", "error", 0, msg.as_str());
+            cleanup();
+            return Err(msg);
+        }
+        Err(e) => {
+            let msg = format!("任务调度失败：{}", e);
+            emit_progress(&app, "git", "error", 0, msg.as_str());
+            cleanup();
+            return Err(msg);
+        }
+    };
+
+    // 检查取消
+    if cancel_flag.load(Ordering::SeqCst) {
+        emit_progress(&app, "git", "cancelled", 0, "已取消");
+        cleanup();
+        return Err("cancelled".to_string());
+    }
 
     emit_progress(&app, "git", "fetching", 100, format!("版本: {}", latest.version));
 
@@ -434,20 +556,52 @@ pub async fn download_and_install_git(app: AppHandle) -> Result<(), String> {
     emit_progress(&app, "git", "downloading", 0, "开始下载...");
     let archive_path_clone = archive_path.clone();
     let app_clone = app.clone();
-    tokio::task::spawn_blocking(move || download_file(&download_url, &archive_path_clone, &app_clone, "git", None))
-        .await
-        .map_err(|e| e.to_string())?
-        .map_err(|e| e.to_string())?;
+    let cancel_for_task = cancel_flag.clone();
+    let download_result = tokio::task::spawn_blocking(move || {
+        download_file(
+            &download_url,
+            &archive_path_clone,
+            &app_clone,
+            "git",
+            Some(&cancel_for_task),
+        )
+    })
+    .await
+    .map_err(|e| {
+        let msg = format!("任务调度失败：{}", e);
+        emit_progress(&app, "git", "error", 0, msg.as_str());
+        msg
+    })?;
+
+    if let Err(e) = download_result {
+        cleanup();
+        if e.kind() == io::ErrorKind::Interrupted {
+            return Err("cancelled".to_string());
+        }
+        return Err(e.to_string());
+    }
 
     // 解压
     emit_progress(&app, "git", "extracting", 0, "开始解压...");
     let archive_path_clone = archive_path.clone();
     let git_dir_clone = git_dir.clone();
     let app_clone = app.clone();
-    tokio::task::spawn_blocking(move || extract_portable_git(&archive_path_clone, &git_dir_clone, &app_clone))
-        .await
-        .map_err(|e| e.to_string())?
-        .map_err(|e| e.to_string())?;
+    let extract_result = tokio::task::spawn_blocking(move || {
+        extract_portable_git(&archive_path_clone, &git_dir_clone, &app_clone)
+    })
+    .await
+    .map_err(|e| {
+        let msg = format!("任务调度失败：{}", e);
+        emit_progress(&app, "git", "error", 0, msg.as_str());
+        msg
+    })?;
+
+    if let Err(e) = extract_result {
+        let msg = format!("解压 PortableGit 失败：{}", e);
+        emit_progress(&app, "git", "error", 0, msg.as_str());
+        cleanup();
+        return Err(msg);
+    }
 
     // 添加到 PATH（进程级 + 用户级持久化）
     let git_bin_dir = git_dir.join("bin");
@@ -463,6 +617,7 @@ pub async fn download_and_install_git(app: AppHandle) -> Result<(), String> {
     fs::remove_file(&archive_path).ok();
 
     emit_progress(&app, "git", "done", 100, "安装完成");
+    cleanup();
 
     log::info!("[Installer] Git portable installed to {}", git_dir.display());
     Ok(())

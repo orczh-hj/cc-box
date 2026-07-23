@@ -19,6 +19,7 @@
         {{ t('selectProjectDir') }}
       </button>
       <p class="hint">{{ t('chooseDirHint') }}</p>
+      <p class="setup-hint">{{ t('welcomeSetupHint') }}</p>
     </div>
   </div>
 </template>
@@ -108,5 +109,16 @@ h1 {
   margin-top: 16px;
   font-size: 12px;
   color: var(--text-tertiary);
+}
+
+.setup-hint {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--text-tertiary);
+  padding: 8px 12px;
+  background: var(--bg-secondary);
+  border-radius: var(--radius-md);
+  border-left: 2px solid var(--accent-primary);
+  text-align: left;
 }
 </style>

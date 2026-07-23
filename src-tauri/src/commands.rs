@@ -198,6 +198,17 @@ pub async fn update_app_config(updates: serde_json::Value) -> Result<(), String>
     crate::store::update_app_config(updates).map_err(|e| e.to_string())
 }
 
+/// 获取系统 locale（BCP-47 标签，如 "zh-CN"、"en-US"）
+///
+/// 通过 `sys-locale` crate 调用平台原生 API（Windows GetUserDefaultLocaleName /
+/// macOS NSLocale currentLocale / POSIX setlocale），比前端的 `navigator.language`
+/// 在 Windows WebView2 中更可靠。
+#[tauri::command]
+pub async fn get_system_locale() -> Result<String, String> {
+    let locale = sys_locale::get_locale().unwrap_or_else(|| "en".to_string());
+    Ok(locale)
+}
+
 /// 获取默认 Claude 选项
 #[tauri::command]
 pub async fn get_default_claude_options() -> Result<crate::store::DefaultClaudeOptions, String> {

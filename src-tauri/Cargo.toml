@@ -1,6 +1,6 @@
 [package]
 name = "cc-box"
-version = "0.13.4"
+version = "0.13.5"
 description = "Claude Code Desktop GUI (Tauri) - Multi-terminal manager for Claude Code power users"
 authors = ["orczh <orczh_hj@163.com>"]
 license = "MIT"
@@ -33,6 +33,7 @@ chrono = "0.4"
 encoding_rs = "0.8"
 futures-util = "0.3"
 once_cell = "1"
+sys-locale = "0.3"
 axum = "0.7"
 tower = "0.5"
 rusqlite = { version = "0.31", features = ["bundled"], optional = true }
