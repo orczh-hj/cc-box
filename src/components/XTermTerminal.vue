@@ -24,6 +24,7 @@ import { useAppStore } from '@/stores/app'
 import { useSessionStore } from '@/stores/session'
 import { useHookStore } from '@/stores/hook'
 import { isMac } from '@/utils/platform'
+import { isUndoShortcut, READLINE_UNDO } from '@/utils/keyboard'
 import {
   ptySpawn,
   ptyInput,
@@ -355,6 +356,17 @@ function createTerminal(tabId: string): Terminal {
       const instance = terminalInstances.get(tabId)
       if (instance) {
         ptyInput(instance.ptyId, '\\\r')
+      }
+      return false
+    }
+
+    // Undo: macOS Cmd+Z / Win+Linux Ctrl+Z → 注入 readline 原生 undo（Ctrl+_ = 0x1F）
+    // 必须拦截原始字节：Win/Linux 上 \x1a 会触发 SIGTSTP 暂停 Claude 进程
+    if (isUndoShortcut(event)) {
+      event.preventDefault()
+      const instance = terminalInstances.get(tabId)
+      if (instance) {
+        ptyInput(instance.ptyId, READLINE_UNDO)
       }
       return false
     }

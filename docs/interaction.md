@@ -89,6 +89,7 @@ function isTerminalVisible(): boolean {
 | Alt+T | 扩展思考 | xterm.js → PTY → Claude CLI |
 | Ctrl+A/E | 行首/行尾 | xterm.js → PTY → Claude CLI |
 | Ctrl+K/U | 删除到行尾/行首 | xterm.js → PTY → Claude CLI |
+| Cmd+Z (macOS) / Ctrl+Z (Win/Linux) | Undo（readline 原生） | xterm.js 拦截 → 注入 `\x1f` → PTY → Claude CLI |
 
 ### Ctrl+W 处理
 
@@ -107,6 +108,30 @@ term.attachCustomKeyEventHandler((event: KeyboardEvent) => {
   return true
 })
 ```
+
+### Undo 处理（Cmd+Z / Ctrl+Z）
+
+Claude CLI 原生只把 `Ctrl+_`（即 `Ctrl+Shift+-`）绑给 readline undo，对用户不直观；而 `Ctrl+Z` 在 Unix 上是 SIGTSTP 挂起进程、`Cmd+Z` 在 macOS 终端里到不了 CLI——都没用作 undo。CC-Box 在 `attachCustomKeyEventHandler` 里拦截并改写：
+
+| 平台 | 用户按 | 实际注入 PTY | 效果 |
+|------|--------|-------------|------|
+| macOS | `Cmd+Z` | `\x1f`（Ctrl+_） | readline undo |
+| Windows / Linux | `Ctrl+Z` | `\x1f`（Ctrl+_） | readline undo |
+
+**关键点**：必须 `return false` 阻止 xterm 默认行为，否则 Win/Linux 上 `\x1a` 会进入 PTY 触发 SIGTSTP 暂停 Claude 进程。GUI 层 Suspend 无意义（用户没有 shell 可以 `fg` 回来），屏蔽它换 undo 是净收益。
+
+`Shift` 修饰（`Cmd+Shift+Z` / `Ctrl+Shift+Z`）当前**不命中**——预留给未来 redo。readline 本身没有 redo 接口，未来若要支持需要 CC-Box 自己维护 onData 输入镜像，复杂度高，暂不实现。
+
+```typescript
+// src/components/XTermTerminal.vue
+if (isUndoShortcut(event)) {
+  event.preventDefault()
+  ptyInput(instance.ptyId, READLINE_UNDO)  // '\x1f'
+  return false
+}
+```
+
+判断逻辑抽到 `src/utils/keyboard.ts` 的 `isUndoShortcut(event, isMac)`，平台感知 + 单测覆盖。
 
 ## 视图切换
 

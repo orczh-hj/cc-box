@@ -1134,3 +1134,71 @@
 - 步骤 3：`env.ANTHROPIC_BASE_URL` 已切换为 Provider B 的值
 - A 独有的 env 子键（如有）保留，不被整体清空
 
+## Undo 快捷键映射
+
+### Undo_Shortcut_BasicUndo_001 — 输入过程中触发 undo 擦除字符
+
+**目标**：验证 macOS `Cmd+Z` / Windows `Ctrl+Z` 在 Claude CLI 输入框中触发 readline 原生 undo（逐字回退）
+
+**前置条件**：已打开项目并启动 Claude CLI 会话，焦点在终端
+
+**操作步骤**：
+1. 在 Claude CLI 输入框敲入 `hello world`（不要按 Enter）
+2. 按 `Cmd+Z`（macOS）或 `Ctrl+Z`（Windows）
+3. 再按一次 `Cmd+Z` / `Ctrl+Z`
+
+**预期结果**：
+- 步骤 2：输入框文字按 readline undo 规则回退（通常一次 undo 删除一个"原子输入"，连续敲入的字符可能整段或逐字回退，取决于 readline 行为）
+- 步骤 3：进一步回退（多次 undo 累积）
+- 全程 Claude CLI 进程**未暂停**（窗口仍能正常交互、Tab 仍可切换、Esc 仍能中断）
+
+### Undo_Shortcut_NoSuspend_001 — Ctrl+Z 不触发 SIGTSTP 暂停进程
+
+**目标**：验证 Win/Linux 上拦截 `Ctrl+Z` 后，不再向 PTY 注入 `\x1a`，Claude 进程不会被挂起
+
+**前置条件**：Windows 或 Linux 系统，已打开项目并启动 Claude CLI 会话
+
+**操作步骤**：
+1. 在输入框敲入若干字符
+2. 按 `Ctrl+Z`
+3. 紧接着按若干普通字符（如 `abc`）
+4. 按 `Enter` 提交
+
+**预期结果**：
+- 步骤 2 后：Claude 进程仍在前台运行（Hook 状态行不变成 suspended，输入框仍可继续输入）
+- 步骤 3：字符正常显示在输入框
+- 步骤 4：消息正常发送，Claude 正常响应
+- 反证：未做本次修复前，步骤 2 会让进程挂起、步骤 3 字符不显示、步骤 4 无响应
+
+### Undo_Shortcut_ShiftVariant_NotTrigger_001 — Cmd/Ctrl+Shift+Z 不触发 undo
+
+**目标**：验证 Shift 修饰组合不命中 undo（预留给未来 redo）
+
+**前置条件**：已打开项目并启动 Claude CLI 会话
+
+**操作步骤**：
+1. 在输入框敲入 `hello`
+2. 按 `Cmd+Shift+Z`（macOS）或 `Ctrl+Shift+Z`（Windows）
+3. 观察输入框
+
+**预期结果**：
+- 输入框内容不被 undo
+- `hello` 保持原样（或被 Claude CLI 自己的 `Ctrl+Shift+Z` 行为处理，但不应该是 undo）
+
+### Undo_Shortcut_MultiTabIsolation_001 — 多 Tab 各自独立 undo
+
+**目标**：验证 undo 在多 Tab 间互不干扰
+
+**前置条件**：打开两个 Tab，都启动 Claude CLI
+
+**操作步骤**：
+1. Tab A 输入框敲 `aaa`
+2. 切换到 Tab B，输入框敲 `bbb`
+3. 在 Tab B 按 `Cmd+Z` / `Ctrl+Z`
+4. 切回 Tab A，观察 A 的输入框
+
+**预期结果**：
+- 步骤 3：Tab B 输入框触发 undo（擦除 `bbb`）
+- 步骤 4：Tab A 输入框仍保留 `aaa`（未受 B 的 undo 影响）
+
+
