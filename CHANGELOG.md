@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.13.6] - 2026-08-12
+
+### Features
+- Map Cmd+Z (macOS) / Ctrl+Z (Windows/Linux) to readline native undo (Ctrl+_) so users can undo input with familiar shortcuts. The original Ctrl+Z SIGTSTP suspension on Windows/Linux is intercepted to prevent accidentally pausing the Claude process.
+
 ## [0.13.5] - 2026-07-23
 
 ### Fixed
