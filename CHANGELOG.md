@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.13.7] - 2026-08-28
+
+### Fixed
+- Fix terminal garbled text (WebGL glyph atlas corruption) by upgrading xterm.js to 6.1.0-beta.303 with the upstream atlas fix
+- Remove the black bar at the terminal bottom edge
+- Hide the vertical scrollbar since scrolling is handled by Claude CLI
+
 ## [0.13.6] - 2026-08-12
 
 ### Features

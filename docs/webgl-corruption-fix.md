@@ -1,8 +1,8 @@
 # WebGL Renderer Atlas Corruption 修复方案
 
-> **状态**:已选定方案,待实施
+> **状态**:已升级到包含上游修复的版本(v0.13.7 起),切 Tab reload 保留为兜底
 > **复现项目**:`../xterm-webgl-repro/`(sibling 仓库,可一键复现)
-> **上游跟踪**:[xtermjs/xterm.js#6038](https://github.com/xtermjs/xterm.js/issues/6038) · [PR #6033](https://github.com/xtermjs/xterm.js/pull/6033) · [microsoft/vscode#322756](https://github.com/microsoft/vscode/issues/322756)
+> **上游跟踪**:[xtermjs/xterm.js#6038](https://github.com/xtermjs/xterm.js/issues/6038)(已关闭) · [PR #6042](https://github.com/xtermjs/xterm.js/pull/6042)(已合并) · [PR #6043](https://github.com/xtermjs/xterm.js/pull/6043)(已合并) · [microsoft/vscode#322756](https://github.com/microsoft/vscode/issues/322756)
 
 ---
 
@@ -51,9 +51,13 @@ xtermjs/xterm.js#6038 描述的 bug:
 ### 上游修复进度
 
 - **2026-07-04** issue #6038 由 VS Code 团队(anthonykim1)提交,关联 microsoft/vscode#322756
-- PR #6033 是 draft,作者标注「Not ready, wanting to split into 2+ PRs」
-- 修复方案是架构级的(per-renderer page invalidation + atlas page growth cap)
-- 0.20.0-beta.290 仍未包含修复(2026-07 验证)
+- **2026-07-13** [PR #6042](https://github.com/xtermjs/xterm.js/pull/6042) 合并:修复共享 atlas 页合并后 renderer 状态过期(乱码根因)
+- **2026-07-15** [PR #6043](https://github.com/xtermjs/xterm.js/pull/6043) 合并:修复 atlas 页数超纹理容量导致渲染循环崩溃
+- 修复落在 6.1.0-beta 线(xterm stable 6.0.0 发布于 2025-12,早于修复,无 backport)
+- 其他终端项目已跟进验证(bump addon-webgl 到 0.20.0-beta.297+ 的 atlas page eviction)
+- **2026-08-28** cc-box 升级到 `@xterm/xterm@6.1.0-beta.303` + `@xterm/addon-webgl@0.20.0-beta.299`
+
+> 早期记录「0.20.0-beta.290 仍乱码(2026-07 验证)」发生在修复合并之前,结论已失效。
 
 ---
 
@@ -210,17 +214,18 @@ watch(() => sessionStore.activeTabId, async (newTabId, oldTabId) => {
 
 ### Step 4 · 更新注释
 
-把 `XTermTerminal.vue:206-217` 的注释更新为:
+`XTermTerminal.vue` 中 `loadRendererAddons` 上方的注释(2026-08-28 随上游修复升级更新):
 
 ```ts
 // 在 term.open(el) 之后加载 Unicode 11 + WebGL addon
 //
-// @xterm/addon-webgl@0.19.0 / 0.20.0-beta 在长会话 + 多 Tab 共享 atlas 下会出现
-// glyph atlas corruption(xtermjs/xterm.js#6038),上游尚未修复。
+// glyph atlas corruption(xtermjs/xterm.js#6038)已由上游修复:
+// PR #6042(共享 atlas 页合并后 renderer 状态过期)+ PR #6043(atlas 页数超容量),
+// 包含在 @xterm/xterm@6.1.0-beta.303 / @xterm/addon-webgl@0.20.0-beta.299。
 //
-// 本项目的应对:每次切到 Tab 时主动 reload 该 Tab 的 WebGL addon。
-// reload 是唯一能消除已发生 corruption 的方式;放在「Tab 切入」时机执行,
-// 切换动画遮盖了 reload 的几十毫秒重建,用户无感。
+// 每次切到 Tab 时主动 reload 该 Tab 的 WebGL addon(见 reloadWebgl)——保留作兜底:
+// beta 线仍可能出现回归,reload 是唯一能消除已发生 corruption 的方式;
+// 放在「Tab 切入」时机执行,切换动画遮盖了 reload 的几十毫秒重建,用户无感。
 //
 // 详见 docs/webgl-corruption-fix.md
 ```
@@ -256,13 +261,19 @@ watch(() => sessionStore.activeTabId, async (newTabId, oldTabId) => {
 
 ## 7. 上游跟踪
 
-修复落地后,继续关注上游:
+上游已修复(见第 2 节),cc-box 已升级。后续关注:
 
 | 信号 | 行动 |
 |---|---|
-| PR #6033 合并到 master | 测试 beta 版本是否解决问题 |
-| `@xterm/addon-webgl@0.20.0` stable 发布 | cc-box 升级,但**保留切 Tab reload 方案**作为兜底 |
-| `@xterm/addon-webgl@0.21.0`+ 发布 + 稳定 6 个月以上 | 考虑移除切 Tab reload 方案,纯依赖上游 |
+| `@xterm/xterm@6.1.0` stable 发布 | 从 beta 切换到 stable(`package.json` 中 beta 为精确版本号) |
+| `@xterm/addon-webgl@0.20.0` stable 发布 + 稳定 6 个月以上 | 考虑移除切 Tab reload 兜底,纯依赖上游 |
+| beta 线出现新回归 | 回退到已验证版本号即可(beta 均为精确锁定) |
+
+### 升级时适配的 breaking changes(xterm 5 → 6)
+
+- **viewport/滚动条重做**:不再使用 `.xterm-viewport` 原生 webkit 滚动条,改为 VS Code 风格 overlay 自绘滚动条。cc-box 中滚动由 Claude CLI 内部实现,已通过 `scrollbar: { showScrollbar: false }` 隐藏(滚轮滚动 scrollback 不受影响);viewport 的 `#000` 兜底背景以 `--term-bg` CSS 变量覆盖为主题终端背景色,消除底部缝隙黑条
+- **alt→ctrl+方向键 hack 移除**(xtermjs/xterm.js#5346):alt+方向键不再默认映射为 ctrl+方向键(按词跳转),需嵌入方自行处理。macOS 上项目用 `macOptionIsMeta: true`,行为以手动测试为准
+- ESM 化、overviewRuler 结构变化:项目未受影响(构建与类型检查通过)
 
 ---
 

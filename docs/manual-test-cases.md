@@ -1201,4 +1201,84 @@
 - 步骤 3：Tab B 输入框触发 undo（擦除 `bbb`）
 - 步骤 4：Tab A 输入框仍保留 `aaa`（未受 B 的 undo 影响）
 
+## 终端渲染（xterm 6 升级）
+
+> 背景：升级 `@xterm/xterm@6.1.0-beta.303` + `@xterm/addon-webgl@0.20.0-beta.299`，根治 WebGL glyph atlas corruption（[docs/webgl-corruption-fix.md](webgl-corruption-fix.md)），同时适配 xterm 6 滚动条重做与快捷键变化。
+
+### TerminalRender_LongCjkSession_001 — 长中文会话无乱码
+
+**目标**：验证上游 atlas corruption 修复在真实使用场景下生效
+
+**前置条件**：已打开项目并启动 Claude CLI 会话
+
+**操作步骤**：
+1. 用中文与 Claude 对话 10 分钟以上（输出包含中文、emoji、代码块混合内容）
+2. 滚动查看历史输出（触发 scrollback 重绘）
+3. 期间不切换 Tab
+
+**预期结果**：
+- 全程无方块（□）、替换字符（�）、字符错位、字形张冠李戴
+- 滚动回看历史内容渲染正确
+
+### TerminalRender_MultiTabSwitch_001 — 多 Tab 长时间切换无乱码
+
+**目标**：验证多 Tab 共享 atlas 场景（corruption 原始触发条件）下修复生效
+
+**前置条件**：3 个 Tab 各自启动 Claude CLI 会话
+
+**操作步骤**：
+1. 3 个 Tab 分别进行中文对话（各产出 200+ 行含 CJK/emoji 的输出）
+2. 来回切换 Tab 持续 10 分钟
+3. 观察每次切入的 Tab
+
+**预期结果**：
+- 每次切到的 Tab 显示内容正确，无乱码
+- 切换瞬间无可见闪烁异常（切 Tab reload 兜底仍会执行，视觉上应无感知）
+
+### TerminalRender_Scrollbar_001 — 滚动条隐藏且滚轮滚动正常
+
+**目标**：验证 xterm 6 自绘滚动条已隐藏（滚动由 Claude CLI 内部实现），且滚轮回看 scrollback 不受影响
+
+**前置条件**：已打开项目并启动 Claude CLI 会话，终端有足够多的输出
+
+**操作步骤**：
+1. 观察终端右侧边缘
+2. 鼠标悬停在终端右侧、滚动输出（触发滚动条显示条件）
+3. 用鼠标滚轮向上滚动查看历史输出，再向下滚回底部
+
+**预期结果**：
+- 全程右侧无滚动条（无滑块、无轨道）
+- 滚轮滚动 scrollback 正常，历史输出可回看、可滚回
+- Claude CLI 内部滚轮行为（如 TUI 内列表滚动）正常
+
+### TerminalRender_ViewportGap_001 — 底部无缝隙黑条
+
+**目标**：验证 viewport 黑色兜底背景已被主题色覆盖（容器高度与行高不整除时不再露黑）
+
+**前置条件**：已打开项目并启动 Claude CLI 会话
+
+**操作步骤**：
+1. 暗色主题下调整窗口高度（连续小幅 resize，制造行高不整除的容器高度）
+2. 观察终端底部边缘
+3. 切换到浅色主题，重复 resize 观察
+
+**预期结果**：
+- 终端底部与容器边缘之间无黑色长条
+- 露出的缝隙（如存在）与终端背景色一致，肉眼无色差
+
+### TerminalRender_AltArrow_001 — Alt+方向键行为
+
+**目标**：验证 xterm 6 移除 alt→ctrl+方向键默认映射（#5346）后输入行为正常
+
+**前置条件**：已启动 Claude CLI 会话，焦点在终端
+
+**操作步骤**：
+1. 在输入框敲入多个英文单词
+2. 按 `Alt+←` / `Alt+→`
+3. 按 `Ctrl+←` / `Ctrl+→` 对比
+
+**预期结果**：
+- `Ctrl+←/→` 按词跳转正常（CLI 自身行为）
+- `Alt+←/→` 行为与升级前一致（如 CLI 无绑定则无反应），不出现异常字符注入
+
 

@@ -392,7 +392,7 @@ dependencies = [
 
 [[package]]
 name = "cc-box"
-version = "0.13.5"
+version = "0.13.6"
 dependencies = [
  "anyhow",
  "arc-swap",

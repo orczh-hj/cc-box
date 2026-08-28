@@ -8,13 +8,17 @@
 
 | 包名 | 版本 | 用途 |
 |------|------|------|
-| @xterm/xterm | ^5.5.0 | 终端 UI 渲染 |
-| @xterm/addon-fit | ^0.11.0 | 自动适应容器大小 |
-| @xterm/addon-search | ^0.16.0 | 终端内搜索 |
-| @xterm/addon-web-links | ^0.12.0 | 链接点击 |
-| @xterm/addon-serialize | ^0.14.0 | 会话序列化 |
+| @xterm/xterm | 6.1.0-beta.303 | 终端 UI 渲染 |
+| @xterm/addon-fit | 0.12.0-beta.300 | 自动适应容器大小 |
+| @xterm/addon-webgl | 0.20.0-beta.299 | WebGL 渲染器（含 atlas corruption 修复） |
+| @xterm/addon-unicode11 | 0.10.0-beta.300 | Unicode 11 宽度支持（CJK/emoji） |
+| @xterm/addon-search | 0.17.0-beta.300 | 终端内搜索 |
+| @xterm/addon-web-links | 0.13.0-beta.300 | 链接点击 |
+| @xterm/addon-serialize | 0.15.0-beta.300 | 会话序列化 |
 | portable-pty | ^0.8 | 伪终端进程管理（Rust） |
 | tauri | ^2 | 应用框架 |
+
+> xterm 6.1.0-beta 线包含 WebGL glyph atlas corruption 上游修复（见 [webgl-corruption-fix.md](webgl-corruption-fix.md)）；beta 依赖使用精确版本号锁定。
 
 ## Rust 后端 PTY 模块 (src-tauri/src/pty.rs)
 

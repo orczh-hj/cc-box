@@ -1,5 +1,5 @@
 <template>
-  <div ref="containerRef" class="xterm-container" :class="{ 'drag-over': isDragOver }">
+  <div ref="containerRef" class="xterm-container" :class="{ 'drag-over': isDragOver }" :style="termBgStyle">
     <!-- 动态渲染每个 Tab 的终端容器 -->
     <div
       v-for="[tabId] in terminalInstances"
@@ -13,7 +13,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, watch, onMounted, onUnmounted, nextTick, type ComponentPublicInstance } from 'vue'
+import { ref, reactive, computed, watch, onMounted, onUnmounted, nextTick, type ComponentPublicInstance } from 'vue'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { WebglAddon } from '@xterm/addon-webgl'
@@ -169,6 +169,12 @@ const darkTheme = {
   brightWhite: '#f8f6f3'
 }
 
+// 终端背景色注入为 CSS 变量：xterm.css 给 .xterm-viewport 兜底 #000，
+// 容器高度与行高不整除时底部露出的黑条由此而来；覆盖为主题背景色后缝隙不可见
+const termBgStyle = computed(() => ({
+  '--term-bg': appStore.theme === 'dark' ? darkTheme.background : lightTheme.background
+}))
+
 // 设置 Terminal DOM 元素引用
 function setTerminalEl(tabId: string, el: HTMLElement | null) {
   if (el) {
@@ -205,12 +211,13 @@ function pickFontFamily(): string {
 
 // 在 term.open(el) 之后加载 Unicode 11 + WebGL addon
 //
-// @xterm/addon-webgl@0.19.0 / 0.20.0-beta 在长会话 + 多 Tab 共享 atlas 下会出现
-// glyph atlas corruption(xtermjs/xterm.js#6038),上游尚未修复。
+// glyph atlas corruption(xtermjs/xterm.js#6038)已由上游修复:
+// PR #6042(共享 atlas 页合并后 renderer 状态过期)+ PR #6043(atlas 页数超容量),
+// 包含在 @xterm/xterm@6.1.0-beta.303 / @xterm/addon-webgl@0.20.0-beta.299。
 //
-// 本项目的应对:每次切到 Tab 时主动 reload 该 Tab 的 WebGL addon(见 reloadWebgl)。
-// reload 是唯一能消除已发生 corruption 的方式;放在「Tab 切入」时机执行,
-// 切换动画遮盖了 reload 的几十毫秒重建,用户无感。
+// 每次切到 Tab 时主动 reload 该 Tab 的 WebGL addon(见 reloadWebgl)——保留作兜底:
+// beta 线仍可能出现回归,reload 是唯一能消除已发生 corruption 的方式;
+// 放在「Tab 切入」时机执行,切换动画遮盖 reload 的几十毫秒重建,用户无感。
 //
 // 详见 docs/webgl-corruption-fix.md
 function loadRendererAddons(term: Terminal) {
@@ -278,6 +285,9 @@ function createTerminal(tabId: string): Terminal {
     allowProposedApi: true,
     macOptionIsMeta: true,
     scrollback: 10000,
+    // 隐藏 xterm 6 自绘滚动条：cc-box 中滚动由 Claude CLI 内部实现，
+    // 鼠标滚轮滚动 scrollback 不受影响（滚动条仅视觉隐藏）
+    scrollbar: { showScrollbar: false },
   })
 
   const fitAddon = new FitAddon()
@@ -832,20 +842,11 @@ defineExpose({
   height: 100%;
 }
 
+/* xterm 6 自绘滚动条已通过 scrollbar: { showScrollbar: false } 隐藏（滚动由 Claude CLI 内部实现） */
+
+/* 覆盖 xterm.css 的 .xterm:not(.allow-transparency) .xterm-viewport { background-color: #000 }：
+   行高不整除的底部缝隙会露出该背景，改用主题终端背景色（--term-bg 由根元素注入） */
 .terminal-wrapper :deep(.xterm-viewport) {
-  border-radius: 4px;
-}
-
-.terminal-wrapper :deep(.xterm-viewport::-webkit-scrollbar) {
-  width: 8px;
-}
-
-.terminal-wrapper :deep(.xterm-viewport::-webkit-scrollbar-thumb) {
-  background: var(--border-dark);
-  border-radius: 4px;
-}
-
-.terminal-wrapper :deep(.xterm-viewport::-webkit-scrollbar-track) {
-  background: transparent;
+  background-color: var(--term-bg, transparent) !important;
 }
 </style>
