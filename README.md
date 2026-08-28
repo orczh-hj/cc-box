@@ -55,6 +55,10 @@ Open as many Claude Code sessions as you need — each runs independently in its
 
 Set per-project startup options like `--resume`, `--model`, or custom flags. Launch sessions with your preferred configuration without typing the same arguments every time.
 
+### Provider Management
+
+Switch between API providers with one click. 50+ built-in presets for popular vendors, import existing configs from [cc-switch](https://github.com/farion1231/cc-switch), and keep shared settings in a common config applied to every provider. Activation merges safely into Claude Code's `settings.json` — unrelated fields are never touched.
+
 ### Sidebar Panels
 
 A side drawer with contextual panels — no overlay, no focus stealing:
@@ -148,7 +152,7 @@ Output goes to `src-tauri/target/release/bundle/`.
 <details>
 <summary><strong>Does this modify my Claude Code config?</strong></summary>
 
-No. The app only reads native Claude Code files. All GUI-specific settings are stored separately in `~/.cc-box/`. You can go back to the CLI at any time.
+The app only **reads** native Claude Code files, with one exception: activating a provider merges its environment config into `settings.json` (unrelated fields are never touched, and GUI state fields are stripped). All GUI-specific settings are stored separately in `~/.cc-box/`. You can go back to the CLI at any time.
 </details>
 
 <details>

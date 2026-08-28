@@ -55,6 +55,10 @@ CC-Box 本质上是 **Claude Code 的桌面应用**。它保留了原生终端�
 
 为每个项目设置启动选项，如 `--resume`、`--model` 或自定义参数。无需每次输入相同参数，一键以预设配置启动会话。
 
+### Provider 管理
+
+一键切换 API Provider。内置 50+ 厂商预设模板，支持从 [cc-switch](https://github.com/farion1231/cc-switch) 导入现有配置；通用配置跨 Provider 共享，激活时以合并方式写入 Claude Code 的 `settings.json`，不覆盖无关字段。
+
 ### 侧边栏面板
 
 非遮罩式侧边栏，不会抢占焦点：
@@ -148,7 +152,7 @@ npm run build:linux   # Linux (x86_64)
 <details>
 <summary><strong>会修改我的 Claude Code 配置吗？</strong></summary>
 
-不会。应用只读取 Claude Code 原生文件。所有 GUI 设置独立保存在 `~/.cc-box/` 中。你可以随时回到纯 CLI 使用。
+应用对 Claude Code 原生文件**只读**，仅有一个例外：激活 Provider 时会以合并方式将其环境配置写入 `settings.json`（不触碰无关字段，且剥离 GUI 状态字段）。所有 GUI 设置独立保存在 `~/.cc-box/` 中。你可以随时回到纯 CLI 使用。
 </details>
 
 <details>
