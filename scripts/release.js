@@ -298,62 +298,7 @@ function publishRelease(version, releaseNotes) {
 // ============================================
 // Gitee Release
 // ============================================
-
-function publishGiteeRelease(version, releaseNotes) {
-  logStep('发布 Gitee Release...')
-
-  // 获取 Gitee token
-  let giteeToken = process.env.GITEE_TOKEN
-  if (!giteeToken) {
-    try {
-      giteeToken = execSync('git config --local gitee.token', { encoding: 'utf-8', stdio: 'pipe' }).trim()
-    } catch {}
-  }
-
-  if (!giteeToken) {
-    logError('未找到 Gitee token，跳过 Gitee Release')
-    logInfo('请设置: git config --local gitee.token <your-token>')
-    return
-  }
-
-  const https = require('https')
-  const tagName = `v${version}`
-  const body = JSON.stringify({
-    access_token: giteeToken,
-    tag_name: tagName,
-    name: tagName,
-    target_commitish: 'main',
-    body: releaseNotes
-  })
-
-  const options = {
-    hostname: 'gitee.com',
-    path: '/api/v5/repos/orczh/cc-box/releases',
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' }
-  }
-
-  const req = https.request(options, res => {
-    let data = ''
-    res.on('data', chunk => data += chunk)
-    res.on('end', () => {
-      if (res.statusCode >= 200 && res.statusCode < 300) {
-        logSuccess(`Gitee Release ${tagName} 已发布！`)
-        logInfo(`查看: https://gitee.com/orczh/cc-box/releases/${tagName}`)
-      } else {
-        logError(`Gitee Release 发布失败: HTTP ${res.statusCode}`)
-        logInfo('请手动发布: https://gitee.com/orczh/cc-box/releases')
-      }
-    })
-  })
-
-  req.on('error', e => {
-    logError(`Gitee Release 发布失败: ${e.message}`)
-  })
-
-  req.write(body)
-  req.end()
-}
+// 2026-08 起不再发布 Gitee Release（GitHub Actions 仍会同步代码仓库到 Gitee）。
 
 // ============================================
 // OSS 上传
@@ -372,6 +317,8 @@ function loadOssConfig() {
   return config
 }
 
+// 下载 GitHub Release 产物。失败返回 null（调用方决定跳过 OSS 还是终止），
+// 不再让 execWithProxyRetry 杀掉整个进程——产物下载失败不应中断 Gitee Release 等后续步骤。
 function downloadGitHubRelease(version) {
   logStep('下载 GitHub Release 产物...')
 
@@ -391,8 +338,16 @@ function downloadGitHubRelease(version) {
   fs.mkdirSync(versionDir, { recursive: true })
 
   // 下载所有产物：安装包 + 签名文件 + macOS 双产物 (.app.tar.gz + .dmg)
-  execWithProxyRetry(`gh release download ${version} --dir "${versionDir}" --pattern "*.exe" --pattern "*.exe.sig" --pattern "*.app.tar.gz" --pattern "*.app.tar.gz.sig" --pattern "*.dmg" --pattern "*.AppImage" --pattern "*.AppImage.sig" --clobber`)
-  logSuccess(`产物下载完成: ${versionDir}`)
+  // allowFail：代理与直连都失败时返回 null 而非 process.exit
+  execWithProxyRetry(`gh release download ${version} --dir "${versionDir}" --pattern "*.exe" --pattern "*.exe.sig" --pattern "*.app.tar.gz" --pattern "*.app.tar.gz.sig" --pattern "*.dmg" --pattern "*.AppImage" --pattern "*.AppImage.sig" --clobber`, { allowFail: true })
+
+  const files = fs.readdirSync(versionDir)
+  if (files.length === 0) {
+    logError('产物下载失败（代理与直连均不可用）')
+    logInfo(`稍后可补传: npm run release -- --oss-only ${version}`)
+    return null
+  }
+  logSuccess(`产物下载完成: ${versionDir}（${files.length} 个文件）`)
 
   return { versionDir }
 }
@@ -540,7 +495,12 @@ function uploadToOSS(version, versionDir, releaseNotes) {
 // ============================================
 
 function ossUploadOnly(version) {
-  const { versionDir } = downloadGitHubRelease(version)
+  const result = downloadGitHubRelease(version)
+  if (!result) {
+    logError('产物下载失败，无法上传 OSS。请检查网络/代理后重试')
+    process.exit(1)
+  }
+  const { versionDir } = result
 
   // 从 GitHub API 获取 release notes（需要代理）
   const releaseNotes = execWithProxyRetry(`gh release view ${version} --json body --jq .body`, { silent: true, encoding: 'utf-8' }).trim()
@@ -662,8 +622,7 @@ async function main() {
   console.log(`  4. 创建并推送标签 v${newVersion}`)
   if (!args.skipCI) console.log('  5. 监控 CI 构建')
   console.log('  6. 发布 GitHub Release')
-  console.log('  7. 发布 Gitee Release')
-  console.log('  8. 上传到阿里云 OSS（国内更新渠道）')
+  console.log('  7. 上传到阿里云 OSS（国内更新渠道）')
 
   console.log('\nRelease Notes 预览：')
   console.log(args.releaseNotes)
@@ -690,11 +649,14 @@ async function main() {
   }
 
   publishRelease(newVersion, args.releaseNotes)
-  publishGiteeRelease(newVersion, args.releaseNotes)
 
-  // 下载并上传到 OSS
-  const { versionDir } = downloadGitHubRelease(`v${newVersion}`)
-  uploadToOSS(`v${newVersion}`, versionDir, args.releaseNotes)
+  // 下载并上传到 OSS（下载失败不中断：GitHub Release 已完成，OSS 可稍后补传）
+  let ossOk = false
+  const downloaded = downloadGitHubRelease(`v${newVersion}`)
+  if (downloaded) {
+    uploadToOSS(`v${newVersion}`, downloaded.versionDir, args.releaseNotes)
+    ossOk = true
+  }
 
   // 清理代理配置
   clearAllProxyConfig()
@@ -702,6 +664,11 @@ async function main() {
   console.log(`\n\x1b[32m======================================`)
   console.log(`     发布完成！v${newVersion}`)
   console.log('======================================\x1b[0m')
+
+  if (!ossOk) {
+    console.log('\n\x1b[33m⚠ OSS 未上传，发布不完整：\x1b[0m')
+    console.log(`  补传命令: npm run release -- --oss-only v${newVersion}`)
+  }
 }
 
 // 只在直接运行时执行主流程（被 require 时不执行）

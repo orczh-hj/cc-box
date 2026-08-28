@@ -157,7 +157,7 @@ npm run tauri:build        # 生产构建
 
 **推送时注意**：推送到 GitHub 需先设置代理，推送到 Gitee 无需代理。
 
-- **Gitee API Token**：已存储在 `git config --local gitee.token`，用于通过 API 创建 Gitee Release
+**注意**：2026-08 起发布流程不再创建 Gitee Release（代码仓库同步保留）；如需恢复，token 仍在 `git config --local gitee.token`。
 
 ### 版本发布（全自动）
 
