@@ -20,6 +20,18 @@ use tauri::{AppHandle, Emitter};
 /// OSS 配置
 const OSS_BASE_URL: &str = "https://cc-box.oss-cn-beijing.aliyuncs.com";
 
+/// 构建直连 OSS 的 HTTP 客户端。
+///
+/// OSS 为国内资源，必须绕过所有代理（系统代理 + 环境变量）：
+/// reqwest 默认读系统代理，当 Clash Verge 等代理工具退出后系统代理设置
+/// 残留指向已死端口时，请求会以「unexpected EOF during handshake」失败。
+fn oss_client(timeout: std::time::Duration) -> reqwest::Result<reqwest::blocking::Client> {
+    reqwest::blocking::Client::builder()
+        .timeout(timeout)
+        .no_proxy()
+        .build()
+}
+
 /// 正在进行的 Claude 历史版本下载：version → 取消标志
 ///
 /// key 为 Claude CLI version（如 "2.1.177"），用于精确取消某次下载。
@@ -135,9 +147,7 @@ fn download_file(
     emit_progress(app, item, "downloading", 0, "开始下载...");
 
     // 显式超时，避免网络挂起时前端 invoke 永久 pending
-    let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(600))
-        .build()
+    let client = oss_client(std::time::Duration::from_secs(600))
         .map_err(|e| {
             let msg = format!("构建 HTTP 客户端失败：{}", e);
             emit_progress(app, item, "error", 0, msg.as_str());
@@ -221,7 +231,11 @@ fn fetch_claude_latest() -> io::Result<ClaudeLatestInfo> {
     let url = format!("{}/deps/claude/latest.json", OSS_BASE_URL);
     log::info!("[Installer] Fetching Claude latest.json from {}", url);
 
-    let response = reqwest::blocking::get(&url)
+    let client = oss_client(std::time::Duration::from_secs(15))
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+    let response = client
+        .get(&url)
+        .send()
         .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
 
     if !response.status().is_success() {
@@ -406,7 +420,11 @@ fn fetch_git_latest() -> io::Result<GitLatestInfo> {
     let url = format!("{}/deps/git/latest.json", OSS_BASE_URL);
     log::info!("[Installer] Fetching Git latest.json from {}", url);
 
-    let response = reqwest::blocking::get(&url)
+    let client = oss_client(std::time::Duration::from_secs(15))
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+    let response = client
+        .get(&url)
+        .send()
         .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
 
     if !response.status().is_success() {
@@ -1062,9 +1080,7 @@ fn fetch_claude_versions() -> io::Result<ClaudeVersions> {
     log::info!("[Installer] Fetching Claude versions.json from {}", url);
 
     // 显式设置 15 秒超时，避免网络挂起导致前端 invoke 永久 pending
-    let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
-        .build()
+    let client = oss_client(std::time::Duration::from_secs(15))
         .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
 
     let response = client
@@ -1151,9 +1167,7 @@ pub async fn download_claude_version(
     // 拉取 versions.json
     let versions = tokio::task::spawn_blocking(|| {
         let url = format!("{}/deps/claude/versions.json", OSS_BASE_URL);
-        let client = reqwest::blocking::Client::builder()
-            .timeout(std::time::Duration::from_secs(15))
-            .build()
+        let client = oss_client(std::time::Duration::from_secs(15))
             .map_err(|e| format!("Failed to build HTTP client: {}", e))?;
         let resp = client
             .get(&url)

@@ -587,6 +587,23 @@
 - 版本号区域显示 `vX.Y.Z`（而非"未安装"）
 - 检查结果正确显示是否有更新可用
 
+### ClaudeCli_OssNoProxy_001 — 系统代理残留时 OSS 请求仍直连
+
+**目标**：验证代理工具退出后系统代理设置残留指向已死端口时，OSS 请求（版本列表/检查更新/下载）不受影响（installer.rs 的 oss_client 强制 no_proxy）
+
+**前置条件**：Windows 系统；开启 Clash Verge 等代理工具后将其退出（注册表 `ProxyServer` 残留 `127.0.0.1:33210`，`ProxyEnable` 可能为 1）；无法自动化（依赖真实系统代理状态）
+
+**操作步骤**：
+1. 代理工具退出后，启动 CC-Box（或用已运行的实例）
+2. 进入设置 > 更新页，点击 Claude CLI「检查更新」
+3. 打开历史版本列表（加载 versions.json）
+4. 任选一个历史版本下载
+
+**预期结果**：
+- 步骤 2/3 均成功，不出现「加载版本列表失败: ... unexpected EOF during handshake」
+- 步骤 4 下载进度正常推进并完成
+- 反证：修复前以上请求走系统代理（死端口）直接握手失败
+
 ### ClaudeCli_Startup_WinNpm_002 — Windows npm 安装的 claude 能在 CC-Box 终端启动
 
 **目标**：验证 npm 全局安装的 claude（`%APPDATA%\npm\claude.cmd`）通过 git bash 调用时能正确进入 Claude 提示符，而不会被 PATH/PATHEXT 影响

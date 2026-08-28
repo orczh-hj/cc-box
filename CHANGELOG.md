@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.13.8] - 2026-08-28
+
+### Fixed
+- Fix version list loading failure when a stale system proxy points to a dead port: all OSS requests now bypass proxies and connect directly
+
 ## [0.13.7] - 2026-08-28
 
 ### Fixed
