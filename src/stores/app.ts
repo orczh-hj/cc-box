@@ -249,7 +249,8 @@ export const useAppStore = defineStore('app', () => {
     claudeOptions.value = {
       resume: '',
       skipPermissions: defaultClaudeOptions.value.skipPermissions,
-      customArgs: defaultClaudeOptions.value.customArgs
+      // 自定义参数是用户的持续意图（如 --model sonnet），启动 session 后保留
+      customArgs: claudeOptions.value.customArgs
     }
   }
 

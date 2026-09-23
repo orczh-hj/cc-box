@@ -25,6 +25,7 @@ import { useSessionStore } from '@/stores/session'
 import { useHookStore } from '@/stores/hook'
 import { isMac } from '@/utils/platform'
 import { isUndoShortcut, READLINE_UNDO } from '@/utils/keyboard'
+import { syncImeTextareaPosition } from '@/utils/ime'
 import {
   ptySpawn,
   ptyInput,
@@ -314,6 +315,12 @@ function createTerminal(tabId: string): Terminal {
       ptyResize(instance.ptyId, cols, rows)
     }
   })
+
+  // 输入法候选框跟随光标：xterm 默认把 textarea 放在屏幕外（left: -9999em），
+  // 候选框会跟着跑到远离光标的位置；每次渲染/缩放后同步到光标像素位置
+  //（composition 期间冻结，避免 TUI 重绘把光标 park 到行尾时拉走候选框）
+  term.onRender(() => syncImeTextareaPosition(term))
+  term.onResize(() => syncImeTextareaPosition(term))
 
   // 复制粘贴处理
   term.attachCustomKeyEventHandler((event: KeyboardEvent) => {

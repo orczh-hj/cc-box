@@ -67,6 +67,34 @@ describe('getClaudeArgs', () => {
   })
 })
 
+describe('resetClaudeOptions', () => {
+  // 启动 session 后清空 resume、skipPermissions 恢复默认值
+  it('ResetOptions_ResumeAndSkipPerm_001', () => {
+    const store = useAppStore()
+    store.setClaudeOptions({ resume: 'sess1', skipPermissions: true })
+    store.resetClaudeOptions()
+    expect(store.claudeOptions.resume).toBe('')
+    expect(store.claudeOptions.skipPermissions).toBe(false)
+  })
+
+  // 启动 session 后保留用户在侧栏输入的自定义参数，不重置为默认值
+  it('ResetOptions_KeepCustomArgs_001', () => {
+    const store = useAppStore()
+    store.setDefaultClaudeOptions({ customArgs: '--model haiku' })
+    store.setClaudeOptions({ customArgs: '--model sonnet --verbose' })
+    store.resetClaudeOptions()
+    expect(store.claudeOptions.customArgs).toBe('--model sonnet --verbose')
+  })
+
+  // 未修改自定义参数时，重置后保持默认值
+  it('ResetOptions_CustomArgsDefault_001', () => {
+    const store = useAppStore()
+    store.setDefaultClaudeOptions({ customArgs: '--model haiku' })
+    store.resetClaudeOptions()
+    expect(store.claudeOptions.customArgs).toBe('--model haiku')
+  })
+})
+
 describe('setFontSize', () => {
   // 设置 size=5 时钳位到 10
   it('FontSize_MinClamp_001', () => {

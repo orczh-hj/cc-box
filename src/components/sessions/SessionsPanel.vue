@@ -160,7 +160,7 @@
 
         <div class="option-item text-option">
           <span class="option-label">{{ t('customArgs') }}</span>
-          <input type="text" v-model="appStore.claudeOptions.customArgs" placeholder="--model sonnet" />
+          <input type="text" v-model="appStore.claudeOptions.customArgs" :placeholder="t('customArgsPlaceholder')" />
         </div>
       </div>
     </footer>
