@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.13.9] - 2026-09-23
+
+### Fixed
+- IME candidate window now follows the terminal cursor and stays in place during composition
+- Keep custom args in the sidebar after starting a session
+- Use localized placeholder text for custom args inputs
+
 ## [0.13.8] - 2026-08-28
 
 ### Fixed
