@@ -318,7 +318,12 @@ function loadOssConfig() {
 }
 
 // 下载 GitHub Release 产物。失败返回 null（调用方决定跳过 OSS 还是终止），
-// 不再让 execWithProxyRetry 杀掉整个进程——产物下载失败不应中断 Gitee Release 等后续步骤。
+// 不再让 execWithProxyRetry 杀掉整个进程——产物下载失败不应中断 GitHub Release 等后续步骤。
+//
+// 完整性校验：本地文件大小必须与 GitHub 官方资产一致。
+// 历史教训（v0.13.7/v0.13.8）：脚本被杀时 gh release download 子进程仍在写文件，
+// 半截文件被当作完整产物上传 OSS，导致用户更新时「signature verification failed」。
+// 因此「目录非空」不再视为完整，必须逐文件比对官方大小。
 function downloadGitHubRelease(version) {
   logStep('下载 GitHub Release 产物...')
 
@@ -326,13 +331,27 @@ function downloadGitHubRelease(version) {
   const releasesDir = path.join(PROJECT_ROOT, 'releases')
   const versionDir = path.join(releasesDir, version)
 
-  // 如果已存在，直接返回（避免重复下载）
-  if (fs.existsSync(versionDir)) {
-    const files = fs.readdirSync(versionDir)
-    if (files.length > 0) {
-      logSuccess(`产物已存在: ${versionDir}`)
-      return { versionDir }
-    }
+  // 官方资产大小表（name -> size），获取失败时退化为仅检查文件存在
+  let expectedSizes = {}
+  try {
+    const json = execWithProxyRetry(`gh release view ${version} --json assets`, { silent: true, encoding: 'utf-8', allowFail: true })
+    if (json) for (const a of JSON.parse(json).assets) expectedSizes[a.name] = a.size
+  } catch { /* 保持空表，退化为存在性检查 */ }
+
+  const isComplete = () => {
+    if (!fs.existsSync(versionDir)) return false
+    const files = fs.readdirSync(versionDir).filter(f => expectedSizes[f] !== undefined)
+    if (files.length === 0) return false
+    return files.every(f => {
+      const ok = fs.statSync(path.join(versionDir, f)).size === expectedSizes[f]
+      if (!ok) logInfo(`大小不匹配: ${f}（期望 ${expectedSizes[f]}）`)
+      return ok
+    })
+  }
+
+  if (isComplete()) {
+    logSuccess(`产物已存在且校验完整: ${versionDir}`)
+    return { versionDir }
   }
 
   fs.mkdirSync(versionDir, { recursive: true })
@@ -341,13 +360,12 @@ function downloadGitHubRelease(version) {
   // allowFail：代理与直连都失败时返回 null 而非 process.exit
   execWithProxyRetry(`gh release download ${version} --dir "${versionDir}" --pattern "*.exe" --pattern "*.exe.sig" --pattern "*.app.tar.gz" --pattern "*.app.tar.gz.sig" --pattern "*.dmg" --pattern "*.AppImage" --pattern "*.AppImage.sig" --clobber`, { allowFail: true })
 
-  const files = fs.readdirSync(versionDir)
-  if (files.length === 0) {
-    logError('产物下载失败（代理与直连均不可用）')
+  if (!isComplete()) {
+    logError('产物下载失败或不完整（大小与 GitHub 官方资产不一致）')
     logInfo(`稍后可补传: npm run release -- --oss-only ${version}`)
     return null
   }
-  logSuccess(`产物下载完成: ${versionDir}（${files.length} 个文件）`)
+  logSuccess(`产物下载完成且校验完整: ${versionDir}`)
 
   return { versionDir }
 }
