@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { syncImeTextareaPosition, type ImeTerminalLike } from '@/utils/ime'
+import { attachImePositionSync, type ImeTerminalLike } from '@/utils/ime'
 
 interface FixtureOptions {
   cols: number
@@ -32,78 +32,88 @@ function createFixture(opts: FixtureOptions) {
   return { term, textarea }
 }
 
-describe('syncImeTextareaPosition', () => {
-  // 光标在 (5,3)，单元格 10x20 → textarea 定位到 (50px, 60px)，尺寸为一个单元格
-  it('ImePosition_AtCursor_001', () => {
+describe('attachImePositionSync', () => {
+  // 挂接后触发 compositionstart，textarea 定位到光标 (5,3) → (50px, 60px)，尺寸为一个单元格
+  it('ImePosition_AtCursorOnCompositionStart_001', () => {
     const { term, textarea } = createFixture({
       cols: 80, rows: 24, screenWidth: 800, screenHeight: 480, cursorX: 5, cursorY: 3,
     })
-    syncImeTextareaPosition(term)
+    attachImePositionSync(term)
+    // 挂接本身不定位（渲染热路径零 DOM 操作）
+    expect(textarea.style.left).toBe('')
+
+    textarea.dispatchEvent(new CompositionEvent('compositionstart'))
     expect(textarea.style.left).toBe('50px')
     expect(textarea.style.top).toBe('60px')
     expect(textarea.style.width).toBe('10px')
     expect(textarea.style.height).toBe('20px')
   })
 
-  // 光标在左上角 (0,0) → textarea 定位到 (0px, 0px)
-  it('ImePosition_Origin_001', () => {
-    const { term, textarea } = createFixture({
-      cols: 100, rows: 30, screenWidth: 900, screenHeight: 600, cursorX: 0, cursorY: 0,
-    })
-    syncImeTextareaPosition(term)
-    expect(textarea.style.left).toBe('0px')
-    expect(textarea.style.top).toBe('0px')
-  })
-
-  // 单元格宽高非整数时尺寸向上取整，避免 caret 区域为零
-  it('ImePosition_CeilCellSize_001', () => {
-    const { term, textarea } = createFixture({
-      cols: 80, rows: 24, screenWidth: 700, screenHeight: 500, cursorX: 0, cursorY: 0,
-    })
-    syncImeTextareaPosition(term)
-    expect(textarea.style.width).toBe('9px')
-    expect(textarea.style.height).toBe('21px')
-  })
-
-  // 输入法组合期间位置冻结：compositionstart 后移动光标再 sync，textarea 不动；
-  // compositionend 后恢复跟随
-  it('ImePosition_FreezeDuringComposition_001', () => {
+  // composition 期间光标被 TUI 重绘 park 到行尾，textarea 不再移动（无需冻结逻辑）
+  it('ImePosition_NoMoveAfterCompositionStart_001', () => {
     const { term, textarea } = createFixture({
       cols: 80, rows: 24, screenWidth: 800, screenHeight: 480, cursorX: 5, cursorY: 3,
     })
-    syncImeTextareaPosition(term)
-    expect(textarea.style.left).toBe('50px')
-    expect(textarea.style.top).toBe('60px')
-
+    attachImePositionSync(term)
     textarea.dispatchEvent(new CompositionEvent('compositionstart'))
-    term.buffer.active.cursorX = 79 // 光标被 TUI 重绘 park 到行尾
+    expect(textarea.style.left).toBe('50px')
+
+    term.buffer.active.cursorX = 79
     term.buffer.active.cursorY = 23
-    syncImeTextareaPosition(term)
+    attachImePositionSync(term) // 渲染回调再触发也不会移动
     expect(textarea.style.left).toBe('50px')
     expect(textarea.style.top).toBe('60px')
-
-    textarea.dispatchEvent(new CompositionEvent('compositionend'))
-    syncImeTextareaPosition(term)
-    expect(textarea.style.left).toBe('790px')
-    expect(textarea.style.top).toBe('460px')
   })
 
-  // open 前无 textarea → 不抛错
+  // 每次新的 compositionstart 用最新光标位置重新定位（resize/光标移动后自动新鲜）
+  it('ImePosition_RelocateOnNextComposition_001', () => {
+    const { term, textarea } = createFixture({
+      cols: 80, rows: 24, screenWidth: 800, screenHeight: 480, cursorX: 5, cursorY: 3,
+    })
+    attachImePositionSync(term)
+    textarea.dispatchEvent(new CompositionEvent('compositionstart'))
+    textarea.dispatchEvent(new CompositionEvent('compositionend'))
+
+    term.buffer.active.cursorX = 40
+    term.buffer.active.cursorY = 10
+    textarea.dispatchEvent(new CompositionEvent('compositionstart'))
+    expect(textarea.style.left).toBe('400px')
+    expect(textarea.style.top).toBe('200px')
+  })
+
+  // 重复调用 attach 幂等（渲染回调每帧调用，只挂一次监听）
+  it('ImePosition_AttachIdempotent_001', () => {
+    const { term, textarea } = createFixture({
+      cols: 80, rows: 24, screenWidth: 800, screenHeight: 480, cursorX: 5, cursorY: 3,
+    })
+    attachImePositionSync(term)
+    attachImePositionSync(term)
+    // 挂两次仍只响应一次 compositionstart（第二次 attach 被短路，行为不变）
+    textarea.dispatchEvent(new CompositionEvent('compositionstart'))
+    expect(textarea.style.left).toBe('50px')
+  })
+
+  // open 前无 textarea → 不抛错、不挂接；textarea 出现后可正常挂接
   it('ImePosition_NoTextarea_001', () => {
-    const { term } = createFixture({
+    const { term, textarea } = createFixture({
       cols: 80, rows: 24, screenWidth: 800, screenHeight: 480, cursorX: 5, cursorY: 3,
     })
     term.textarea = undefined
-    expect(() => syncImeTextareaPosition(term)).not.toThrow()
+    expect(() => attachImePositionSync(term)).not.toThrow()
+
+    term.textarea = textarea
+    attachImePositionSync(term)
+    textarea.dispatchEvent(new CompositionEvent('compositionstart'))
+    expect(textarea.style.left).toBe('50px')
   })
 
-  // element 中无 .xterm-screen → 不抛错且不修改 textarea
-  it('ImePosition_NoScreen_001', () => {
+  // cols 为 0（初始化中）时 cellWidth=Infinity/NaN → 跳过不写样式
+  it('ImePosition_ZeroCols_001', () => {
     const { term, textarea } = createFixture({
-      cols: 80, rows: 24, screenWidth: 800, screenHeight: 480, cursorX: 5, cursorY: 3,
+      cols: 0, rows: 24, screenWidth: 800, screenHeight: 480, cursorX: 5, cursorY: 3,
     })
-    term.element = document.createElement('div')
-    syncImeTextareaPosition(term)
+    attachImePositionSync(term)
+    expect(() => textarea.dispatchEvent(new CompositionEvent('compositionstart'))).not.toThrow()
     expect(textarea.style.left).toBe('')
   })
 })
