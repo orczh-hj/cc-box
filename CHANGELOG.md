@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.13.10] - 2026-09-29
+
+### Fixed
+- Fix terminal display freezing after conversation completes on some machines: IME sync no longer touches DOM in the render hot path
+- Add global frontend error logging to ~/.cc-box/logs for remote diagnosis
+
 ## [0.13.9] - 2026-09-23
 
 ### Fixed
