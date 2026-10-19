@@ -89,6 +89,8 @@ cc-box/
 │   ├── utils/                  # platform 工具
 │   └── styles/global.css       # CSS 变量与全局样式
 │
+├── remote/                     # **远程连接**（中继服务器 relay/、手机 Web UI web/、专属文档 docs/）
+│
 ├── docs/                       # 详细文档
 ├── package.json
 └── vite.config.ts
@@ -213,6 +215,7 @@ npm run release -- --oss-only v0.5.1
 | [docs/roadmap.md](docs/roadmap.md)                           | 开发路线图、进度跟踪、待办事项                                       |
 | [docs/logging.md](docs/logging.md)                           | 日志文件路径、级别策略、轮转与清理机制                                   |
 | [docs/release-process.md](docs/release-process.md)           | 版本号管理、本地打包、CI/CD 发布、签名与分发                             |
+| [remote/README.md](remote/README.md)                         | **远程连接设计文档**：双模式架构、消息协议、独占接管、中继部署、实施阶段  |
 
 外部参考：[Claude Code 线上文档](https://code.claude.com/docs/llms.txt)
 
