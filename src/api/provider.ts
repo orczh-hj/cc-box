@@ -1,9 +1,12 @@
 /**
  * Provider API 函数
- * 封装 Tauri invoke 调用
+ * 封装 Tauri invoke 调用（经 transport 统一层，浏览器远程模式走 rpc.call）
  */
-import { invoke } from '@tauri-apps/api/core'
+import { transport } from './transport'
 import type { Provider, ProvidersConfig, ImportResult, ProviderMeta, TestConnectionResult } from '@/types/provider'
+
+const invoke = <T,>(cmd: string, args?: Record<string, unknown>): Promise<T> =>
+  transport.invoke<T>(cmd, args);
 
 /** 获取 Provider 配置 */
 export async function getProvidersConfig(): Promise<ProvidersConfig> {

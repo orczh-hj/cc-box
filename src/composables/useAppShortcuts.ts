@@ -4,8 +4,11 @@ import { useAppStore } from '@/stores/app'
 import { useSessionStore } from '@/stores/session'
 import { useSidebarStore } from '@/stores/sidebar'
 import { ptyKillAll, spawnNewInstance } from '@/api/tauri'
+import { isTauriEnv } from '@/api/platform'
 
 export async function snapWindow(side: 'left' | 'right') {
+  // 窗口贴靠与新建实例为桌面专属（浏览器无窗口控制能力）
+  if (!isTauriEnv) return
   try {
     const win = getCurrentWindow()
     const monitor = await currentMonitor()
@@ -35,6 +38,7 @@ export async function snapWindow(side: 'left' | 'right') {
 }
 
 export async function openNewAppInstance() {
+  if (!isTauriEnv) return
   try {
     await spawnNewInstance()
   } catch (err) {

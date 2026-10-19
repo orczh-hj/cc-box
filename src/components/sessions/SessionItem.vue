@@ -301,16 +301,19 @@ function cancelRename() {
   flex-shrink: 0;
 }
 
-.session-item:not(:hover) .action-btn {
-  opacity: 0;
-  visibility: hidden;
-  transition: opacity 0.15s ease, visibility 0s 0.15s;
-}
+/* hover 才显示操作按钮——仅指针设备（触屏 hover:none 无悬停，常显） */
+@media (hover: hover) {
+  .session-item:not(:hover) .action-btn {
+    opacity: 0;
+    visibility: hidden;
+    transition: opacity 0.15s ease, visibility 0s 0.15s;
+  }
 
-.session-item:hover .action-btn {
-  opacity: 1;
-  visibility: visible;
-  transition: opacity 0.15s ease, visibility 0s;
+  .session-item:hover .action-btn {
+    opacity: 1;
+    visibility: visible;
+    transition: opacity 0.15s ease, visibility 0s;
+  }
 }
 
 .action-btn:hover {

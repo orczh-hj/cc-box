@@ -21,6 +21,41 @@ export default {
   update: 'Update',
   about: 'About',
 
+  // Remote（IconBar button + QR modal）
+  titleRemote: 'Remote Access (phone scan)',
+  remoteTitle: 'Remote Access',
+  remoteQrHint: 'Scan with your phone, or open the URL in a browser (same Wi-Fi required)',
+  remoteLanOnly: 'LAN only',
+  remoteCopyUrl: 'Copy URL',
+  remoteCopied: 'Copied',
+  remoteStop: 'Stop remote access',
+  remoteEnable: 'Start remote access',
+  remoteEnableHint: 'Remote access is not running; start it to connect from your phone by QR code',
+  remoteTakenOver: 'This terminal is taken over by a remote device',
+  remoteTakenOverHint: 'Content is still syncing; claim it back anytime',
+  remoteClaimBack: 'Claim back',
+  remoteRelayConnecting: 'Relay connecting…',
+  remoteRelayPairHint: 'Scan to pair (pair once, stays valid)',
+  remoteRelayNotConfigured: 'Relay not connected, retrying automatically…',
+  remoteHostedElsewhere: 'Remote is hosted by another CC-Box instance on this machine; scanning connects to that instance',
+
+  // Quick key bar (mobile breakpoint)
+  quickKeyEsc: 'Cancel / Esc',
+  quickKeyMode: 'Switch work mode (Shift+Tab)',
+  quickKeyNewline: 'Insert line break (Ctrl+J)',
+  quickKeyInterrupt: 'Interrupt (Ctrl+C)',
+
+  // Directory picker (add project from browser)
+  dirPickerTitle: 'Choose a project folder on this computer',
+  dirPickerRoot: 'This PC (drive roots)',
+  dirPickerEnterPath: 'Or type a full path…',
+  dirPickerGo: 'Go',
+  dirPickerEmpty: 'No subfolders here',
+  dirPickerUp: 'Up one level',
+  dirPickerSelect: 'Choose this folder',
+  dirPickerSortName: 'By name',
+  dirPickerSortModified: 'By modified',
+
   // Appearance section
   appearanceTitle: 'Appearance',
   fontSize: 'Font Size',

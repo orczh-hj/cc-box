@@ -209,7 +209,7 @@ fn download_file(
     Ok(())
 }
 
-/// 发送进度事件
+/// 发送进度事件（事件单一出口 events.rs：桌面 emit + 浏览器端 rpc.event 广播）
 fn emit_progress(app: &AppHandle, item: &str, stage: &str, progress: u8, message: impl Into<String>) {
     let progress_event = DownloadProgress {
         item: item.to_string(),
@@ -217,8 +217,8 @@ fn emit_progress(app: &AppHandle, item: &str, stage: &str, progress: u8, message
         progress,
         message: message.into(),
     };
-    if let Err(e) = app.emit("download-progress", progress_event.clone()) {
-        log::warn!("[Installer] Failed to emit progress: {}", e);
+    if let Ok(payload) = serde_json::to_value(&progress_event) {
+        crate::events::emit_all(app, crate::events::names::DOWNLOAD_PROGRESS, payload);
     }
 }
 

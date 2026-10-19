@@ -1,0 +1,10 @@
+D:\orczh\Documents\front\claude-tauri-gui\remote\relay\target\debug\deps\getrandom-d32d52cf89ffc78d.d: C:\Users\orczh\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\getrandom-0.4.3\src\lib.rs C:\Users\orczh\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\getrandom-0.4.3\src\backends.rs C:\Users\orczh\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\getrandom-0.4.3\src\error.rs C:\Users\orczh\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\getrandom-0.4.3\src\util.rs C:\Users\orczh\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\getrandom-0.4.3\src\../README.md C:\Users\orczh\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\getrandom-0.4.3\src\backends\windows.rs
+
+D:\orczh\Documents\front\claude-tauri-gui\remote\relay\target\debug\deps\libgetrandom-d32d52cf89ffc78d.rmeta: C:\Users\orczh\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\getrandom-0.4.3\src\lib.rs C:\Users\orczh\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\getrandom-0.4.3\src\backends.rs C:\Users\orczh\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\getrandom-0.4.3\src\error.rs C:\Users\orczh\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\getrandom-0.4.3\src\util.rs C:\Users\orczh\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\getrandom-0.4.3\src\../README.md C:\Users\orczh\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\getrandom-0.4.3\src\backends\windows.rs
+
+C:\Users\orczh\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\getrandom-0.4.3\src\lib.rs:
+C:\Users\orczh\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\getrandom-0.4.3\src\backends.rs:
+C:\Users\orczh\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\getrandom-0.4.3\src\error.rs:
+C:\Users\orczh\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\getrandom-0.4.3\src\util.rs:
+C:\Users\orczh\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\getrandom-0.4.3\src\../README.md:
+C:\Users\orczh\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\getrandom-0.4.3\src\backends\windows.rs:

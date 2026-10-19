@@ -57,6 +57,16 @@
 
     <!-- 底部按钮组 -->
     <div class="icon-group bottom">
+      <!-- 远程访问（手机扫码）——浏览器模式隐藏（已在远程端，二维码给不出） -->
+      <button
+        v-if="isTauriEnv"
+        class="icon-btn remote-btn"
+        @click="$emit('openRemote')"
+        :title="t('titleRemote')"
+      >
+        <img src="@/assets/icons/phone.svg" alt="Remote" />
+      </button>
+
       <!-- Settings -->
       <button
         class="icon-btn settings-btn"
@@ -68,8 +78,9 @@
         <span v-if="sidebarStore.updateAvailable" class="icon-badge update-badge"></span>
       </button>
 
-      <!-- 文件夹按钮 -->
+      <!-- 文件夹按钮——浏览器模式隐藏（系统级操作不可用） -->
       <button
+        v-if="isTauriEnv"
         class="icon-btn folder-btn"
         @click="$emit('openFolder')"
         :title="t('titleOpenFolder')"
@@ -88,6 +99,7 @@ import { useSidebarStore } from '@/stores/sidebar'
 import { useSessionStore } from '@/stores/session'
 import { useAppStore } from '@/stores/app'
 import { ctrl } from '@/utils/platform'
+import { isTauriEnv } from '@/api/platform'
 
 const { t } = useI18n()
 
@@ -98,6 +110,7 @@ defineProps<{
 defineEmits<{
   toggle: [panel: SidebarPanelType]
   toggleSettings: []
+  openRemote: []
   openFolder: []
 }>()
 
@@ -226,5 +239,47 @@ function handleSettingsClick() {
 @keyframes pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.6; }
+}
+
+/* ============================================
+ * 手机断点（≤768px）：左竖栏 → 底部横栏
+ * 纯样式分支（结构不变），与 useIsMobile 断点一致
+ * ============================================ */
+@media (max-width: 768px) {
+  .icon-bar {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    width: 100%;
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
+    padding: 6px 12px calc(6px + var(--safe-area-bottom));
+    border-right: none;
+    border-top: 1px solid var(--border-color);
+    box-shadow: 0 -2px 8px rgba(26, 24, 22, 0.06);
+    z-index: 40;
+  }
+
+  .icon-group {
+    flex-direction: row;
+    gap: 6px;
+  }
+
+  .icon-group.bottom {
+    margin-top: 0;
+  }
+
+  /* 激活指示条：左侧竖条 → 底部横条 */
+  .icon-btn.active::before {
+    left: 8px;
+    right: 8px;
+    top: auto;
+    bottom: 1px;
+    width: auto;
+    height: 3px;
+    border-radius: 2px 2px 0 0;
+  }
 }
 </style>

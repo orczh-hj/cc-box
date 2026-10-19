@@ -65,6 +65,12 @@ pub async fn pty_spawn(
 /// 写入 PTY 输入
 #[tauri::command]
 pub async fn pty_input(id: String, data: String) -> Result<bool, String> {
+    // 控制权在远程（手机）手中时拒绝桌面输入——独占不能只靠 UI 遮罩，
+    // 拖放/全局命令等绕过 DOM 的输入路径在 Rust 侧统一把关
+    if crate::remote_state::REMOTE_STATE.is_remote_active(&id) {
+        return Ok(false);
+    }
+
     let manager = get_pty_manager().ok_or_else(|| "PTY manager not initialized".to_string())?;
 
     manager
@@ -78,10 +84,25 @@ pub async fn pty_input(id: String, data: String) -> Result<bool, String> {
 pub async fn pty_resize(id: String, cols: u16, rows: u16) -> Result<bool, String> {
     let manager = get_pty_manager().ok_or_else(|| "PTY manager not initialized".to_string())?;
 
+    // 记录桌面端尺寸（远程会话归还时恢复）
+    crate::remote_state::REMOTE_STATE.record_size(&id, cols, rows);
+
+    // 控制权在远程（手机）手中时，桌面 fit 不抢占 PTY 尺寸
+    if crate::remote_state::REMOTE_STATE.is_remote_active(&id) {
+        return Ok(true);
+    }
+
     manager
         .resize(&id, cols, rows)
         .map(|_| true)
         .map_err(|e| e.to_string())
+}
+
+/// 桌面端接管被远程持有的会话（解除遮罩 + 收回控制权）
+#[tauri::command]
+pub async fn pty_claim(id: String) -> Result<(), String> {
+    crate::remote_state::REMOTE_STATE.claim(&id);
+    Ok(())
 }
 
 /// 杀掉 PTY
@@ -133,6 +154,69 @@ pub async fn get_projects(
     offset: Option<usize>,
 ) -> Result<Vec<Project>, String> {
     crate::store::get_projects(limit, offset).map_err(|e| e.to_string())
+}
+
+/// 目录浏览条目（远程端"添加项目"的电脑目录选择器用）
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DirEntryLite {
+    pub name: String,
+    pub path: String,
+    /// 修改时间（Unix 毫秒；取不到为 None）——前端"最近修改"排序用
+    pub modified: Option<u64>,
+}
+
+/// 列目录（仅子目录，不列文件——项目选择只需要目录，最小暴露面）。
+/// path=None 返回根：Windows 盘符 / Unix 根分区子目录
+#[tauri::command]
+pub async fn list_directories(path: Option<String>) -> Result<Vec<DirEntryLite>, String> {
+    fn mtime_ms(md: &std::fs::Metadata) -> Option<u64> {
+        md.modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_millis() as u64)
+    }
+
+    fn list_subdirs(p: &std::path::Path) -> Result<Vec<DirEntryLite>, String> {
+        let mut out = Vec::new();
+        let entries = std::fs::read_dir(p).map_err(|e| format!("cannot read {}: {}", p.display(), e))?;
+        for entry in entries.flatten() {
+            // 跳过符号链接循环； junction/符号链接目录允许进入（Windows 常见）
+            if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                let Ok(full) = entry.path().into_os_string().into_string() else { continue };
+                let modified = entry.metadata().as_ref().ok().and_then(mtime_ms);
+                out.push(DirEntryLite { name, path: full, modified });
+            }
+        }
+        out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        Ok(out)
+    }
+
+    match path {
+        None => {
+            // 根视图：Windows 枚举存在的盘符；Unix 列 / 子目录
+            if cfg!(windows) {
+                let mut drives = Vec::new();
+                for letter in b'A'..=b'Z' {
+                    let root = format!("{}:\\", letter as char);
+                    if std::path::Path::new(&root).exists() {
+                        drives.push(DirEntryLite { name: root.clone(), path: root, modified: None });
+                    }
+                }
+                Ok(drives)
+            } else {
+                list_subdirs(std::path::Path::new("/"))
+            }
+        }
+        Some(p) => {
+            let path = std::path::PathBuf::from(&p);
+            if !path.is_dir() {
+                return Err(format!("not a directory: {}", p));
+            }
+            list_subdirs(&path)
+        }
+    }
 }
 
 /// 获取项目信息
@@ -196,6 +280,127 @@ pub async fn get_app_config() -> Result<AppConfig, String> {
 #[tauri::command]
 pub async fn update_app_config(updates: serde_json::Value) -> Result<(), String> {
     crate::store::update_app_config(updates).map_err(|e| e.to_string())
+}
+
+// ==================== Remote Commands ====================
+
+/// 远程连接状态（弹窗展示：直连 + 中继）
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteStatus {
+    pub enabled: bool,
+    pub running: bool,
+    /// 宿主制：远程由本机另一实例提供（本实例未监听）；url 仍为宿主可用地址
+    pub hosted_elsewhere: bool,
+    pub port: u16,
+    pub token: String,
+    /// 手机直连 URL（含 token fragment）；token 未生成时为空
+    pub url: String,
+    /// 中继已启用
+    pub relay_enabled: bool,
+    /// 中继已连接
+    pub relay_connected: bool,
+    /// 中继地址（如 https://cc.orczh.top）
+    pub relay_url: String,
+    /// 当前有效配对码（5 分钟内）；无则空
+    pub relay_pair_code: String,
+    /// 中继配对二维码内容（relayUrl + #pair=code）；无效则空
+    pub relay_pair_url: String,
+}
+
+#[tauri::command]
+pub async fn get_remote_status() -> Result<RemoteStatus, String> {
+    let config = crate::store::get_app_config().map_err(|e| e.to_string())?;
+    let enabled = config.remote.as_ref().and_then(|r| r.enabled).unwrap_or(false);
+    let port = config
+        .remote
+        .as_ref()
+        .and_then(|r| r.port)
+        .unwrap_or(crate::remote_server::DEFAULT_PORT);
+    // token 持久于 config（宿主与本实例共享），未开启过的实例读到的与宿主一致
+    let token = crate::remote_server::current_token();
+    let hosted_elsewhere = crate::remote_server::hosted_elsewhere().await;
+    let url = if token.is_empty() {
+        String::new()
+    } else {
+        crate::remote_server::lan_url(&token, port)
+    };
+    let (relay_enabled, relay_connected, relay_url, pair_code) = crate::remote_client::status_snapshot();
+    // 中继 URL 显示为 https/http 形式
+    let relay_display = relay_url
+        .replacen("wss://", "https://", 1)
+        .replacen("ws://", "http://", 1);
+    let relay_pair_url = if pair_code.is_empty() {
+        String::new()
+    } else {
+        format!("{}/#pair={}", relay_display, pair_code)
+    };
+    // 配对码缺失/过期且中继在线：按需重申（一次性码 5 分钟 TTL，仅在面板
+    // 查询时触发——结果经 pair.created 异步写入，面板 2s 轮询下一轮拿到）
+    if relay_connected && pair_code.is_empty() {
+        crate::remote_client::request_pair_code();
+    }
+    Ok(RemoteStatus {
+        enabled,
+        running: crate::remote_server::is_running(),
+        hosted_elsewhere,
+        port,
+        token,
+        url,
+        relay_enabled,
+        relay_connected,
+        relay_url: relay_display,
+        relay_pair_code: pair_code,
+        relay_pair_url,
+    })
+}
+
+/// 远程开关操作互斥：enable/disable 交错执行会产生「enabled=false 但服务运行」
+/// 的鬼服状态（手机仍可控而用户以为已关）
+static REMOTE_OP_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
+    std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
+
+/// 开/关远程访问（动态启停服务器），返回最新状态
+#[tauri::command]
+pub async fn set_remote_enabled(enabled: bool) -> Result<RemoteStatus, String> {
+    let _op_guard = REMOTE_OP_LOCK.lock().await;
+    if enabled {
+        // 安全阻断语义：「停止→开启」轮换全部访问凭证——旧局域二维码（token
+        // 已换）与已配对手机（access_token 绑定旧 device_id，relay 查在线表
+        // miss）一律失效；用户在面板重扫新码即可。已开启状态重复开启、
+        // 或远程由另一实例宿主时不轮换（避免干扰宿主的有效凭证）
+        if !crate::remote_server::is_running()
+            && !crate::remote_server::hosted_elsewhere().await
+        {
+            // 轮换失败必须报错（安全阻断语义依赖它）：旧凭证未失效就继续启动
+            // 等于向持有旧码的人保持开放
+            crate::remote_server::rotate_token().map_err(|e| e.to_string())?;
+            crate::remote_client::rotate_identity();
+        }
+        crate::remote_server::save_remote_config(Some(true), None, None).map_err(|e| e.to_string())?;
+        // 启动失败（端口被占等）显式报错给 UI，并回滚开关（否则残留 enabled=true，
+        // 重启后自动尝试启动又失败）
+        if let Err(e) = crate::remote_server::start().await {
+            let _ = crate::remote_server::save_remote_config(Some(false), None, None);
+            return Err(e);
+        }
+        // 中继即默认远程方式：开启时联动连接（内置 orczh.top:8800，
+        // 环境变量 CC_BOX_RELAY_URL 可覆盖；幂等）
+        crate::remote_client::connect().await;
+    } else {
+        crate::remote_server::save_remote_config(Some(false), None, None).map_err(|e| e.to_string())?;
+        crate::remote_server::stop().await;
+        // 安全闭环：停止必须同时断开中继连接，否则手机仍可经公网中继控制
+        crate::remote_client::disconnect();
+    }
+    get_remote_status().await
+}
+
+/// 配置/停用中继（url 为空 = 停用），返回最新状态
+#[tauri::command]
+pub async fn set_relay_url(url: Option<String>) -> Result<RemoteStatus, String> {
+    crate::remote_client::set_relay(url).await?;
+    get_remote_status().await
 }
 
 /// 获取系统 locale（BCP-47 标签，如 "zh-CN"、"en-US"）

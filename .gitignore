@@ -42,3 +42,12 @@ npm-debug.log*
 
 # Release artifacts (downloaded from GitHub, local backup)
 releases/
+
+# Remote（rust-embed 编译要求 remote/web/dist 目录存在，.gitkeep 占位入库）
+remote/protocol/target/
+!remote/web/dist/
+remote/web/dist/*
+!remote/web/dist/.gitkeep
+
+# Playwright MCP 会话截图（本地调试产物）
+.playwright-mcp/

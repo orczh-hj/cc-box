@@ -76,6 +76,23 @@ pub struct AppConfig {
     #[serde(rename = "claudeEnvVars")]
     pub claude_env_vars: Option<std::collections::HashMap<String, String>>,
     pub language: Option<String>,
+    #[serde(rename = "remote")]
+    pub remote: Option<RemoteConfig>,
+}
+
+/// 远程连接配置（局域网直连 + 中继）
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteConfig {
+    pub enabled: Option<bool>,
+    pub token: Option<String>,
+    pub port: Option<u16>,
+    /// 中继服务器地址（如 https://cc.orczh.top；空 = 未启用）
+    pub relay_url: Option<String>,
+    /// 设备身份（首次生成后持久化）
+    pub device_id: Option<String>,
+    /// 设备密钥（64 hex，注册中继用）
+    pub device_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -965,8 +982,15 @@ pub fn get_app_config() -> Result<AppConfig> {
     Ok(config)
 }
 
-/// 更新应用配置
+/// config.json 写入互斥：多线程（多实例共享文件）读-合并-写竞争防护
+static CONFIG_WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// 更新应用配置（读-合并-写全程持锁；临时文件 + rename 原子落盘——
+/// 直接 fs::write 截断写会让并发读者拿到半截 JSON，进而触发身份重建
+/// 等灾难性默认值）
 pub fn update_app_config(updates: serde_json::Value) -> Result<()> {
+    let _guard = CONFIG_WRITE_LOCK.lock();
+
     let config_path = get_gui_config_path()?;
     let config_dir = config_path
         .parent()
@@ -982,7 +1006,13 @@ pub fn update_app_config(updates: serde_json::Value) -> Result<()> {
     let merged = merge_json_values(existing_json, updates);
 
     let content = serde_json::to_string_pretty(&merged)?;
-    fs::write(&config_path, content)?;
+    let tmp_path = config_path.with_extension("json.tmp");
+    fs::write(&tmp_path, &content)?;
+    // Windows: rename 到已存在目标需先移除；失败时回退直接写（保底不丢数据）
+    if fs::rename(&tmp_path, &config_path).is_err() {
+        let _ = fs::remove_file(&config_path);
+        fs::rename(&tmp_path, &config_path)?;
+    }
 
     Ok(())
 }

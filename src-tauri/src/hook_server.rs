@@ -4,7 +4,7 @@ use axum::http::HeaderMap;
 use axum::{routing::post, Router};
 use serde_json::{json, Value};
 use std::net::SocketAddr;
-use tauri::{AppHandle, Emitter};
+use tauri::AppHandle;
 use tokio::sync::Mutex;
 use tower::ServiceBuilder;
 
@@ -119,7 +119,13 @@ async fn handle_hook(
         log::info!("[hook-server] SessionStart received, invalidated project path cache");
     }
 
-    let _ = app_handle.emit("hook-event", &payload);
+    // 事件单一出口：桌面 emit + 浏览器端 rpc.event 广播（payload 与 Tauri 事件同构）
+    if let Ok(payload_json) = serde_json::to_value(&payload) {
+        crate::events::emit_all(&app_handle, crate::events::names::HOOK_EVENT, payload_json);
+    }
+
+    // 远程侧状态机消费（working/pending 推送）
+    crate::remote_state::REMOTE_STATE.on_hook_payload(&payload);
 
     Json(json!({}))
 }

@@ -1,0 +1,9 @@
+D:\orczh\Documents\front\claude-tauri-gui\remote\relay\target\release\deps\futures_macro-baa5795378861d6f.d: C:\Users\orczh\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\futures-macro-0.3.34\src\lib.rs C:\Users\orczh\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\futures-macro-0.3.34\src\executor.rs C:\Users\orczh\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\futures-macro-0.3.34\src\join.rs C:\Users\orczh\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\futures-macro-0.3.34\src\select.rs C:\Users\orczh\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\futures-macro-0.3.34\src\stream_select.rs
+
+D:\orczh\Documents\front\claude-tauri-gui\remote\relay\target\release\deps\futures_macro-baa5795378861d6f.dll: C:\Users\orczh\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\futures-macro-0.3.34\src\lib.rs C:\Users\orczh\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\futures-macro-0.3.34\src\executor.rs C:\Users\orczh\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\futures-macro-0.3.34\src\join.rs C:\Users\orczh\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\futures-macro-0.3.34\src\select.rs C:\Users\orczh\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\futures-macro-0.3.34\src\stream_select.rs
+
+C:\Users\orczh\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\futures-macro-0.3.34\src\lib.rs:
+C:\Users\orczh\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\futures-macro-0.3.34\src\executor.rs:
+C:\Users\orczh\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\futures-macro-0.3.34\src\join.rs:
+C:\Users\orczh\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\futures-macro-0.3.34\src\select.rs:
+C:\Users\orczh\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\futures-macro-0.3.34\src\stream_select.rs:

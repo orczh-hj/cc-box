@@ -252,7 +252,7 @@ import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { check, relaunch } from '@/api/tauri'
 import { checkForUpdates, downloadClaudeVersion, cancelClaudeVersionDownload, installClaudeVersion, killClaudeProcesses, getInstalledClaudeVersion, onInstallProgress } from '@/api/tauri'
-import { open } from '@tauri-apps/plugin-shell'
+import { openExternal } from '@/api/platform'
 import { useSidebarStore } from '@/stores/sidebar'
 import { useSessionStore } from '@/stores/session'
 import { useUpdateStore } from '@/stores/update'
@@ -314,7 +314,7 @@ function hasActivePtys(): boolean {
 }
 
 function openReleases() {
-  open('https://github.com/orczh-hj/cc-box/releases')
+  openExternal('https://github.com/orczh-hj/cc-box/releases')
 }
 
 async function handleDownloadAndInstall() {
@@ -516,7 +516,7 @@ async function openDownloadedFolder(version: string) {
   const lastSep = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'))
   const dir = lastSep >= 0 ? path.substring(0, lastSep) : path
   try {
-    await open(dir)
+    openExternal(dir)
   } catch (err) {
     console.error('Failed to open folder:', err)
   }
@@ -861,7 +861,8 @@ onUnmounted(() => {
   border: 1px solid var(--border-color);
   border-radius: var(--radius-lg);
   padding: 24px;
-  min-width: 320px;
+  /* 手机视口内收缩（100vw - 弹窗 padding - 视口边距） */
+  min-width: min(320px, calc(100vw - 64px));
   box-shadow: var(--shadow-xl);
 }
 

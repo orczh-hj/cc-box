@@ -1,0 +1,9 @@
+D:\orczh\Documents\front\claude-tauri-gui\remote\relay\target\debug\deps\ppv_lite86-1939868a9d188d3e.d: C:\Users\orczh\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\ppv-lite86-0.2.21\src\lib.rs C:\Users\orczh\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\ppv-lite86-0.2.21\src\soft.rs C:\Users\orczh\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\ppv-lite86-0.2.21\src\types.rs C:\Users\orczh\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\ppv-lite86-0.2.21\src\x86_64\mod.rs C:\Users\orczh\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\ppv-lite86-0.2.21\src\x86_64\sse2.rs
+
+D:\orczh\Documents\front\claude-tauri-gui\remote\relay\target\debug\deps\libppv_lite86-1939868a9d188d3e.rmeta: C:\Users\orczh\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\ppv-lite86-0.2.21\src\lib.rs C:\Users\orczh\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\ppv-lite86-0.2.21\src\soft.rs C:\Users\orczh\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\ppv-lite86-0.2.21\src\types.rs C:\Users\orczh\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\ppv-lite86-0.2.21\src\x86_64\mod.rs C:\Users\orczh\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\ppv-lite86-0.2.21\src\x86_64\sse2.rs
+
+C:\Users\orczh\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\ppv-lite86-0.2.21\src\lib.rs:
+C:\Users\orczh\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\ppv-lite86-0.2.21\src\soft.rs:
+C:\Users\orczh\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\ppv-lite86-0.2.21\src\types.rs:
+C:\Users\orczh\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\ppv-lite86-0.2.21\src\x86_64\mod.rs:
+C:\Users\orczh\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\ppv-lite86-0.2.21\src\x86_64\sse2.rs:

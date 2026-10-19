@@ -4,6 +4,7 @@
  */
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
+import { uuid } from '@/utils/uuid'
 import type { Provider, ProvidersConfig, CommonConfig, ImportResult, TestConnectionResult } from '@/types/provider'
 import {
   getProvidersConfig,
@@ -113,7 +114,7 @@ export const useProvidersStore = defineStore('providers', () => {
     }
 
     return {
-      id: crypto.randomUUID(),
+      id: uuid(),
       name,
       settingsConfig,
       websiteUrl: preset.websiteUrl,

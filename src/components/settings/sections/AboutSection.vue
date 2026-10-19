@@ -33,15 +33,11 @@
 </template>
 
 <script setup lang="ts">
-import { open } from '@tauri-apps/plugin-shell'
+import { openExternal } from '@/api/platform'
 import { useI18n } from 'vue-i18n'
 
 const { t } = useI18n()
 const currentVersion = __APP_VERSION__
-
-function openExternal(url: string) {
-  open(url)
-}
 </script>
 
 <style scoped>

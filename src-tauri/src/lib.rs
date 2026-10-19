@@ -11,6 +11,11 @@ mod hook_config;
 mod installer;
 mod providers;
 mod platform;
+mod remote_state;
+mod remote_server;
+mod remote_client;
+mod rpc_dispatch;
+mod events;
 #[cfg(test)]
 mod tests;
 
@@ -84,6 +89,19 @@ pub fn run(initial_dir: Option<String>) {
             }
 
             pty::init_pty_manager(app.handle().clone());
+            // 远程事件转发到桌面前端（session-taken-over / session-reclaimed /
+            // remote-session-created）。测试构建排除：emit 闭包会拉入 comctl32 v6
+            // (SetWindowSubclass) 导入，测试 exe 无 side-by-side manifest 导致
+            // 加载失败 (STATUS_ENTRYPOINT_NOT_FOUND)
+            #[cfg(not(test))]
+            {
+                let handle = app.handle().clone();
+                remote_state::set_event_hook(Box::new(move |name, id, data| {
+                    // 桌面通知（远程广播由 remote_state::emit_event* 系列按受众精准分发）
+                    use tauri::Emitter;
+                    let _ = handle.emit(name, serde_json::json!({ "id": id, "data": data }));
+                }));
+            }
             log::info!("PTY manager initialized");
 
             // Windows: 移除原生标题栏（UI 相关，尽早执行）
@@ -127,6 +145,12 @@ pub fn run(initial_dir: Option<String>) {
                 // Hook HTTP 服务器
                 hook_server::init(handle.clone()).await;
 
+                // 远程访问服务器（局域网直连，开关开启时才监听）
+                remote_server::init(handle.clone()).await;
+
+                // 远程中继出站客户端（配置了 relay_url 时自动连接）
+                remote_client::init().await;
+
                 // 如果通过命令行参数传入了目录（右键菜单打开），延迟 emit 事件给前端
                 if let Some(dir) = initial_dir {
                     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
@@ -145,7 +169,9 @@ pub fn run(initial_dir: Option<String>) {
             commands::pty_resize,
             commands::pty_kill,
             commands::pty_kill_all,
+            commands::pty_claim,
             commands::get_projects,
+            commands::list_directories,
             commands::get_project_info,
             commands::get_sessions,
             commands::get_session_count,
@@ -199,6 +225,10 @@ pub fn run(initial_dir: Option<String>) {
             commands::check_cc_switch_db_exists,
             commands::import_from_cc_switch,
             commands::test_provider_connection,
+            // Remote Commands
+            commands::get_remote_status,
+            commands::set_remote_enabled,
+            commands::set_relay_url,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

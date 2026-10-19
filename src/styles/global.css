@@ -270,3 +270,38 @@ button:disabled, input:disabled {
   opacity: 0.5;
   cursor: not-allowed;
 }
+
+/* ============================================
+ * 移动端适配基建（≤768px，与 useMediaQuery 的 useIsMobile 断点一致）
+ * 结构分支用 useIsMobile()；纯样式分支一律写 @media (max-width: 768px)
+ * ============================================ */
+:root {
+  /* 底部安全区（iPhone 刘海屏 home indicator；桌面/无环境变量时为 0） */
+  --safe-area-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+@media (max-width: 768px) {
+  html, body {
+    /* 触屏下容器内滚动到底不带动整页回弹 */
+    overscroll-behavior: none;
+  }
+
+  /* xterm 触屏滚动：滚到 scrollback 头/尾不带动整页 */
+  .xterm .xterm-viewport {
+    overscroll-behavior: contain;
+  }
+
+  /* 软键盘：xterm 默认把 helper textarea 放在屏幕外（left:-9999em）且尺寸为 0，
+   * iOS Safari 对屏幕外/零尺寸 textarea 聚焦不弹软键盘——移回视口内以 opacity:0 隐藏 */
+  .xterm .xterm-helper-textarea {
+    left: 0 !important;
+    top: 0 !important;
+    width: 10px !important;
+    height: 10px !important;
+    /* ≥16px 防止 iOS 聚焦时自动缩放页面 */
+    font-size: 16px !important;
+  }
+
+  /* 触屏目标最小 44px 交叠区（按钮类组件按需覆盖） */
+  button { -webkit-tap-highlight-color: transparent; }
+}

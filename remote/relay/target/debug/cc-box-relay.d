@@ -1,0 +1,1 @@
+D:\orczh\Documents\front\claude-tauri-gui\remote\relay\target\debug\cc-box-relay.exe: D:\orczh\Documents\front\claude-tauri-gui\remote\relay\src\lib.rs D:\orczh\Documents\front\claude-tauri-gui\remote\relay\src\main.rs

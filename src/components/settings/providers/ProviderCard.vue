@@ -144,17 +144,16 @@ function getIconChar(icon?: string): string {
   white-space: nowrap;
 }
 
-.card-actions {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex-shrink: 0;
-  opacity: 0;
-  transition: opacity 0.15s;
-}
-.provider-card:hover .card-actions,
-.provider-card.active .card-actions {
-  opacity: 1;
+/* hover 才显示操作——仅指针设备（触屏 hover:none 常显，否则操作按钮无法触达） */
+@media (hover: hover) {
+  .card-actions {
+    opacity: 0;
+    transition: opacity 0.15s;
+  }
+  .provider-card:hover .card-actions,
+  .provider-card.active .card-actions {
+    opacity: 1;
+  }
 }
 
 .action-btn {
@@ -193,5 +192,18 @@ function getIconChar(icon?: string): string {
   color: var(--accent-gold-dark);
   font-weight: 600;
   padding: 4px 12px;
+}
+
+/* 手机断点：单行放不下 4 按钮 → 操作组换到第二行右对齐；触屏无 hover 常显 */
+@media (max-width: 768px) {
+  .provider-card {
+    flex-wrap: wrap;
+  }
+
+  .card-actions {
+    opacity: 1;
+    flex-basis: 100%;
+    justify-content: flex-end;
+  }
 }
 </style>

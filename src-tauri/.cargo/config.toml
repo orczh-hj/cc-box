@@ -9,5 +9,9 @@ git-fetch-with-cli = true
 
 # Windows MSVC: 显式指定 linker 绝对路径，避免 Git bash 中 coreutils 的 link.exe 被误用
 # 注意：路径中的 MSVC 版本号随 Visual Studio Build Tools 更新可能变化，需同步更新
+# runner：cargo test 的 exe 由 test-runner.ps1 包装运行——为链接了 tauri 的
+# lib 测试 exe 放置 comctl32 v6 外挂 manifest，否则 STATUS_ENTRYPOINT_NOT_FOUND
+# （详见 test-runner.ps1 头注释。注意：需在 src-tauri/ 目录下执行 cargo test）
 [target.x86_64-pc-windows-msvc]
 linker = "D:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools\\VC\\Tools\\MSVC\\14.42.34433\\bin\\Hostx64\\x64\\link.exe"
+runner = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "test-runner.ps1"]

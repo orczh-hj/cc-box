@@ -1,5 +1,13 @@
 <template>
-  <div ref="containerRef" class="xterm-container" :class="{ 'drag-over': isDragOver }" :style="termBgStyle">
+  <div
+    ref="containerRef"
+    class="xterm-container"
+    :class="{ 'drag-over': isDragOver }"
+    :style="termBgStyle"
+    @click="handleTapFocus"
+    @touchstart="handleTouchStart"
+    @touchend="handleTouchEnd"
+  >
     <!-- 动态渲染每个 Tab 的终端容器 -->
     <div
       v-for="[tabId] in terminalInstances"
@@ -8,21 +16,34 @@
       :data-tab="tabId"
       class="terminal-wrapper"
       :class="{ active: tabId === currentDisplayTabId }"
-    ></div>
+    >
+      <!-- 远程（手机）接管遮罩：显示层独占，数据层继续写入 -->
+      <div v-if="isTabTakenOver(tabId)" class="taken-over-overlay">
+        <div class="taken-over-card">
+          <p class="taken-over-title">{{ t('remoteTakenOver') }}</p>
+          <p class="taken-over-hint">{{ t('remoteTakenOverHint') }}</p>
+          <button class="taken-over-btn" @click="handleClaim(tabId)">{{ t('remoteClaimBack') }}</button>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, watch, onMounted, onUnmounted, nextTick, type ComponentPublicInstance } from 'vue'
+import { ref, reactive, computed, watch, onMounted, onUnmounted, nextTick, markRaw, type ComponentPublicInstance } from 'vue'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { WebglAddon } from '@xterm/addon-webgl'
 import { Unicode11Addon } from '@xterm/addon-unicode11'
 import { debounce } from 'lodash-es'
 import '@xterm/xterm/css/xterm.css'
+// Cascadia Code webfont：终端符号（box-drawing/箭头/spinner）跨端一致——
+// 手机无雅黑/Consolas 等桌面字体，缺 webfont 时回退系统字体导致符号错位
+import '@fontsource/cascadia-code/400.css'
 import { useAppStore } from '@/stores/app'
 import { useSessionStore } from '@/stores/session'
 import { useHookStore } from '@/stores/hook'
+import { useI18n } from 'vue-i18n'
 import { isMac } from '@/utils/platform'
 import { isUndoShortcut, READLINE_UNDO } from '@/utils/keyboard'
 import { attachImePositionSync } from '@/utils/ime'
@@ -31,15 +52,21 @@ import {
   ptyInput,
   ptyResize,
   ptyKill,
+  ptyClaim,
   onPtyOutput,
   onPtyExit,
+  onSessionTakenOver,
+  onSessionReclaimed,
   logMessage,
 } from '@/api/tauri'
 import { registerTerminalCommand } from '@/composables/useTerminalCommand'
+import { useIsMobile } from '@/composables/useMediaQuery'
 import { safeDispose } from '@/utils/dispose'
 import { relativizePath } from '@/utils/path'
-import { readText, writeText } from '@tauri-apps/plugin-clipboard-manager'
+import { copyText as platformCopyText, readClipboardText as platformReadText } from '@/api/platform'
+import { transport } from '@/api/transport'
 import { getCurrentWindow } from '@tauri-apps/api/window'
+import { isTauriEnv } from '@/api/platform'
 import { getCurrentWebview } from '@tauri-apps/api/webview'
 
 const props = defineProps<{
@@ -53,6 +80,9 @@ const emit = defineEmits<{
 const appStore = useAppStore()
 const sessionStore = useSessionStore()
 const hookStore = useHookStore()
+const isMobile = useIsMobile()
+
+const { t } = useI18n()
 const containerRef = ref<HTMLElement>()
 const isDragOver = ref(false)
 
@@ -76,7 +106,9 @@ async function waitForElement(tabId: string, timeout = 10000): Promise<HTMLEleme
   return null
 }
 
-// 每个 Tab 独立的 Terminal 实例（key 为 tabId）
+// 每个 Tab 独立的 Terminal 实例（key 为 tabId）。
+// 创建时 markRaw：Terminal 是高频访问对象（每输出块多次属性读写），
+// 深 reactive Proxy 会让 xterm 内部全部走 trap——输出热路径显著变慢
 const terminalInstances = reactive(new Map<string, {
   term: Terminal
   fitAddon: FitAddon
@@ -102,15 +134,22 @@ function handleNativeCopy(e: ClipboardEvent) {
   const selection = instance.term.getSelection()
   if (selection) {
     e.preventDefault()
-    writeText(selection).catch(() => {})
+    void platformCopyText(selection)
   }
 }
 
 // Unlisten functions
 let unlistenPtyOutput: (() => void) | null = null
+let unlistenTakenOver: (() => void) | null = null
+let unlistenReclaimed: (() => void) | null = null
 let unlistenPtyExit: (() => void) | null = null
 let unlistenDragDrop: (() => void) | null = null
 let unlistenWindowResized: (() => void) | null = null
+let unlistenRemoteConn: (() => void) | null = null
+
+// 浏览器远程模式：已 attach 的 ptyId 集合（attach = 接管输出流 + 控制权）。
+// 重连后服务端订阅清空，标记失效需清空重 attach
+const attachedPtyIds = new Set<string>()
 
 // ResizeObserver
 let resizeObserver: ResizeObserver | null = null
@@ -184,6 +223,7 @@ function setTerminalEl(tabId: string, el: HTMLElement | null) {
     if (instance && !instance.term.element) {
       instance.term.open(el)
       loadRendererAddons(instance.term)
+      ensureBrowserAttached(tabId)
       if (tabId === currentDisplayTabId.value) {
         requestAnimationFrame(() => instance.fitAddon.fit())
       }
@@ -200,14 +240,21 @@ const fitCurrentTerminal = debounce(() => {
   }
 }, 50)
 
-// 按平台选择字体：CJK 用等宽字体（Microsoft YaHei / Noto Sans CJK），
-// emoji 在主字体中缺失时回退到系统 emoji 字体。把 emoji 字体放在 monospace 前，
-// 确保渲染层能找到 emoji 字形（实际宽度由 Unicode 11 wcwidth 决定，与字体回退无关）
+// 按平台选择字体：等宽主字体（Cascadia Code 已打包为 webfont，全端一致命中，
+// 桌面/手机符号字形统一）+ 各端系统 CJK 回退（PingFang=iOS/macOS、雅黑=Windows、
+// Noto CJK=Android）。emoji 字体放在 monospace 前，确保渲染层能找到 emoji 字形
+// （实际宽度由 Unicode 11 wcwidth 决定，与字体回退无关）
 function pickFontFamily(): string {
   if (isMac) {
-    return '"Cascadia Code", "Fira Code", "JetBrains Mono", Consolas, "Apple Color Emoji", monospace'
+    return '"Cascadia Code", "Fira Code", "JetBrains Mono", Consolas, "PingFang SC", "Apple Color Emoji", monospace'
   }
-  return '"Cascadia Code", "Fira Code", "JetBrains Mono", Consolas, "Microsoft YaHei", "Noto Sans CJK SC", "Segoe UI Emoji", monospace'
+  return '"Cascadia Code", "Fira Code", "JetBrains Mono", Consolas, "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", "Noto Sans SC", "Segoe UI Emoji", monospace'
+}
+
+/** 手机断点字号 = 桌面设置 × 0.75（手机物理宽度小，缩小字号使每行列数接近桌面） */
+function effectiveFontSize(size: number | undefined): number {
+  const base = size ?? 12
+  return isMobile.value ? Math.max(6, Math.round(base * 0.75)) : base
 }
 
 // 在 term.open(el) 之后加载 Unicode 11 + WebGL addon
@@ -278,7 +325,7 @@ async function disposeTerminal(term: Terminal, context: string) {
 function createTerminal(tabId: string): Terminal {
   const term = new Terminal({
     fontFamily: pickFontFamily(),
-    fontSize: props.fontSize ?? 12,
+    fontSize: effectiveFontSize(props.fontSize),
     lineHeight: 1.2,
     cursorBlink: true,
     cursorStyle: 'bar',
@@ -329,7 +376,7 @@ function createTerminal(tabId: string): Terminal {
       const selection = term.getSelection()
       if (selection) {
         event.preventDefault()
-        writeText(selection).catch(() => {})
+        void platformCopyText(selection)
         return false
       }
       return true
@@ -340,7 +387,7 @@ function createTerminal(tabId: string): Terminal {
       const selection = term.getSelection()
       if (selection) {
         event.preventDefault()
-        writeText(selection).catch(() => {})
+        void platformCopyText(selection)
         return false
       }
       return true
@@ -351,7 +398,7 @@ function createTerminal(tabId: string): Terminal {
       event.preventDefault()
       const selection = term.getSelection()
       if (selection) {
-        writeText(selection).catch(() => {})
+        void platformCopyText(selection)
       }
       return false
     }
@@ -359,7 +406,7 @@ function createTerminal(tabId: string): Terminal {
     // Ctrl+V / Cmd+V 粘贴
     if ((event.ctrlKey || event.metaKey) && event.key === 'v') {
       event.preventDefault()
-      readText().then(text => {
+      platformReadText().then(text => {
         if (text) term.paste(text)
       }).catch(() => {})
       return false
@@ -396,40 +443,82 @@ onMounted(async () => {
   await setupEventListeners()
   window.addEventListener('copy', handleNativeCopy)
 
+  // webfont 迟到兜底：Cascadia Code woff2 加载完成晚于 term.open 时，
+  // 清掉按 fallback 字体缓存的 glyph atlas 并重新测量/重绘
+  document.fonts.ready.then(() => {
+    for (const instance of terminalInstances.values()) {
+      try {
+        instance.term.clearTextureAtlas()
+        instance.term.refresh(0, instance.term.rows - 1)
+      } catch { /* 实例可能已销毁 */ }
+    }
+    fitCurrentTerminal()
+  })
+
   if (containerRef.value) {
-    resizeObserver = new ResizeObserver(() => fitCurrentTerminal())
+    let lastContainerHeight = 0
+    resizeObserver = new ResizeObserver((entries) => {
+      const h = entries[0]?.contentRect.height ?? 0
+      // 容器高骤降（软键盘弹出特征）：立即 fit 并滚到底，保证光标/输入行可见
+      if (lastContainerHeight - h > 120) {
+        const instance = terminalInstances.get(currentDisplayTabId.value)
+        if (instance) {
+          requestAnimationFrame(() => {
+            instance.fitAddon.fit()
+            instance.term.scrollToBottom()
+          })
+          lastContainerHeight = h
+          return
+        }
+      }
+      lastContainerHeight = h
+      fitCurrentTerminal()
+    })
     resizeObserver.observe(containerRef.value)
   }
 
-  // 监听窗口 resize → 追踪最小化状态，恢复时主动刷新
-  const win = getCurrentWindow()
-  unlistenWindowResized = await win.onResized(async () => {
-    const minimized = await win.isMinimized()
-    if (isMinimized && !minimized) {
-      // 从最小化恢复 → fit + 刷新渲染 + 滚动到底部
-      isMinimized = false
-      const tabId = currentDisplayTabId.value
-      if (tabId) {
-        const instance = terminalInstances.get(tabId)
-        if (instance) {
-          await nextTick()
-          instance.fitAddon.fit()
-          instance.term.refresh(0, instance.term.rows - 1)
-          instance.term.scrollToBottom()
+  // 监听窗口 resize → 追踪最小化状态，恢复时主动刷新（桌面专属）
+  if (isTauriEnv) {
+    const win = getCurrentWindow()
+    unlistenWindowResized = await win.onResized(async () => {
+      const minimized = await win.isMinimized()
+      if (isMinimized && !minimized) {
+        // 从最小化恢复 → fit + 刷新渲染 + 滚动到底部
+        isMinimized = false
+        const tabId = currentDisplayTabId.value
+        if (tabId) {
+          const instance = terminalInstances.get(tabId)
+          if (instance) {
+            await nextTick()
+            instance.fitAddon.fit()
+            instance.term.refresh(0, instance.term.rows - 1)
+            instance.term.scrollToBottom()
+          }
         }
+      } else {
+        isMinimized = minimized
       }
-    } else {
-      isMinimized = minimized
-    }
-  })
+    })
+  }
 
   registerTerminalCommand(sendText)
+
+  // 浏览器远程模式：重连后（remote-connected）订阅已失效——
+  // 清 attach 标记并重新 attach 当前 Tab（会话列表拉取由 App.vue 常驻处理）
+  if (!isTauriEnv) {
+    unlistenRemoteConn = await transport.listen('remote-connected', () => {
+      attachedPtyIds.clear()
+      const tabId = currentDisplayTabId.value
+      if (tabId) ensureBrowserAttached(tabId)
+    })
+  }
 })
 
 // 设置事件监听器
 async function setupEventListeners() {
-  // 文件拖放 → 将路径输入终端
+  // 文件拖放 → 将路径输入终端（桌面专属；浏览器可后续用 HTML5 drag events 补充）
   // 项目内文件转换为相对路径，便于 Claude 直接引用
+  if (isTauriEnv) {
   unlistenDragDrop = await getCurrentWebview().onDragDropEvent((event) => {
     if (event.payload.type === 'drop') {
       isDragOver.value = false
@@ -448,12 +537,31 @@ async function setupEventListeners() {
       isDragOver.value = false
     }
   })
+  }
 
   // PTY 输出 → 写入对应 Tab 的 Terminal
   unlistenPtyOutput = await onPtyOutput(({ id, data }) => {
     for (const [_tabId, instance] of terminalInstances) {
       if (instance.ptyId === id) {
         instance.term.write(data)
+        break
+      }
+    }
+  })
+
+  // 远程（手机）接管 → 该 Tab 显示遮罩（数据层继续写入，接管回来零缺失）
+  unlistenTakenOver = await onSessionTakenOver(({ id }) => {
+    const tab = sessionStore.getTabByPtyId(id)
+    if (tab) tab.takenOver = true
+  })
+
+  // 远程归还（手机断连/主动 detach/桌面 claim）→ 解除遮罩并触发一次 fit 恢复尺寸
+  unlistenReclaimed = await onSessionReclaimed(({ id }) => {
+    const tab = sessionStore.getTabByPtyId(id)
+    if (tab) tab.takenOver = false
+    for (const [tabId, instance] of terminalInstances) {
+      if (instance.ptyId === id && tabId === currentDisplayTabId.value) {
+        instance.fitAddon.fit()
         break
       }
     }
@@ -473,6 +581,7 @@ async function setupEventListeners() {
         void disposeTerminal(instance.term, `onPtyExit(tabId=${tabId})`)
         terminalInstances.delete(tabId)
         terminalEls.delete(tabId)
+        attachedPtyIds.delete(id)
         break
       }
     }
@@ -483,9 +592,17 @@ async function setupEventListeners() {
 watch(() => props.fontSize, (newSize) => {
   if (newSize) {
     for (const instance of terminalInstances.values()) {
-      instance.term.options.fontSize = newSize
+      instance.term.options.fontSize = effectiveFontSize(newSize)
       instance.fitAddon.fit()
     }
+  }
+})
+
+/** 手机断点跨越（窗口缩放/旋转）时重算所有实例字号（×0.75 缩放） */
+watch(isMobile, () => {
+  for (const instance of terminalInstances.values()) {
+    instance.term.options.fontSize = effectiveFontSize(props.fontSize)
+    instance.fitAddon.fit()
   }
 })
 
@@ -543,7 +660,7 @@ async function createTerminalForTab(tabId: string, ptyId: string) {
   const fitAddon = new FitAddon()
   term.loadAddon(fitAddon)
 
-  terminalInstances.set(tabId, { term, fitAddon, ptyId })
+  terminalInstances.set(tabId, { term: markRaw(term), fitAddon: markRaw(fitAddon), ptyId })
 
   const el = await waitForElement(tabId)
   if (el) {
@@ -553,6 +670,8 @@ async function createTerminalForTab(tabId: string, ptyId: string) {
 
     term.open(el)
     loadRendererAddons(term)
+    // 浏览器端 attach 输出流（刷新恢复/重新显示 Tab 场景；已 attach 时幂等跳过）
+    ensureBrowserAttached(tabId)
 
     if (!isActive) {
       requestAnimationFrame(() => {
@@ -606,10 +725,16 @@ async function startTab(tabId: string) {
       rows: 24,
       type: 'claude',
       args,
+      // 浏览器远程模式：结构化启动选项（Rust 侧按同一规则拼接 CLI 参数）
+      resume: tab.sessionId ?? undefined,
+      skipPermissions: appStore.claudeOptions.skipPermissions || undefined,
+      customArgs: appStore.claudeOptions.customArgs || undefined,
     })
 
     if (info) {
-      terminalInstances.set(tabId, { term, fitAddon, ptyId: info.id })
+      // 浏览器端 spawnSession 内部已 create+attach，记录标记防重复 attach
+      attachedPtyIds.add(info.id)
+      terminalInstances.set(tabId, { term: markRaw(term), fitAddon: markRaw(fitAddon), ptyId: info.id })
       sessionStore.setTabPty(tabId, info.id)
       sessionStore.setActiveTab(tabId)
       currentDisplayTabId.value = tabId
@@ -668,10 +793,16 @@ async function restartTab(tabId: string) {
       rows: 24,
       type: 'claude',
       args,
+      // 浏览器远程模式：结构化启动选项（与 buildClaudeArgs 同一规则）
+      resume: tab.sessionId ?? undefined,
+      skipPermissions: appStore.claudeOptions.skipPermissions || undefined,
+      customArgs: appStore.claudeOptions.customArgs || undefined,
     })
 
     if (info) {
-      terminalInstances.set(tabId, { term, fitAddon, ptyId: info.id })
+      // 浏览器端 spawnSession 内部已 create+attach，记录标记防重复 attach
+      attachedPtyIds.add(info.id)
+      terminalInstances.set(tabId, { term: markRaw(term), fitAddon: markRaw(fitAddon), ptyId: info.id })
       sessionStore.setTabPty(tabId, info.id)
       sessionStore.setActiveTab(tabId)
       currentDisplayTabId.value = tabId
@@ -779,6 +910,61 @@ function focus() {
   if (instance) instance.term.focus()
 }
 
+// 浏览器远程模式：确保 Tab 已 attach（输出流 + 控制权；后 attach 优先抢占，
+// 从桌面/其他远程端接管回来即走此路径）。桌面 Tauri 模式 PTY 输出全局广播，无需 attach
+function ensureBrowserAttached(tabId: string) {
+  if (isTauriEnv) return
+  const tab = sessionStore.tabs.get(tabId)
+  if (!tab?.ptyId || tab.status !== 'running') return
+  if (attachedPtyIds.has(tab.ptyId)) return
+  const instance = terminalInstances.get(tabId)
+  if (!instance) return
+  attachedPtyIds.add(tab.ptyId)
+  transport.sendClient({
+    type: 'session.attach',
+    id: tab.ptyId,
+    cols: instance.term.cols,
+    rows: instance.term.rows,
+  })
+}
+
+// 浏览器远程模式：拉取服务端运行中的会话列表 → 重建 Tabs（刷新/新设备后的
+// 恢复入口；用户点击 Tab 时 attach 接管，不自动抢当前控制权）
+function refreshRemoteSessions() {
+  if (isTauriEnv) return
+  transport.sendClient({ type: 'sessions.list' })
+}
+
+// 触屏聚焦：iOS 对屏幕外 textarea 或合成 mousedown 内的 focus 不弹软键盘，
+// 必须在原生 click/touchend 手势内显式聚焦当前终端
+function handleTapFocus() {
+  if (!isMobile.value) return
+  const tabId = currentDisplayTabId.value
+  if (!tabId) return
+  const instance = terminalInstances.get(tabId)
+  if (!instance) return
+  // iOS/Android：xterm 内部 focus 带 { preventScroll: true }，部分移动浏览器
+  // 对这种聚焦不唤起软键盘——手势内直接聚焦裸 textarea（无 preventScroll）
+  const ta = instance.term.textarea
+  if (ta) ta.focus()
+  else instance.term.focus()
+}
+
+// 区分 tap 与滚动：touchend 时位移超阈值视为滚动，不抢焦点弹键盘
+let touchStartX = 0
+let touchStartY = 0
+function handleTouchStart(e: TouchEvent) {
+  const t = e.touches[0]
+  touchStartX = t.clientX
+  touchStartY = t.clientY
+}
+function handleTouchEnd(e: TouchEvent) {
+  const t = e.changedTouches[0]
+  if (Math.abs(t.clientX - touchStartX) < 10 && Math.abs(t.clientY - touchStartY) < 10) {
+    handleTapFocus()
+  }
+}
+
 // 兼容：重启当前活跃 Tab
 async function restartCurrentPty() {
   if (sessionStore.activeTabId) {
@@ -792,12 +978,36 @@ onUnmounted(() => {
   window.removeEventListener('copy', handleNativeCopy)
   unlistenPtyOutput?.()
   unlistenPtyExit?.()
+  unlistenTakenOver?.()
+  unlistenReclaimed?.()
   unlistenDragDrop?.()
   unlistenWindowResized?.()
+  unlistenRemoteConn?.()
   for (const [tabId, instance] of terminalInstances.entries()) {
     void disposeTerminal(instance.term, `onUnmounted(tabId=${tabId})`)
   }
 })
+
+/** 桌面端接管被远程持有的终端 */
+async function handleClaim(tabId: string) {
+  const instance = terminalInstances.get(tabId)
+  if (instance?.ptyId) {
+    // 浏览器端 claim = 重新 attach（sessionClaim），记录标记防重复；
+    // 传当前实际尺寸（attach 会 resize PTY，默认值会把终端打回 80×24）
+    attachedPtyIds.add(instance.ptyId)
+    await ptyClaim(instance.ptyId, instance.term.cols, instance.term.rows)
+    // claim 后 Rust 会 emit session-reclaimed 解除遮罩；主动 fit 恢复尺寸。
+    // 接管者自身的遮罩没有对应的解除事件（taken-over 只发给被抢方），本地解除
+    const tab = sessionStore.getTabByPtyId(instance.ptyId)
+    if (tab) tab.takenOver = false
+    instance.fitAddon.fit()
+    instance.term.focus()
+  }
+}
+
+function isTabTakenOver(tabId: string): boolean {
+  return sessionStore.tabs.get(tabId)?.takenOver ?? false
+}
 
 defineExpose({
   startTab,
@@ -809,6 +1019,7 @@ defineExpose({
   sendText,
   focus,
   fitCurrentTerminal,
+  refreshRemoteSessions,
 })
 </script>
 
@@ -824,17 +1035,64 @@ defineExpose({
   transition: box-shadow 0.15s ease;
 }
 
+/* 远程（手机）接管遮罩 */
+.taken-over-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 10;
+  background: var(--bg-primary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.taken-over-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 28px 32px;
+}
+
+.taken-over-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.taken-over-hint {
+  font-size: 12px;
+  color: var(--text-tertiary);
+}
+
+.taken-over-btn {
+  margin-top: 6px;
+  padding: 8px 18px;
+  border: none;
+  border-radius: 6px;
+  background: var(--accent-color);
+  color: #fff;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.taken-over-btn:hover {
+  opacity: 0.9;
+}
+
 .xterm-container.drag-over {
   box-shadow: inset 0 0 0 2px var(--accent-gold);
 }
 
+/* 左右留白用 left/right 定位而非 padding：FitAddon 量的是本元素
+   getComputedStyle().width（border-box 语义含 padding），padding 会让
+   cols 按含留白的宽度计算 → 终端网格比可视区宽，右侧内容被裁 */
 .terminal-wrapper {
   position: absolute;
   top: 0;
-  left: 0;
-  width: 100%;
+  left: 12px;
+  right: 12px;
   height: 100%;
-  padding: 0 12px;
   box-sizing: border-box;
   display: none;
 }

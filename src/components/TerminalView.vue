@@ -6,7 +6,11 @@
       @toggle="handleTogglePanel"
       @toggle-settings="sidebarStore.toggleSettings()"
       @open-folder="handleOpenFolder"
+      @open-remote="showRemoteModal = true"
     />
+
+    <!-- 远程访问弹窗（二维码 + 复制地址） -->
+    <RemoteModal :visible="showRemoteModal" @close="showRemoteModal = false" />
 
     <!-- 侧边栏 + 终端 -->
     <SidebarPanel
@@ -45,6 +49,8 @@
           :font-size="appStore.fontSize"
           @pty-started="handlePtyStarted"
         />
+        <!-- 快捷键工具条（手机断点）：软键盘按不出的控制键（模式切换/换行等） -->
+        <QuickKeyBar v-if="isMobile" @send="handleQuickKey" />
       </div>
     </div>
   </div>
@@ -57,15 +63,19 @@ import { useAppStore } from '@/stores/app'
 import { useSessionStore } from '@/stores/session'
 import { useSidebarStore, type SidebarPanelType } from '@/stores/sidebar'
 import { useConfigStore } from '@/stores/config'
-import { openInFileManager, logMessage } from '@/api/tauri'
+import { openInFileManager, logMessage, onRemoteSessionCreated } from '@/api/tauri'
 import { sendTerminalCommand } from '@/composables/useTerminalCommand'
 import { useWindowAttention } from '@/composables/useWindowAttention'
 import { useStatusMonitor } from '@/composables/useStatusMonitor'
 import { getCurrentWindow } from '@tauri-apps/api/window'
+import { isTauriEnv } from '@/api/platform'
 import TerminalHeader from './TerminalHeader.vue'
 import XTermTerminal from './XTermTerminal.vue'
 import IconBar from './IconBar.vue'
+import QuickKeyBar from './QuickKeyBar.vue'
+import RemoteModal from './RemoteModal.vue'
 import SidebarPanel from './sidebar/SidebarPanel.vue'
+import { useIsMobile } from '@/composables/useMediaQuery'
 
 const emit = defineEmits<{
   back: []
@@ -76,10 +86,22 @@ const props = defineProps<{
 }>()
 
 const appStore = useAppStore()
+
+// 远程访问弹窗
+const showRemoteModal = ref(false)
+// 远程新建会话监听清理函数
+let unlistenRemoteCreated: (() => void) | null = null
 const sessionStore = useSessionStore()
 const sidebarStore = useSidebarStore()
 const configStore = useConfigStore()
 const terminalRef = ref()
+
+const isMobile = useIsMobile()
+
+/** 快捷键工具条：直发控制序列到当前显示终端（sendText 含重新聚焦） */
+function handleQuickKey(bytes: string) {
+  terminalRef.value?.sendText(bytes)
+}
 
 const { t } = useI18n()
 
@@ -95,7 +117,14 @@ const showEmptyState = computed(() => {
   return projectTabs.length === 0
 })
 
+// 会话面板打开时刷新服务端运行中会话列表（浏览器远程模式：
+// 其他端新建/关闭的会话经此同步到本地 Tabs）
+watch(() => sidebarStore.panelVisible && sidebarStore.activePanel === 'sessions', (open) => {
+  if (open) terminalRef.value?.refreshRemoteSessions?.()
+})
+
 function updateWindowTitle(cwd: string) {
+  if (!isTauriEnv) return
   const parts = cwd.replace(/\\/g, '/').split('/')
   const folderName = parts[parts.length - 1] || 'CC-Box'
   getCurrentWindow().setTitle(folderName).catch(() => {})
@@ -119,6 +148,26 @@ onMounted(async () => {
   // 监听快捷键事件（必须在 cwd 检查之前设置）
   window.addEventListener('terminal:newSession', handleNewSession)
   window.addEventListener('terminal:restartSession', handleRestartSession)
+
+  // 远程（手机）新建/恢复会话：建 tab 绑定 Rust 侧已 spawn 的 PTY
+  // data 为 JSON：{cwd, resume}（resume 为空串表示新建；JSON 避免 cwd 含 \t 时截断）
+  unlistenRemoteCreated = await onRemoteSessionCreated(({ id, data }) => {
+    if (!data) return
+    let cwd = ''
+    let resume = ''
+    try {
+      const parsed = JSON.parse(data)
+      cwd = parsed.cwd ?? ''
+      resume = parsed.resume ?? ''
+    } catch {
+      return
+    }
+    if (!cwd) return
+    const tabId = sessionStore.createTab(cwd, resume ? { sessionId: resume } : undefined)
+    sessionStore.setTabPty(tabId, id)
+    sessionStore.setActiveTab(tabId)
+    void nextTick(() => terminalRef.value?.startTab(tabId))
+  })
 
   const cwd = appStore.cwd
   if (!cwd) return
@@ -147,6 +196,7 @@ onMounted(async () => {
 onUnmounted(() => {
   window.removeEventListener('terminal:newSession', handleNewSession)
   window.removeEventListener('terminal:restartSession', handleRestartSession)
+  unlistenRemoteCreated?.()
 })
 
 // KeepAlive 激活 → 改为 visible watcher（v-show 常驻 DOM）
@@ -281,6 +331,13 @@ function handlePtyStarted(tabId: string, _ptyId: string) {
   background: var(--bg-primary);
 }
 
+/* 手机断点：IconBar 变 fixed 底部横栏，主内容让出空间 */
+@media (max-width: 768px) {
+  .terminal-view {
+    padding-bottom: calc(52px + var(--safe-area-bottom));
+  }
+}
+
 .main-content {
   flex: 1;
   display: flex;
@@ -294,6 +351,20 @@ function handlePtyStarted(tabId: string, _ptyId: string) {
   overflow: hidden;
   position: relative;
   background: var(--terminal-bg);
+}
+
+/* 手机断点：终端 + 快捷键工具条纵向排布（工具条占高，终端 fit 随之收缩） */
+@media (max-width: 768px) {
+  .terminal-container {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .terminal-container :deep(.xterm-container) {
+    flex: 1;
+    min-height: 0;
+    height: auto;
+  }
 }
 
 .empty-state-overlay {

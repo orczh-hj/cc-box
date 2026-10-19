@@ -1,6 +1,9 @@
 <template>
-<div class="app-root">
-  <TitleBar />
+<!-- 浏览器模式：WS 认证完成前只显示 TokenGate（主 UI 挂载后 invoke 才可用） -->
+<TokenGate v-if="!isTauriEnv && !remoteReady" @connected="remoteReady = true" />
+<div v-else ref="appRootRef" class="app-root" :class="{ 'browser-env': !isTauriEnv }">
+  <!-- 自定义标题栏为桌面专属（浏览器使用原生标签栏；遮罩层顶部偏移随之取消） -->
+  <TitleBar v-if="isTauriEnv" />
 
   <!-- 环境检查提示 -->
   <div v-if="appStore.checkFailed" class="check-failed-overlay">
@@ -106,19 +109,26 @@
       @open-settings="sidebarStore.openSettings()"
     />
   </Transition>
+
+  <!-- 浏览器模式：添加项目的电脑目录选择器（桌面用系统原生选择器） -->
+  <DirectoryPicker
+    :visible="showDirPicker"
+    @close="showDirPicker = false"
+    @select="handleDirPicked"
+  />
 </div>
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, defineAsyncComponent, nextTick, reactive } from 'vue'
+import { ref, onMounted, onUnmounted, defineAsyncComponent, nextTick, reactive, watch } from 'vue'
 import { useAppStore } from '@/stores/app'
 import { useHookStore } from '@/stores/hook'
 import { useSessionStore } from '@/stores/session'
 import { useSidebarStore } from '@/stores/sidebar'
 import { useUpdateStore } from '@/stores/update'
 import { useI18n } from 'vue-i18n'
-import { getCurrentWindow } from '@tauri-apps/api/window'
-import { open } from '@tauri-apps/plugin-shell'
+import { openExternal, isTauriEnv } from '@/api/platform'
+import { transport } from '@/api/transport'
 import {
   selectDirectory,
   onMenuSettings,
@@ -135,6 +145,8 @@ import {
   onOpenDirectory
 } from '@/api/tauri'
 import { useAppShortcuts } from '@/composables/useAppShortcuts'
+import TokenGate from '@/components/TokenGate.vue'
+import DirectoryPicker from '@/components/DirectoryPicker.vue'
 import WelcomeView from '@/components/WelcomeView.vue'
 import ProjectSelectView from '@/components/ProjectSelectView.vue'
 import TitleBar from '@/components/TitleBar.vue'
@@ -151,7 +163,39 @@ const updateStore = useUpdateStore()
 const { t } = useI18n()
 const { setupShortcutListeners } = useAppShortcuts()
 const currentView = ref<ViewType>('welcome')
+/** 浏览器模式：添加项目的电脑目录选择器 */
+const showDirPicker = ref(false)
+/** 浏览器模式：远程 WS 认证完成（TokenGate 触发），主 UI 启动链的门控 */
+const remoteReady = ref(false)
 const terminalViewRef = ref()
+const appRootRef = ref<HTMLElement | null>(null)
+
+// 浏览器模式软键盘适配：仅当键盘弹出（vv 明显小于视口，如 <80%）时把高度
+// 钉到 vv.height（100dvh 不反映键盘）；否则移除 inline 高度回落 100dvh。
+// 阈值化是为了不影响普通滚动——iOS 滚动时地址栏收放也会触发 vv resize，
+// 无条件钉高度会造成布局跳变、滚动中断。
+let unlistenVvResize: (() => void) | null = null
+function setupVisualViewportSync() {
+  if (isTauriEnv || !window.visualViewport) return
+  const vv = window.visualViewport
+  const apply = () => {
+    if (!appRootRef.value) return
+    const keyboardOut = vv.height < window.innerHeight * 0.8
+    appRootRef.value.style.height = keyboardOut ? `${vv.height}px` : ''
+    if (keyboardOut) {
+      // iOS 聚焦输入时浏览器可能整页滚动，钉回顶部（否则输入行被推出可视区）
+      window.scrollTo(0, 0)
+    }
+  }
+  vv.addEventListener('resize', apply)
+  // 部分移动浏览器键盘弹出只派发 window resize（不发 vv resize）
+  window.addEventListener('resize', apply)
+  apply()
+  unlistenVvResize = () => {
+    vv.removeEventListener('resize', apply)
+    window.removeEventListener('resize', apply)
+  }
+}
 
 // 自动安装状态
 const isInstalling = ref(false)
@@ -233,15 +277,45 @@ let unlistenRestart: (() => void) | null = null
 const shortcutUnlisteners: (() => void)[] = []
 
 onMounted(async () => {
+  // 浏览器模式：等 TokenGate 完成 WS 认证（remoteReady watch 触发启动链）
+  if (!isTauriEnv && !remoteReady.value) return
+  await startApp()
+})
+
+/** 浏览器模式认证完成时机 */
+watch(remoteReady, async (v) => {
+  if (v) await startApp()
+})
+
+// 浏览器模式：运行中会话恢复入口（常驻订阅——TerminalView 未挂载的项目页也要能
+// 恢复 Tabs）。remote-sessions = 服务端应答；remote-connected = 重连后重拉
+let unlistenRemoteSessions: (() => void) | null = null
+let unlistenRemoteConn: (() => void) | null = null
+function setupRemoteSessionSync() {
+  void transport.listen<Array<{ id: string; type: string; cwd: string; working: boolean; pending: boolean }>>('remote-sessions', (list) => {
+    sessionStore.adoptRemoteSessions(list)
+  })
+  void transport.listen('remote-connected', () => {
+    transport.sendClient({ type: 'sessions.list' })
+  })
+  transport.sendClient({ type: 'sessions.list' })
+}
+
+async function startApp() {
   await appStore.runChecks()
   if (appStore.checkFailed) {
     return
   }
 
+  if (!isTauriEnv) setupRemoteSessionSync()
+  setupVisualViewportSync()
   initAfterChecks()
-})
+}
 
 onUnmounted(() => {
+  unlistenVvResize?.()
+  unlistenRemoteSessions?.()
+  unlistenRemoteConn?.()
   unlistenSettings?.()
   unlistenShortcuts?.()
   unlistenFontSize?.()
@@ -252,7 +326,18 @@ onUnmounted(() => {
   window.removeEventListener('app:toggleHome', handleToggleHome)
 })
 
+/** 目录选择器选中路径 → 与桌面选择器一致的打开流程 */
+function handleDirPicked(path: string) {
+  showDirPicker.value = false
+  handleOpenProject(path)
+}
+
 async function handleSelectProject() {
+  // 浏览器模式：目录选择器组件浏览电脑路径（rpc list_directories）
+  if (!isTauriEnv) {
+    showDirPicker.value = true
+    return
+  }
   const result = await selectDirectory()
   if (result) {
     const normalizePath = (p: string) => p.replace(/\\/g, '/').toLowerCase()
@@ -331,7 +416,7 @@ function handleToggleHome() {
 }
 
 function openUrl(url: string) {
-  open(url)
+  openExternal(url)
 }
 
 async function retryChecks() {
@@ -379,12 +464,15 @@ function initAfterChecks() {
 
   window.addEventListener('app:toggleHome', handleToggleHome)
 
-  checkForUpdates().then(info => {
-    if (info) {
-      sidebarStore.setUpdateInfo(info)
-      updateStore.setUpdateInfo(info)
-    }
-  }).catch(() => {})
+  // 应用自动更新为桌面专属（浏览器经 Web 访问，更新动作在桌面执行）
+  if (isTauriEnv) {
+    checkForUpdates().then(info => {
+      if (info) {
+        sidebarStore.setUpdateInfo(info)
+        updateStore.setUpdateInfo(info)
+      }
+    }).catch(() => {})
+  }
 
   // 启动只读本地 Claude CLI 版本号，不发 HTTP 请求对比 OSS
   getInstalledClaudeVersion().then(version => {
@@ -514,12 +602,19 @@ async function autoInstall() {
   display: flex;
   flex-direction: column;
   height: 100vh;
+  height: 100dvh; /* 移动端动态视口：软键盘弹出/收起不被裁切 */
   overflow: hidden;
+  /* 自定义标题栏高度（浏览器模式无标题栏置 0，遮罩层顶部随之贴边） */
+  --titlebar-h: 32px;
+}
+
+.app-root.browser-env {
+  --titlebar-h: 0px;
 }
 
 .overlay-view {
   position: fixed;
-  top: 32px;
+  top: var(--titlebar-h);
   left: 0;
   right: 0;
   bottom: 0;
@@ -538,7 +633,7 @@ async function autoInstall() {
 
 .check-failed-overlay {
   position: fixed;
-  top: 32px;
+  top: var(--titlebar-h);
   left: 0;
   right: 0;
   bottom: 0;

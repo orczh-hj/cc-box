@@ -221,4 +221,52 @@ describe('session store', () => {
       expect(tab.name).toBe('My Session')
     })
   })
+
+  // ==================== adoptRemoteSessions（浏览器远程模式：运行中会话恢复入口） ====================
+
+  describe('adoptRemoteSessions', () => {
+    // 空列表采纳 2 个运行中会话：各建 running Tab，绑定 ptyId，name 取目录名
+    it('AdoptRemoteSessions_NewSessions_001', () => {
+      const store = useSessionStore()
+      store.adoptRemoteSessions([
+        { id: 'pty-1', type: 'claude', cwd: 'D:\\work\\proj-a', working: true, pending: false },
+        { id: 'pty-2', type: 'claude', cwd: '/home/user/proj-b', working: false, pending: true },
+      ])
+      expect(store.tabs.size).toBe(2)
+      const tab1 = store.getTabByPtyId('pty-1')!
+      expect(tab1.status).toBe('running')
+      expect(tab1.projectPath).toBe('D:\\work\\proj-a')
+      expect(tab1.name).toBe('proj-a')
+      expect(tab1.working).toBe(true)
+      const tab2 = store.getTabByPtyId('pty-2')!
+      expect(tab2.name).toBe('proj-b')
+      expect(tab2.pending).toBe(true)
+    })
+
+    // 重复采纳同 ptyId：不新建 Tab，仅更新 working/pending
+    it('AdoptRemoteSessions_DedupByPtyId_001', () => {
+      const store = useSessionStore()
+      store.adoptRemoteSessions([
+        { id: 'pty-1', type: 'claude', cwd: '/proj', working: false, pending: false },
+      ])
+      const tabId = store.getTabByPtyId('pty-1')!.tabId
+      store.adoptRemoteSessions([
+        { id: 'pty-1', type: 'claude', cwd: '/proj', working: true, pending: false },
+      ])
+      expect(store.tabs.size).toBe(1)
+      const tab = store.getTabByPtyId('pty-1')!
+      expect(tab.tabId).toBe(tabId)
+      expect(tab.working).toBe(true)
+    })
+
+    // 已退出的会话不在列表中返回时，已有 Tab 不受影响（等待 pty-exit 事件清理）
+    it('AdoptRemoteSessions_KeepExistingTabs_001', () => {
+      const store = useSessionStore()
+      store.adoptRemoteSessions([
+        { id: 'pty-1', type: 'claude', cwd: '/proj', working: false, pending: false },
+      ])
+      store.adoptRemoteSessions([])
+      expect(store.tabs.size).toBe(1)
+    })
+  })
 })

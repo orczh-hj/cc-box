@@ -51,6 +51,11 @@ cc-box/
 │   │   ├── hook_events.rs      # Hook 事件数据结构与提取
 │   │   ├── hook_server.rs      # Hook HTTP 服务器（接收 Claude 运行时事件）
 │   │   ├── hook_config.rs      # Hook Plugin 文件管理
+│   │   ├── remote_server.rs    # **远程访问服务器**（局域网直连：axum WS + Web UI 嵌入 + token 认证）
+│   │   ├── remote_state.rs     # **远程状态与消息处理**（会话聚合、输出 tee、working/pending 状态机、attach 独占、新建/关闭；局域网/中继共用唯一 handler）
+│   │   ├── remote_client.rs    # **中继出站客户端**（连接 cc-box-relay、手机连接桥接、断线重连）
+│   │   ├── rpc_dispatch.rs     # **RPC 命令分发器**（rpc_table! 宏表：一行一命令；浏览器经 WS 调用 Tauri command 的唯一入口；差集守卫测试）
+│   │   ├── events.rs           # **事件单一出口**（事件名常量 + emit_all：Tauri emit 与远程广播二合一）
 │   │   ├── checks.rs           # 环境检查
 │   │   ├── logger.rs           # 日志系统（FileLogger、文件轮转）
 │   │   └── updater.rs          # 自动更新（GitHub Releases）
@@ -61,11 +66,17 @@ cc-box/
 │
 ├── src/                        # Vue 3 前端
 │   ├── api/
-│   │   ├── tauri.ts            # Tauri invoke/listen 封装
-│   │   └── provider.ts         # **Provider API**（Tauri invoke 封装）
+│   │   ├── transport.ts        # **传输层接口**（invoke/listen/会话 API；按运行环境选实现，组件零感知桌面/浏览器）
+│   │   ├── env.ts              # 环境检测（isTauri = '__TAURI_INTERNALS__' in window）
+│   │   ├── tauri-transport.ts  # 桌面实现（转发 Tauri invoke/listen）
+│   │   ├── remote-transport.ts # 浏览器实现（WS + rpc.call 桥 + 事件映射 pty.output→pty-output 等）
+│   │   ├── tauri.ts            # invoke/listen 封装（经 transport，签名与 @tauri-apps/api 一致）
+│   │   ├── provider.ts         # **Provider API**（经 transport）
+│   │   └── platform.ts         # 平台能力降级（剪贴板 execCommand 回退、openExternal）
 │   ├── components/             # UI 组件
-│   │   ├── App.vue             # 视图切换 + 环境检查
-│   │   ├── TitleBar.vue        # 自定义标题栏（Windows）
+│   │   ├── App.vue             # 视图切换 + 环境检查 + TokenGate 认证门
+│   │   ├── TokenGate.vue       # 浏览器远程模式 token 认证（#token=/#pair= 解析）
+│   │   ├── TitleBar.vue        # 自定义标题栏（Windows；浏览器模式隐藏）
 │   │   ├── WelcomeView.vue     # 欢迎页
 │   │   ├── ProjectSelectView.vue # 项目选择页
 │   │   ├── TerminalView.vue    # 终端主视图容器
@@ -85,11 +96,11 @@ cc-box/
 │   │   └── providerPresets.ts  # **Provider 预设模板**（50+ 厂商）
 │   ├── stores/                 # Pinia：app、session、sidebar、config、hook、providers
 │   ├── types/                  # TypeScript 类型定义（pty、session、project、config、app、hook、provider）
-│   ├── composables/            # useAppShortcuts、useTerminalCommand、useStatusMonitor、useWindowAttention
+│   ├── composables/            # useAppShortcuts、useTerminalCommand、useStatusMonitor、useWindowAttention、useMediaQuery
 │   ├── utils/                  # platform 工具
 │   └── styles/global.css       # CSS 变量与全局样式
 │
-├── remote/                     # **远程连接**（中继服务器 relay/、手机 Web UI web/、专属文档 docs/）
+├── remote/                     # **远程连接**（协议正本 protocol/、中继服务器 relay/、专属文档 docs/；Web UI = 主应用 dist，无独立子应用）
 │
 ├── docs/                       # 详细文档
 ├── package.json
@@ -99,11 +110,13 @@ cc-box/
 ## 核心数据流
 
 ```
-xterm.js ←→ Tauri invoke/listen ←→ pty.rs (Rust) ←→ portable-pty ←→ Claude CLI
+桌面：  xterm.js ←→ transport(tauri) ←→ Tauri invoke/listen ←→ pty.rs (Rust) ←→ portable-pty ←→ Claude CLI
+浏览器：xterm.js ←→ transport(remote) ←→ WS(rpc.call/session.*) ←→ remote_state/rpc_dispatch ←→ pty.rs
 ```
 
-- 用户输入 → `onData` → `invoke('pty_input')` → PTY writer → Claude CLI
-- CLI 输出 → PTY reader → `decode_output()`（UTF-8 优先，失败回退 GBK，兼容 Windows 中文子进程）→ `emit('pty-output')` → `term.write()` → xterm.js
+- 用户输入 → `onData` → `transport.sessionInput` →（桌面 pty_input / 浏览器 pty.input 消息）→ PTY writer → Claude CLI
+- CLI 输出 → PTY reader → `decode_output()`（UTF-8 优先，失败回退 GBK，兼容 Windows 中文子进程）→（桌面 `emit('pty-output')` / 远程 push_output 广播 PtyOutput，remote-transport 映射回同名事件）→ `term.write()` → xterm.js
+- 浏览器远程模式：TokenGate 认证（#token=/#pair=）→ WS → rpc.call 调 Tauri command（rpc_dispatch 白名单）；PTY 数据流不走 rpc，走 session.create/attach/pty.input 专用消息（attach 即订阅、独占语义）
 
 ### Hook 监控数据流
 
@@ -194,6 +207,8 @@ npm run release -- --oss-only v0.5.1
 
 详细流程 → [docs/release-process.md](docs/release-process.md)
 
+**远程改动发布提醒**：前端（src/）、relay（remote/relay/）、协议（remote/protocol/）任一改动，除桌面版本发布外**必须同步重编部署 relay**（手机 UI 是 relay 编译时嵌入的 dist），顺序先桌面后 relay——每次版本发布的完整清单见 [docs/release-process.md](docs/release-process.md)「远程组件发布」一节。
+
 ## 详细文档
 
 | 文档                                                           | 内容                                                    |
@@ -215,7 +230,9 @@ npm run release -- --oss-only v0.5.1
 | [docs/roadmap.md](docs/roadmap.md)                           | 开发路线图、进度跟踪、待办事项                                       |
 | [docs/logging.md](docs/logging.md)                           | 日志文件路径、级别策略、轮转与清理机制                                   |
 | [docs/release-process.md](docs/release-process.md)           | 版本号管理、本地打包、CI/CD 发布、签名与分发                             |
-| [remote/README.md](remote/README.md)                         | **远程连接设计文档**：双模式架构、消息协议、独占接管、中继部署、实施阶段  |
+| [remote/README.md](remote/README.md)                         | **远程连接设计文档**：双模式架构、统一管理、消息协议、独占接管、中继部署、实施阶段 |
+| [remote/docs/deploy.md](remote/docs/deploy.md)               | **中继部署指南**：cc-box-relay 构建、systemd、nginx 反代、桌面接入（环境变量）、**本地测试环境变量**（CC_BOX_RELAY_URL/BIND）与多实例宿主制 |
+| [remote/docs/manual-test-cases.md](remote/docs/manual-test-cases.md) | **远程手动测试条目**：真机访问、状态圆点、断线重连、token 安全、快捷键工具条、多实例宿主制 |
 
 外部参考：[Claude Code 线上文档](https://code.claude.com/docs/llms.txt)
 
@@ -227,6 +244,29 @@ npm run release -- --oss-only v0.5.1
 - Rust 结构体返回前端时统一使用 `#[serde(rename_all = "camelCase")]`
 - 添加新 Tauri Command：commands.rs 定义 → lib.rs 注册 → api/tauri.ts 封装
 - 添加新 Tauri JS API 调用时，必须确认 `capabilities/default.json` 中有对应权限（`<plugin>:default` 不包含大部分写操作，需显式添加）→ 详见 [docs/capabilities.md](docs/capabilities.md)
+
+### 新增功能检查清单（统一管理）
+
+UI 已浏览器化（一套 UI 走桌面 Tauri / 宽屏浏览器 / 手机浏览器），新功能必须登记到对应单一注册链，防两端漂移：
+
+- **新 Tauri command** → `rpc_dispatch.rs` 的 `rpc_table!` 宏表登记（一行一命令）或 `EXCLUDED` 显式排除（系统级）。差集守卫测试断言 `lib.rs invoke_handler 注册表 == RPC_WHITELIST + EXCLUDED`，漏登记时测试失败强制评估
+- **新事件** → `events.rs` 常量 + `emit_all`；远程会话类事件用 `remote_state::emit_event`（桌面+广播）/`emit_event_ex`（排除接管者）/`emit_desktop_only`（仅桌面）
+- **新协议消息** → `remote/protocol/` 四处同步：crate 定义 → protocol.ts → samples/ JSON 样例 → remote/docs/protocol.md（Rust 与 Vitest 契约测试共跑样例）
+- **CLI 启动参数拼接** → 只改 `pty::build_claude_args`（Rust 单一核心，session.create 与桌面 spawn 共用），勿在前端另写一份
+- **前端 invoke/listen** → 一律经 `src/api/transport.ts`（组件禁止直接 import @tauri-apps/api；桌面专属 API 用 `transport.env.isTauri` 守卫）
+
+### 响应式适配约定（手机断点 ≤768px）
+
+一套 UI 走桌面 Tauri / 宽屏浏览器 / 手机浏览器，断点统一 **768px**：
+
+- **纯样式分支**一律写 `@media (max-width: 768px)`（IconBar 底部横栏、SidebarPanel 抽屉、ProjectSelectView 单栏折叠、ProviderCard 按钮换行等）
+- **结构分支**（两套 DOM，如 SettingsView 竖导航/顶部 tab）用 `useIsMobile()`（`src/composables/useMediaQuery.ts`，与 CSS 断点一致）
+- **终端字号**：手机 = 桌面设置 × 0.75（`XTermTerminal` 的 `effectiveFontSize`），断点跨越自动重算
+- **软键盘**：App.vue 同步 `visualViewport.height` 到 app-root 高度，驱动终端 fit
+- **safe-area**：底部栏用 `--safe-area-bottom`（env(safe-area-inset-bottom)），视口 meta 带 viewport-fit=cover
+- **触屏适配**：所有"hover 才显示"的操作按钮必须包 `@media (hover: hover)`（触屏设备 hover:none 无悬停，按钮常显——SessionItem/ProviderCard 已改）；快捷键工具条（QuickKeyBar）补软键盘按不出的控制键
+- **触屏已知限制**：Provider 列表拖拽排序（HTML5 drag）移动端不可用，待需要时补上/下移按钮
+- 构建产物由 remote_server/relay 的 rust-embed 嵌入：改前端后 `npm run build` 在 8747 即时生效（debug 实时读 dist）；**中继端（orczh.top:8800）是 release 编译时嵌入，必须重编 relay 并重部署**——完整流程见 remote/docs/deploy.md「日常更新部署（复用手册）」
 
 ### 测试要求
 

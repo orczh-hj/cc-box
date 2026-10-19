@@ -345,7 +345,8 @@ async function handleImportCcSwitch() {
   border: 1px solid var(--border-color);
   border-radius: var(--radius-lg);
   padding: 24px;
-  min-width: 320px;
+  /* 手机视口内收缩（100vw - 弹窗 padding - 视口边距） */
+  min-width: min(320px, calc(100vw - 64px));
   box-shadow: var(--shadow-xl);
 }
 

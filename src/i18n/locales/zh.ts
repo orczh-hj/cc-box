@@ -21,6 +21,41 @@ export default {
   update: '更新',
   about: '关于',
 
+  // Remote（IconBar 按钮 + 二维码弹窗）
+  titleRemote: '远程访问（手机扫码）',
+  remoteTitle: '远程访问',
+  remoteQrHint: '手机扫码，或在浏览器输入地址（需同一 Wi-Fi）',
+  remoteLanOnly: '局域访问',
+  remoteCopyUrl: '复制地址',
+  remoteCopied: '已复制',
+  remoteStop: '停止远程访问',
+  remoteEnable: '开启远程访问',
+  remoteEnableHint: '远程访问未在运行；开启后可用手机扫码连接本机',
+  remoteTakenOver: '此终端已在远程端接管',
+  remoteTakenOverHint: '内容仍在同步，点击按钮随时接管回来',
+  remoteClaimBack: '接管回来',
+  remoteRelayConnecting: '中继连接中…',
+  remoteRelayPairHint: '手机扫码配对（一次配对，长期有效）',
+  remoteRelayNotConfigured: '中继未连接，正在自动重试…',
+  remoteHostedElsewhere: '远程服务由本机另一 CC-Box 实例提供，扫码连接的是该实例',
+
+  // 快捷键工具条（手机断点）
+  quickKeyEsc: '取消/Esc',
+  quickKeyMode: '切换工作模式 (Shift+Tab)',
+  quickKeyNewline: '插入换行不提交 (Ctrl+J)',
+  quickKeyInterrupt: '中断 (Ctrl+C)',
+
+  // 目录选择器（浏览器远程端添加项目）
+  dirPickerTitle: '选择电脑上的项目文件夹',
+  dirPickerRoot: '此电脑（磁盘根目录）',
+  dirPickerEnterPath: '或输入完整路径…',
+  dirPickerGo: '前往',
+  dirPickerEmpty: '此处没有子文件夹',
+  dirPickerUp: '上一级',
+  dirPickerSelect: '选择此文件夹',
+  dirPickerSortName: '按名称',
+  dirPickerSortModified: '按最近修改',
+
   // Appearance section
   appearanceTitle: '外观',
   fontSize: '字体大小',

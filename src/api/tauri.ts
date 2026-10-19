@@ -1,8 +1,20 @@
-import { invoke } from '@tauri-apps/api/core';
-import { listen, type Unlisten } from '@tauri-apps/api/event';
+// 传输层统一入口（统一管理：桌面 Tauri 与浏览器远程共用同一套封装）。
+// invoke/listen 签名与 @tauri-apps/api 完全一致，下方函数体零感知运行环境。
+// （箭头包装而非方法解构——remoteTransport.invoke 内部依赖 this）
+import { transport, type Unlisten } from './transport';
+
+const invoke = <T,>(cmd: string, args?: Record<string, unknown>): Promise<T> =>
+  transport.invoke<T>(cmd, args);
+const listen = <T,>(event: string, cb: (payload: T) => void): Promise<Unlisten> =>
+  transport.listen<T>(event, cb);
+
+// 桌面专属插件 API（浏览器模式调用会 reject；调用方负责 isTauri 守卫）
 import { open } from '@tauri-apps/plugin-dialog';
 import { check } from '@tauri-apps/plugin-updater';
 import { relaunch } from '@tauri-apps/plugin-process';
+
+export const isTauriEnv = transport.env.isTauri;
+export const remoteTransportRef = transport;
 
 // 从统一类型目录导入
 import type {
@@ -29,6 +41,7 @@ import type {
   HomeData,
   CheckResult,
   HookEventPayload,
+  RemoteStatus,
 } from '@/types';
 
 // 重新导出类型（保持兼容性）
@@ -65,26 +78,40 @@ interface PtySpawnOptions {
   rows: number
   type: 'claude' | 'shell'
   args?: string[]
+  /** 浏览器远程模式：结构化启动选项（桌面模式忽略，走 args） */
+  resume?: string
+  skipPermissions?: boolean
+  customArgs?: string
 }
 
 export const ptySpawn = async (options: PtySpawnOptions): Promise<PtySpawnResult> => {
-  return invoke<PtySpawnResult>('pty_spawn', { options });
+  // 统一会话创建入口：桌面 pty_spawn / 浏览器 session.create+attach（transport 分发）
+  const r = await transport.spawnSession(options);
+  return { id: r.id, type: options.type, cwd: r.cwd };
 };
 
 export const ptyInput = async (id: string, data: string): Promise<boolean> => {
-  return invoke<boolean>('pty_input', { id, data });
+  return transport.sessionInput(id, data);
 };
 
 export const ptyResize = async (id: string, cols: number, rows: number): Promise<boolean> => {
-  return invoke<boolean>('pty_resize', { id, cols, rows });
+  return transport.sessionResize(id, cols, rows);
 };
 
 export const ptyKill = async (id: string): Promise<boolean> => {
-  return invoke<boolean>('pty_kill', { id });
+  return transport.sessionKill(id);
 };
 
 export const ptyKillAll = async (): Promise<void> => {
-  return invoke<void>('pty_kill_all');
+  // 浏览器模式无此命令（系统级），静默跳过
+  if (isTauriEnv) {
+    await invoke<void>('pty_kill_all');
+  }
+};
+
+/** 桌面端/本端接管被远程持有的会话（浏览器端 = 重新 attach 抢占，传实际尺寸防重置） */
+export const ptyClaim = async (id: string, cols?: number, rows?: number): Promise<void> => {
+  return transport.sessionClaim(id, cols, rows);
 };
 
 // ============================================
@@ -92,14 +119,26 @@ export const ptyKillAll = async (): Promise<void> => {
 // ============================================
 
 export const onPtyOutput = (callback: (payload: PtyOutputPayload) => void): Promise<Unlisten> =>
-  listen<PtyOutputPayload>('pty-output', (event) => callback(event.payload));
+  listen<PtyOutputPayload>('pty-output', callback);
 
 export const onPtyExit = (callback: (payload: PtyExitPayload) => void): Promise<Unlisten> =>
-  listen<PtyExitPayload>('pty-exit', (event) => callback(event.payload));
+  listen<PtyExitPayload>('pty-exit', callback);
+
+/** 远程接管事件（payload 为 { id: ptyId }） */
+export const onSessionTakenOver = (callback: (payload: { id: string }) => void): Promise<Unlisten> =>
+  listen<{ id: string }>('session-taken-over', callback);
+
+/** 远程归还事件（payload 为 { id: ptyId }） */
+export const onSessionReclaimed = (callback: (payload: { id: string }) => void): Promise<Unlisten> =>
+  listen<{ id: string }>('session-reclaimed', callback);
+
+/** 远程（手机）新建会话事件（payload 为 { id: ptyId, data: cwd }），桌面建 tab 绑定该 PTY */
+export const onRemoteSessionCreated = (callback: (payload: { id: string; data: string }) => void): Promise<Unlisten> =>
+  listen<{ id: string; data: string }>('remote-session-created', callback);
 
 // Hook 监控事件
 export const onHookEvent = (callback: (payload: HookEventPayload) => void): Promise<Unlisten> =>
-  listen<HookEventPayload>('hook-event', (event) => callback(event.payload));
+  listen<HookEventPayload>('hook-event', callback);
 
 // Menu events
 export const onMenuSettings = (callback: () => void): Promise<Unlisten> =>
@@ -109,10 +148,10 @@ export const onMenuShortcuts = (callback: () => void): Promise<Unlisten> =>
   listen('menu:shortcuts', () => callback());
 
 export const onConfigFontSize = (callback: (size: number) => void): Promise<Unlisten> =>
-  listen<number>('config:fontSize', (event) => callback(event.payload));
+  listen<number>('config:fontSize', callback);
 
 export const onTerminalRestart = (callback: (data: { cwd: string }) => void): Promise<Unlisten> =>
-  listen<{ cwd: string }>('terminal:restart', (event) => callback(event.payload));
+  listen<{ cwd: string }>('terminal:restart', callback);
 
 // ============================================
 // Projects and Sessions
@@ -129,6 +168,17 @@ export const getHomeData = (projectLimit?: number, sessionLimit?: number): Promi
 
 export const getProjects = (limit?: number, offset?: number): Promise<Project[]> =>
   invoke<Project[]>('get_projects', { limit, offset });
+
+/** 目录浏览条目（远程端"添加项目"的目录选择器；仅子目录） */
+export interface DirEntryLite {
+  name: string
+  path: string
+  /** 修改时间（Unix 毫秒；取不到为 null） */
+  modified: number | null
+}
+
+export const listDirectories = (path?: string): Promise<DirEntryLite[]> =>
+  invoke<DirEntryLite[]>('list_directories', { path: path ?? null });
 
 export const getProjectInfo = (path: string): Promise<Project | null> =>
   invoke<Project | null>('get_project_info', { path });
@@ -161,6 +211,20 @@ export const getAppConfig = (): Promise<AppConfig> =>
 
 export const updateAppConfig = (updates: Record<string, unknown>): Promise<void> =>
   invoke<void>('update_app_config', { updates });
+
+// ============================================
+// Remote
+// ============================================
+
+export const getRemoteStatus = (): Promise<RemoteStatus> =>
+  invoke<RemoteStatus>('get_remote_status');
+
+export const setRemoteEnabled = (enabled: boolean): Promise<RemoteStatus> =>
+  invoke<RemoteStatus>('set_remote_enabled', { enabled });
+
+/** 配置/停用中继（url 为空字符串 = 停用），返回最新状态 */
+export const setRelayUrl = (url: string | null): Promise<RemoteStatus> =>
+  invoke<RemoteStatus>('set_relay_url', { url });
 
 export const getDefaultClaudeOptions = (): Promise<DefaultClaudeOptions> =>
   invoke<DefaultClaudeOptions>('get_default_claude_options');
@@ -332,7 +396,7 @@ export const getSystemLocale = (): Promise<string> =>
   invoke<string>('get_system_locale');
 
 export const onInstallProgress = (callback: (progress: InstallProgress) => void): Promise<Unlisten> =>
-  listen<InstallProgress>('download-progress', (event) => callback(event.payload));
+  listen<InstallProgress>('download-progress', callback);
 
 // ============================================
 // Claude CLI Update Check
@@ -370,4 +434,4 @@ export const killClaudeProcesses = (): Promise<void> =>
 
 // 右键菜单打开目录
 export const onOpenDirectory = (callback: (dir: string) => void): Promise<Unlisten> =>
-  listen<string>('open-directory', (event) => callback(event.payload));
+  listen<string>('open-directory', callback);

@@ -16,7 +16,8 @@ const sidebarStore = useSidebarStore()
 <style scoped>
 .settings-overlay {
   position: fixed;
-  top: 32px;
+  /* 桌面模式让出自定义标题栏（app-root 的 --titlebar-h 变量，浏览器模式为 0） */
+  top: var(--titlebar-h, 32px);
   left: 0;
   right: 0;
   bottom: 0;

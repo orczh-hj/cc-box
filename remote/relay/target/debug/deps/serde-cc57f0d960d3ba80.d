@@ -1,0 +1,12 @@
+D:\orczh\Documents\front\claude-tauri-gui\remote\relay\target\debug\deps\serde-cc57f0d960d3ba80.d: C:\Users\orczh\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\serde-1.0.229\src\lib.rs C:\Users\orczh\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\serde-1.0.229\src\integer128.rs C:\Users\orczh\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\serde-1.0.229\src\private\mod.rs C:\Users\orczh\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\serde-1.0.229\src\private\de.rs C:\Users\orczh\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\serde-1.0.229\src\private\ser.rs D:\orczh\Documents\front\claude-tauri-gui\remote\relay\target\debug\build\serde-3d9793cf71552ad4\out/private.rs
+
+D:\orczh\Documents\front\claude-tauri-gui\remote\relay\target\debug\deps\libserde-cc57f0d960d3ba80.rmeta: C:\Users\orczh\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\serde-1.0.229\src\lib.rs C:\Users\orczh\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\serde-1.0.229\src\integer128.rs C:\Users\orczh\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\serde-1.0.229\src\private\mod.rs C:\Users\orczh\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\serde-1.0.229\src\private\de.rs C:\Users\orczh\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\serde-1.0.229\src\private\ser.rs D:\orczh\Documents\front\claude-tauri-gui\remote\relay\target\debug\build\serde-3d9793cf71552ad4\out/private.rs
+
+C:\Users\orczh\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\serde-1.0.229\src\lib.rs:
+C:\Users\orczh\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\serde-1.0.229\src\integer128.rs:
+C:\Users\orczh\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\serde-1.0.229\src\private\mod.rs:
+C:\Users\orczh\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\serde-1.0.229\src\private\de.rs:
+C:\Users\orczh\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\serde-1.0.229\src\private\ser.rs:
+D:\orczh\Documents\front\claude-tauri-gui\remote\relay\target\debug\build\serde-3d9793cf71552ad4\out/private.rs:
+
+# env-dep:OUT_DIR=D:\\orczh\\Documents\\front\\claude-tauri-gui\\remote\\relay\\target\\debug\\build\\serde-3d9793cf71552ad4\\out

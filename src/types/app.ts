@@ -27,6 +27,39 @@ export interface AppConfig {
   windowSize?: { width: number; height: number }
   claudeEnvVars?: Record<string, string>
   language?: string
+  remote?: RemoteConfig
+}
+
+export interface RemoteConfig {
+  enabled?: boolean
+  token?: string
+  port?: number
+  /** 中继服务器地址（如 https://cc.orczh.top；空 = 未启用） */
+  relayUrl?: string
+  deviceId?: string
+  deviceKey?: string
+}
+
+/** 远程连接状态（get_remote_status 返回） */
+export interface RemoteStatus {
+  enabled: boolean
+  running: boolean
+  /** 宿主制：远程由本机另一实例提供（本实例未监听），url 仍为宿主可用地址 */
+  hostedElsewhere: boolean
+  port: number
+  token: string
+  /** 手机直连 URL（含 token fragment）；token 未生成时为空 */
+  url: string
+  /** 中继已启用 */
+  relayEnabled: boolean
+  /** 中继已连接 */
+  relayConnected: boolean
+  /** 中继地址（如 https://cc.orczh.top） */
+  relayUrl: string
+  /** 当前有效配对码（5 分钟内）；无则空 */
+  relayPairCode: string
+  /** 中继配对二维码内容（relayUrl + #pair=code）；无效则空 */
+  relayPairUrl: string
 }
 
 export interface DefaultClaudeOptions {

@@ -1,0 +1,1 @@
+{"type":"rpc.event","name":"hook-event","payload":{"ptyId":"p1","eventName":"userPromptSubmit"}}

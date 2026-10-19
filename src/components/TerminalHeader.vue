@@ -1,19 +1,25 @@
 <template>
   <header class="terminal-header">
     <div class="title-area">
+      <!-- 项目名仅浏览器远程端显示（无原生标题栏，header 是唯一展示位）；
+           软件端（Tauri）只显示会话名 -->
+      <span v-if="!isTauriEnv && projectName" class="header-project">{{ projectName }}</span>
       <span v-if="sessionName" class="header-title">{{ sessionName }}</span>
     </div>
     <div class="header-right">
-      <button class="header-btn" :class="{ active: appStore.alwaysOnTop }" @click="appStore.toggleAlwaysOnTop()" :title="t('toggleAlwaysOnTop', { key: cmd + '+Shift+T' })">
-        <img v-if="appStore.alwaysOnTop" src="@/assets/icons/pin-active.svg" alt="Pin" />
-        <img v-else src="@/assets/icons/pin.svg" alt="Pin" />
-      </button>
-      <button class="header-btn" @click="snapWindow('left')" :title="t('snapLeft', { key: ctrl + '+Shift+←' })">
-        <img src="@/assets/icons/half-left.svg" alt="Snap left" />
-      </button>
-      <button class="header-btn" @click="snapWindow('right')" :title="t('snapRight', { key: ctrl + '+Shift+→' })">
-        <img src="@/assets/icons/half-right.svg" alt="Snap right" />
-      </button>
+      <!-- 窗口管理按钮（置顶/半屏停靠）：仅桌面 Tauri，浏览器模式（任意宽度）无窗口操作 -->
+      <template v-if="isTauriEnv">
+        <button class="header-btn window-btn" :class="{ active: appStore.alwaysOnTop }" @click="appStore.toggleAlwaysOnTop()" :title="t('toggleAlwaysOnTop', { key: cmd + '+Shift+T' })">
+          <img v-if="appStore.alwaysOnTop" src="@/assets/icons/pin-active.svg" alt="Pin" />
+          <img v-else src="@/assets/icons/pin.svg" alt="Pin" />
+        </button>
+        <button class="header-btn window-btn" @click="snapWindow('left')" :title="t('snapLeft', { key: ctrl + '+Shift+←' })">
+          <img src="@/assets/icons/half-left.svg" alt="Snap left" />
+        </button>
+        <button class="header-btn window-btn" @click="snapWindow('right')" :title="t('snapRight', { key: ctrl + '+Shift+→' })">
+          <img src="@/assets/icons/half-right.svg" alt="Snap right" />
+        </button>
+      </template>
       <button class="header-btn home-btn" @click="$emit('back')" :title="t('backToProjects', { key: ctrl + '+Shift+H' })">
         <img src="@/assets/icons/home.svg" alt="Home" />
       </button>
@@ -28,6 +34,7 @@ import { snapWindow } from '@/composables/useAppShortcuts'
 import { useSessionStore } from '@/stores/session'
 import { useAppStore } from '@/stores/app'
 import { ctrl, cmd } from '@/utils/platform'
+import { isTauriEnv } from '@/api/platform'
 
 const { t } = useI18n()
 
@@ -61,6 +68,21 @@ const sessionName = computed(() => sessionStore.activeTab?.name || '')
   min-width: 0;
   text-align: center;
   padding: 0 8px;
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: 8px;
+}
+
+/* 项目名：次要样式，与会话名区分层级 */
+.header-project {
+  font-size: 12px;
+  color: var(--text-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex-shrink: 1;
+  min-width: 0;
 }
 
 .header-title {
@@ -70,8 +92,8 @@ const sessionName = computed(() => sessionStore.activeTab?.name || '')
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  display: inline-block;
-  max-width: 100%;
+  flex-shrink: 1;
+  min-width: 0;
 }
 
 .header-right {

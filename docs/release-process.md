@@ -1,5 +1,40 @@
 # 版本发布流程
 
+## 远程组件发布（每次版本发布的附加动作）
+
+一套 UI 三端运行（桌面 Tauri / 宽屏浏览器 / 手机浏览器），除桌面版本外多出两条发布线：**手机/浏览器 UI = 主应用 dist，编译时嵌入 relay**（orczh.top:8800，详见 remote/docs/deploy.md）；**relay 二进制独立部署**（重启 = 内存态清空，所有手机配对失效）。
+
+### 改动类型 → 发布动作
+
+| 本次改动 | 桌面版本发布 | relay 部署 | 说明 |
+|---|---|---|---|
+| 仅桌面功能（无前端、无远程改动） | 需要 | 不需要 | 标准流程 |
+| 前端（src/ 任意改动） | 需要 | **必须** | relay 是编译时嵌入 dist，不重编手机永远拿旧 UI |
+| 桌面 Rust（src-tauri/） | 需要 | 不需要 | relay 透传原则，不解析应用层 payload |
+| relay（remote/relay/） | 不需要 | **必须** | 独立部署 |
+| 协议（remote/protocol/） | 需要 | **必须** | 三端同步（桌面 + relay + 内嵌 UI） |
+
+### 每次版本发布的完整清单
+
+1. **发布前检查**
+   - `cd src-tauri && cargo test` + `npm test` 全绿
+   - 协议改动：确认四处同步（crate 定义 / protocol.ts / samples / remote/docs/protocol.md，见 CLAUDE.md 检查清单）
+   - 远程功能改动：remote/docs/manual-test-cases.md U/R 系列关键条目真机走查
+2. **桌面版本发布**：`npm run release -- --bump <type> --notes "..."`（见下节全自动流程）
+3. **relay 部署**（上表"必须"时）：完整命令见 remote/docs/deploy.md §3.5（npm run build → musl 交叉编译 → scp → systemctl restart → 三查）
+   - **顺序：先桌面版本，后 relay 部署**——新桌面向后兼容旧 UI；反序会出现新 UI 调用旧桌面 rpc 白名单外的命令
+4. **发布后验证**
+   - relay 三查：md5 比对 / bundle hash / 新功能特征字符串（deploy.md §3.5 第 4 步）
+   - 桌面：`~/.cc-box/logs/` 看 `relay connected/registered` 与新配对码
+   - 手机：**重新扫码配对**（relay 重启清空内存态）→ 打开会话走查
+5. **Release notes 用户提示**（本次含远程改动时）
+   - 手机端需重新扫码配对；浏览器端刷新页面拿新 bundle（缓存旧 JS 是"升级没反应"的头号原因）
+
+### 协议兼容约束
+
+- `PROTOCOL_VERSION` 目前握手携带但**不强校验**；兼容性靠同源部署保证（手机 UI 与 relay 同 binary 嵌入、桌面协议随桌面版本）
+- 新增可选字段/消息属非破坏性（旧端忽略未知消息）；**破坏性变更**必须桌面与 relay 同窗口期更新，并递增 `PROTOCOL_VERSION` 考虑握手校验
+
 ## 自动化发布（推荐）
 
 使用 `scripts/release.js` 脚本全自动发布：

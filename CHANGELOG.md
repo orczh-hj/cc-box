@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.14.0] - 2026-10-19
+
+### Features
+- Run the full UI in desktop and mobile browsers over WebSocket, unified with the Tauri desktop (single UI, no separate web app)
+- Add remote access via public relay (wss) with one-time phone pairing; explicit enable/disable with zero config
+- Add credential rotation when re-enabling remote to revoke leaked QR access instantly
+- Add symmetric takeover masks with claim-back between any clients (desktop or remote)
+- Add running-session recovery after browser refresh or from new devices
+- Add on-PC directory picker for adding projects from the browser
+- Add mobile responsive layout: bottom icon bar, drawer panels, quick-key toolbar
+- Add touch-friendly actions (buttons visible without hover on touch screens)
+
+### Fixed
+- Fix terminal grid clipped at right edge on mobile (fit addon measured padded width)
+- Fix overtaken remote client silently losing output (now keeps subscription and shows mask)
+
+### Security
+- Harden relay: cross-device routing ownership checks, connection and token limits, pairing rate limiting
+- Sanitize token and device keys in remote config reads
+
+Note: phone clients need to re-pair after relay update; refresh the browser page to get the new bundle.
+
 ## [0.13.10] - 2026-09-29
 
 ### Fixed

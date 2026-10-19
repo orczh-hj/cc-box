@@ -1,12 +1,15 @@
 <template>
   <div class="project-select-view">
-    <!-- 左侧：近期会话列表 -->
+    <!-- 左侧：近期会话列表（手机断点：折叠段，点 header 展开/收起） -->
     <aside class="sessions-panel">
-      <header class="panel-header">
+      <header class="panel-header" :class="{ collapsible: isMobile }" @click="isMobile && (sessionExpanded = !sessionExpanded)">
         <h2>{{ t('recentSessions') }}</h2>
+        <svg v-if="isMobile" class="chevron" :class="{ expanded: sessionExpanded }" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <polyline points="6 9 12 15 18 9"/>
+        </svg>
       </header>
 
-      <div class="session-list">
+      <div class="session-list" :class="{ collapsed: isMobile && !sessionExpanded }">
         <template v-if="!appStore.cacheLoaded">
           <div v-for="i in 4" :key="i" class="skeleton-item">
             <div class="skeleton-icon"></div>
@@ -163,6 +166,7 @@ import { useI18n } from 'vue-i18n'
 import { useAppStore } from '@/stores/app'
 import { useSessionStore } from '@/stores/session'
 import { useSidebarStore } from '@/stores/sidebar'
+import { useIsMobile } from '@/composables/useMediaQuery'
 import { ctrl } from '@/utils/platform'
 import type { SessionInfo } from '@/api/tauri'
 
@@ -180,6 +184,9 @@ const sessionStore = useSessionStore()
 const sidebarStore = useSidebarStore()
 const searchQuery = ref('')
 const projectListRef = ref<HTMLElement | null>(null)
+const isMobile = useIsMobile()
+/** 手机断点：近期会话折叠段展开状态（默认收起，只露 header） */
+const sessionExpanded = ref(false)
 
 const localOptions = ref({
   skipPermissions: appStore.claudeOptions.skipPermissions,
@@ -345,6 +352,8 @@ async function handleSaveDefault() {
 <style scoped>
 .project-select-view {
   display: flex;
+  /* 本组件根元素同时挂 .overlay-view（fixed + top/bottom 定高）：不可再设
+   * height:100%（相对视口解析，会顶掉 bottom 推导、底部溢出一个标题栏高） */
   background: var(--bg-primary);
 }
 
@@ -878,5 +887,62 @@ async function handleSaveDefault() {
 .skeleton-sub {
   width: 80%;
   height: 11px;
+}
+
+/* ============================================
+ * 手机断点（≤768px）：双栏 → 单栏纵向堆叠
+ * 近期会话变折叠段（默认收起），项目列表占满宽
+ * ============================================ */
+@media (max-width: 768px) {
+  .project-select-view {
+    flex-direction: column;
+  }
+
+  .sessions-panel {
+    width: 100%;
+    border-right: none;
+    border-bottom: 1px solid var(--border-color);
+    flex-shrink: 0;
+  }
+
+  /* 可折叠 header（chevron 旋转指示） */
+  .sessions-panel .panel-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    cursor: pointer;
+    padding: 12px 16px;
+  }
+
+  .chevron {
+    color: var(--text-tertiary);
+    transition: transform 0.2s ease;
+  }
+
+  .chevron.expanded {
+    transform: rotate(180deg);
+  }
+
+  /* 收起时完全隐藏列表；展开时限高（余下留给项目列表） */
+  .session-list {
+    max-height: 40vh;
+  }
+
+  .session-list.collapsed {
+    display: none;
+  }
+
+  /* 手机首页不显示启动参数（skip-permissions/自定义参数）：屏幕空间留给列表，
+   * 选项仍在桌面端/会话启动默认值中管理 */
+  .startup-options {
+    display: none;
+  }
+
+  /* 启动参数保留（轻量，不折叠） */
+  .projects-panel {
+    min-width: 0;
+    /* column 布局中允许收缩到内容以下，project-list 才能出现滚动区 */
+    min-height: 0;
+  }
 }
 </style>

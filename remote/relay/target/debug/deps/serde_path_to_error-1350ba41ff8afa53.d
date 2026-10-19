@@ -1,0 +1,9 @@
+D:\orczh\Documents\front\claude-tauri-gui\remote\relay\target\debug\deps\serde_path_to_error-1350ba41ff8afa53.d: C:\Users\orczh\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\serde_path_to_error-0.1.20\src\lib.rs C:\Users\orczh\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\serde_path_to_error-0.1.20\src\de.rs C:\Users\orczh\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\serde_path_to_error-0.1.20\src\path.rs C:\Users\orczh\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\serde_path_to_error-0.1.20\src\ser.rs C:\Users\orczh\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\serde_path_to_error-0.1.20\src\wrap.rs
+
+D:\orczh\Documents\front\claude-tauri-gui\remote\relay\target\debug\deps\libserde_path_to_error-1350ba41ff8afa53.rmeta: C:\Users\orczh\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\serde_path_to_error-0.1.20\src\lib.rs C:\Users\orczh\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\serde_path_to_error-0.1.20\src\de.rs C:\Users\orczh\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\serde_path_to_error-0.1.20\src\path.rs C:\Users\orczh\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\serde_path_to_error-0.1.20\src\ser.rs C:\Users\orczh\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\serde_path_to_error-0.1.20\src\wrap.rs
+
+C:\Users\orczh\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\serde_path_to_error-0.1.20\src\lib.rs:
+C:\Users\orczh\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\serde_path_to_error-0.1.20\src\de.rs:
+C:\Users\orczh\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\serde_path_to_error-0.1.20\src\path.rs:
+C:\Users\orczh\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\serde_path_to_error-0.1.20\src\ser.rs:
+C:\Users\orczh\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\serde_path_to_error-0.1.20\src\wrap.rs:

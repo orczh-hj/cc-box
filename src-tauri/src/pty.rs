@@ -338,6 +338,8 @@ impl PtyManager {
         self.instances.lock().insert(id.clone(), instance);
         self.writers.lock().insert(id.clone(), writer);
 
+        crate::remote_state::REMOTE_STATE.register_pty(&id, "claude", cwd);
+
         log::info!("[{}] Claude CLI spawned successfully via shell", id);
 
         Ok(PtyInfo {
@@ -370,9 +372,10 @@ impl PtyManager {
                             "pty-output",
                             PtyOutputPayload {
                                 id: pty_id.clone(),
-                                data: output,
+                                data: output.clone(),
                             },
                         );
+                        crate::remote_state::REMOTE_STATE.push_output(&pty_id, &output);
                     }
                     log::info!("[{}] PTY EOF reached, process exited normally", pty_id);
                     app_handle
@@ -385,6 +388,7 @@ impl PtyManager {
                             },
                         )
                         .ok();
+                    crate::remote_state::REMOTE_STATE.remove_pty(&pty_id);
                     break;
                 }
                 Ok(n) => {
@@ -395,9 +399,10 @@ impl PtyManager {
                             "pty-output",
                             PtyOutputPayload {
                                 id: pty_id.clone(),
-                                data: output,
+                                data: output.clone(),
                             },
                         );
+                        crate::remote_state::REMOTE_STATE.push_output(&pty_id, &output);
                     }
                 }
                 Err(e) => {
@@ -431,6 +436,7 @@ impl PtyManager {
                                 },
                             )
                             .ok();
+                        crate::remote_state::REMOTE_STATE.remove_pty(&pty_id);
                         break;
                     }
 
@@ -571,6 +577,8 @@ impl PtyManager {
         self.instances.lock().insert(id.clone(), instance);
         self.writers.lock().insert(id.clone(), writer);
 
+        crate::remote_state::REMOTE_STATE.register_pty(&id, "shell", cwd);
+
         log::info!("[{}] Shell spawned successfully", id);
 
         Ok(PtyInfo {
@@ -664,6 +672,8 @@ impl PtyManager {
                 )
                 .ok();
 
+            crate::remote_state::REMOTE_STATE.remove_pty(id);
+
             log::info!("[{}] PTY killed successfully", id);
         } else {
             log::warn!("[{}] PTY not found when trying to kill", id);
@@ -701,6 +711,30 @@ impl PtyManager {
 
 /// 全局 PTY 管理器存储
 static PTY_MANAGER: LazyLock<Mutex<Option<Arc<PtyManager>>>> = LazyLock::new(|| Mutex::new(None));
+
+/// Claude CLI 启动参数拼接（统一管理：会话创建单一核心）
+///
+/// 规则：--resume <id> → --dangerously-skip-permissions → customArgs 按空白拆分。
+/// 前端 buildClaudeArgs（XTermTerminal.vue）语义与此一致（远程 session.create
+/// 的结构化选项经此函数拼接，两端不漂移）。
+pub fn build_claude_args(
+    resume: Option<&str>,
+    skip_permissions: bool,
+    custom_args: &str,
+) -> Vec<String> {
+    let mut args: Vec<String> = Vec::new();
+    if let Some(sid) = resume {
+        if !sid.is_empty() {
+            args.push("--resume".to_string());
+            args.push(sid.to_string());
+        }
+    }
+    if skip_permissions {
+        args.push("--dangerously-skip-permissions".to_string());
+    }
+    args.extend(custom_args.split_whitespace().map(str::to_string));
+    args
+}
 
 /// 初始化 PTY 管理器
 pub fn init_pty_manager(app_handle: AppHandle) {

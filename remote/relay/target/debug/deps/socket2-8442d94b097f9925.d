@@ -1,0 +1,11 @@
+D:\orczh\Documents\front\claude-tauri-gui\remote\relay\target\debug\deps\socket2-8442d94b097f9925.d: C:\Users\orczh\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\socket2-0.6.5\src\lib.rs C:\Users\orczh\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\socket2-0.6.5\src\sockaddr.rs C:\Users\orczh\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\socket2-0.6.5\src\socket.rs C:\Users\orczh\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\socket2-0.6.5\src\sockref.rs C:\Users\orczh\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\socket2-0.6.5\src\sys\windows.rs
+
+D:\orczh\Documents\front\claude-tauri-gui\remote\relay\target\debug\deps\libsocket2-8442d94b097f9925.rlib: C:\Users\orczh\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\socket2-0.6.5\src\lib.rs C:\Users\orczh\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\socket2-0.6.5\src\sockaddr.rs C:\Users\orczh\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\socket2-0.6.5\src\socket.rs C:\Users\orczh\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\socket2-0.6.5\src\sockref.rs C:\Users\orczh\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\socket2-0.6.5\src\sys\windows.rs
+
+D:\orczh\Documents\front\claude-tauri-gui\remote\relay\target\debug\deps\libsocket2-8442d94b097f9925.rmeta: C:\Users\orczh\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\socket2-0.6.5\src\lib.rs C:\Users\orczh\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\socket2-0.6.5\src\sockaddr.rs C:\Users\orczh\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\socket2-0.6.5\src\socket.rs C:\Users\orczh\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\socket2-0.6.5\src\sockref.rs C:\Users\orczh\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\socket2-0.6.5\src\sys\windows.rs
+
+C:\Users\orczh\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\socket2-0.6.5\src\lib.rs:
+C:\Users\orczh\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\socket2-0.6.5\src\sockaddr.rs:
+C:\Users\orczh\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\socket2-0.6.5\src\socket.rs:
+C:\Users\orczh\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\socket2-0.6.5\src\sockref.rs:
+C:\Users\orczh\.cargo\registry\src\mirrors.aliyun.com-0671735e7cc7f5e7\socket2-0.6.5\src\sys\windows.rs:

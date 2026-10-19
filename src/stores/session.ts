@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref, computed, reactive } from 'vue'
+import { uuid } from '@/utils/uuid'
 import {
   getSessions,
   ptyKill,
@@ -30,6 +31,7 @@ export interface TerminalTab {
   model?: string
   pending: boolean           // 需要用户关注
   isResume: boolean          // 是否为恢复历史会话（创建时已有 sessionId）
+  takenOver?: boolean        // 终端已被远程（手机）接管，显示遮罩
 }
 
 /**
@@ -111,7 +113,7 @@ export const useSessionStore = defineStore('session', () => {
     sessionId?: string
     name?: string
   }): string {
-    const tabId = crypto.randomUUID()
+    const tabId = uuid()
     const now = Date.now()
 
     tabs.set(tabId, {
@@ -141,6 +143,32 @@ export const useSessionStore = defineStore('session', () => {
     tab.ptyId = ptyId
     tab.status = 'running'
     tab.lastActiveAt = Date.now()
+  }
+
+  /**
+   * 浏览器远程模式：采纳服务端运行中的会话列表（刷新/新设备连接后的恢复入口）。
+   * 已有同 ptyId 的 Tab 仅更新 working/pending；新会话建 Tab 绑定 ptyId
+   * （不 attach——用户点击 Tab 时才接管控制权，独占语义保持）
+   */
+  function adoptRemoteSessions(list: Array<{ id: string; type: string; cwd: string; working: boolean; pending: boolean }>) {
+    for (const s of list) {
+      const existing = getTabByPtyId(s.id)
+      if (existing) {
+        existing.working = s.working
+        existing.pending = s.pending
+        existing.lastActiveAt = Date.now()
+        continue
+      }
+      const parts = s.cwd.replace(/\\/g, '/').split('/')
+      const name = parts[parts.length - 1] || s.cwd
+      const tabId = createTab(s.cwd, { name })
+      setTabPty(tabId, s.id)
+      const tab = tabs.get(tabId)
+      if (tab) {
+        tab.working = s.working
+        tab.pending = s.pending
+      }
+    }
   }
 
   /**
@@ -457,6 +485,7 @@ export const useSessionStore = defineStore('session', () => {
     // Tab lifecycle
     createTab,
     setTabPty,
+    adoptRemoteSessions,
     handlePtyExit,
     closeTab,
     closeAllTabs,

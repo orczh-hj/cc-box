@@ -14,5 +14,8 @@ fn main() {
         println!("cargo:rustc-env=APP_VERSION={}", version);
     }
 
+    // Windows 测试 exe 的 comctl32 v6 manifest 说明见 src-tauri/test-runner.ps1
+    // （bin 产物由 tauri_build 嵌入 manifest；lib 测试 exe 由 test-runner 放置外挂 manifest）
+
     tauri_build::build()
 }

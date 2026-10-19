@@ -2,6 +2,7 @@ import { watch, onMounted, onUnmounted, type Ref } from 'vue'
 import { getCurrentWindow, UserAttentionType } from '@tauri-apps/api/window'
 import { useHookStore, type HookEventType, type HookEventHandler } from '@/stores/hook'
 import { useSessionStore } from '@/stores/session'
+import { isTauriEnv } from '@/api/platform'
 import type { HookEventPayload, NotificationData } from '@/types/hook'
 
 const STATUS_EVENTS: HookEventType[] = [
@@ -34,7 +35,8 @@ const ACTIVITY_EVENTS: Set<HookEventType> = new Set([
 export function useStatusMonitor(options: { isFocused: Ref<boolean>; isTerminalVisible: Ref<boolean> }) {
   const hookStore = useHookStore()
   const sessionStore = useSessionStore()
-  const win = getCurrentWindow()
+  // 任务栏跳动为桌面专属；浏览器模式 win 为 null（其余状态监控逻辑照常）
+  const win = isTauriEnv ? getCurrentWindow() : null
 
   let unsubscribe: (() => void) | null = null
 
@@ -130,7 +132,7 @@ export function useStatusMonitor(options: { isFocused: Ref<boolean>; isTerminalV
     }
     // 应用失焦时触发任务栏跳动
     if (!options.isFocused.value) {
-      win.requestUserAttention(UserAttentionType.Critical).catch(() => {})
+      win?.requestUserAttention(UserAttentionType.Critical).catch(() => {})
     }
   }
 
