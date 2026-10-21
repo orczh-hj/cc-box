@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.16.2] - 2026-10-21
+
+### Fixed
+- Fix restart closing the session instead of restarting: quiet kill no longer broadcasts session-closed, tab is kept for respawn (desktop and phone)
+- Fix LAN port 8747 not released after stopping remote access on Windows: stop waits for deterministic port release and start retries through the release window
+
+### Changed
+- Release tooling: two-phase resumable release script and one-command relay deploy (npm run deploy:relay)
+
+Note: relay update required (protocol field + new web UI); phones need to re-pair after relay restart.
+
 ## [0.16.1] - 2026-10-21
 
 ### Fixed
