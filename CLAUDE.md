@@ -51,7 +51,7 @@ cc-box/
 │   │   ├── hook_events.rs      # Hook 事件数据结构与提取
 │   │   ├── hook_server.rs      # Hook HTTP 服务器（接收 Claude 运行时事件）
 │   │   ├── hook_config.rs      # Hook Plugin 文件管理
-│   │   ├── remote_server.rs    # **远程访问服务器**（局域网直连：axum WS + Web UI（web-assets：磁盘优先/内嵌兜底）+ token 认证）
+│   │   ├── remote_server.rs    # **远程访问服务器**（局域网直连：axum WS + Web UI（web-assets：磁盘优先/内嵌兜底）+ token 认证；stop 轮询等待端口释放——Windows abort 后 IOCP 清理延迟曾致端口长期 LISTENING 残留、bind 10048）
 │   │   ├── remote_state.rs     # **远程状态与消息处理**（会话聚合、256KB TailBuffer 输出回放、working/pending 状态机唯一实现、**全局控制权 controller**（设备互斥：写操作无人时自动持有/attach 不能抢占/takeover 转移+剥离终端/断连释放）、**revision 版本号**（前端旧事件过滤）、state-changed 统一广播；局域网/中继共用唯一 handler）
 │   │   ├── remote_client.rs    # **中继出站客户端**（连接 cc-box-relay、手机连接桥接、断线重连）
 │   │   ├── rpc_dispatch.rs     # **RPC 命令单一注册表**（registry! 宏表：一行一命令（read()/write(Sect)/write(None)）同时生成白名单、分发、广播 section、写权限标记；浏览器经 WS 调用 Tauri command 的唯一入口；差集守卫测试解析 lib.rs 注册表；StateSection 枚举 + 控制权写操作拦截）
@@ -188,9 +188,9 @@ CC_BOX_RELAY_URL=192.168.5.105:8800 npm run tauri:dev
 - **GitHub**：`https://github.com/orczh-hj/cc-box`（需要代理）
 - **Gitee**：`https://gitee.com/orczh/cc-box`（国内直连）
 
-**同步机制**：
-1. Git 多 URL 远程：`git push origin` 自动推送到两个仓库
-2. GitHub Actions：push 到 main 或 release 发布时自动同步到 Gitee
+**同步机制**（2026-10 修正：**GitHub Actions 并不会自动同步 Gitee**——release.yml 注释声称同步但无此代码，Gitee 同步只能靠手动推送）：
+1. release.js 发布脚本内置分仓库推送：GitHub（代理，阻断）+ Gitee（直连，失败仅告警可后补）——**不用多 URL `git push origin`**（一条命令跨两域，代理环境 Gitee 必失败）
+2. 日常手动推送：分 URL 推（GitHub 带代理、Gitee 直连），勿用多 URL origin
 
 **推送时注意**：推送到 GitHub 需先设置代理，推送到 Gitee 无需代理。
 
@@ -203,7 +203,7 @@ CC_BOX_RELAY_URL=192.168.5.105:8800 npm run tauri:dev
 npm run release -- --bump patch --notes "### Features\n- Add feature"
 ```
 
-脚本自动完成：更新版本号 → 更新 CHANGELOG → 提交推送 → 创建标签 → 监控 CI → 发布 Release → 上传 OSS。
+脚本自动完成：更新版本号 → 更新 CHANGELOG → 提交推送 → 创建标签 → 监控 CI → 发布 Release → 上传 OSS。2026-10 起为**两阶段 + 断点续跑**版（网络域路由：GitHub 走代理、Gitee/OSS 强制直连，开着代理一次跑完；每阶段幂等，失败后**重跑同一命令自动续跑**，详见 docs/release-process.md）。远程组件需部署时：`npm run deploy:relay`（构建 → musl 编译 → scp 切换 → 三查，重启会使手机重新配对）。
 
 **参数说明**：
 | 参数 | 说明 |
@@ -305,7 +305,7 @@ UI 已浏览器化（一套 UI 走桌面 Tauri / 宽屏浏览器 / 手机浏览�
 - **safe-area**：底部栏用 `--safe-area-bottom`（env(safe-area-inset-bottom)），视口 meta 带 viewport-fit=cover
 - **触屏适配**：所有"hover 才显示"的操作按钮必须包 `@media (hover: hover)`（触屏设备 hover:none 无悬停，按钮常显——SessionItem/ProviderCard 已改）；快捷键工具条（QuickKeyBar）补软键盘按不出的控制键（Esc/⇧Tab/Ctrl+J/Ctrl+U/↑↓←→）+「选择复制」action 按钮（软键盘由点击终端区域唤出，「键盘」按钮已按用户决策移除）
 - **触摸手势隔离**（XTermTerminal.vue 内联手势处理，阈值 10px）：终端 tap 无自定义行为（点击/光标跳转由 xterm 自然处理）；拖动滚动＝capture 阶段接管触摸、按行累积派发**合成 WheelEvent** 给 xterm（CLI 开 mouse reporting 时编码滚轮序列走 TUI 内部滚动，未开时滚 scrollback，坐标可控无 NaN）且 blur 收起已弹出的键盘（高度回升只 fit 不滚底）。**软键盘由点击终端区域唤出**（xterm 自然聚焦；「键盘」按钮已移除）。**复制部分内容**＝「选择复制」按钮打开复制阅读器（TerminalCopyReader）：`captureSnapshot` 抓 buffer 全量快照 → `reflowSnapshot`（`src/utils/terminal-reflow.ts`）反渲染还原逻辑段落（isWrapped 拼接/围栏原样/满宽启发式 CJK 显示宽度/表格 diff 保护）→ 全屏 pre 展示，**系统原生长按选择手柄**选择 → getSelection → `copyText`（http 非安全上下文 execCommand 降级）；`@contextmenu.stop` 放行 Android 长按菜单（main.ts 拦截仅 PROD，须生产构建验证）；智能/原始双模式，误拼兜底
-- **会话身份链**：CLI `--resume` 会 fork 新 sessionId，`TerminalTab.sessionIds` 记录演变历史（旧 id 保留认领）；**所有恢复入口（App/TerminalView 历史、remote-session-created）统一走 `sessionStore.resumeSessionTab`**（复用优先：命中切 Tab/重启，未命中才新建），防二次 spawn、重复 Tab 与名字变 sessionId 编码；**用户显式关闭双路径对称广播 `remote-session-closed`**（桌面 pty_kill / 远程 session.kill，先广播后 kill）→ 各端联动删 Tab，自然退出（pty-exit）只置 stopped 保留 Tab；remote 会话列表经 `RemoteSession.sessionId` 下发（hook 建立 ptyId→sessionId 映射），浏览器端采纳 Tab 名优先取历史会话名（未加载时回退项目名，加载后 backfillTabNamesFromHistory 回填）
+- **会话身份链**：CLI `--resume` 会 fork 新 sessionId，`TerminalTab.sessionIds` 记录演变历史（旧 id 保留认领）；**所有恢复入口（App/TerminalView 历史、remote-session-created）统一走 `sessionStore.resumeSessionTab`**（复用优先：命中切 Tab/重启，未命中才新建），防二次 spawn、重复 Tab 与名字变 sessionId 编码；**用户显式关闭双路径对称广播 `remote-session-closed`**（桌面 pty_kill / 远程 session.kill，先广播后 kill）→ 各端联动删 Tab，自然退出（pty-exit）只置 stopped 保留 Tab；**重启（restartTab）清旧 PTY 走 quiet kill**（pty_kill/session.kill 带 `quiet=true`，不广播 closed——否则各端 closeTab 删 Tab，重启被误判为关闭；pty-exit 照常置 stopped 保留 Tab 等 respawn 绑回）；remote 会话列表经 `RemoteSession.sessionId` 下发（hook 建立 ptyId→sessionId 映射），浏览器端采纳 Tab 名优先取历史会话名（未加载时回退项目名，加载后 backfillTabNamesFromHistory 回填）
 - **触屏已知限制**：Provider 列表拖拽排序（HTML5 drag）移动端不可用，待需要时补上/下移按钮
 - **终端符号兜底替换**：浏览器远程模式下 CLI 输出的媒体控制符（"⏵⏵" 提示/⏸ 暂停，U+23EF/U+23F4–U+23FA）移动端字体缺字形，写入 xterm 前经 `mapTerminalGlyphs`（`src/utils/terminal-glyphs.ts`）替换为 ▶◀▲▼‖■●（均 1 列不影响布局）；桌面端有系统字体回退原样写入（`!isTauriEnv` 路径才替换）
 - **会话结束并入近期会话缓存（本地合并，零请求）**：`cachedRecentSessions` 启动时只加载一次，会话结束（closeTab/closeAllTabs/closeOtherTabs/handlePtyExit）时把 Tab 已知信息（sessionId/名称/项目路径）经 `mergeTabIntoRecentSessions` → `appStore.mergeRecentSession` 按 sessionId 去重就地并入缓存，首页「近期会话」即时可见——不重拉 getHomeData（低效且重置项目分页）；无 sessionId 的 Tab 不并入；缓存条目 working/pending 清 false（已结束）

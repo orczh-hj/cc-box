@@ -773,7 +773,7 @@ impl RemoteState {
                     REMOTE_STATE.try_send(conn_id, ServerMessage::HistorySessions { list });
                 });
             }
-            ClientMessage::SessionKill { id } => {
+            ClientMessage::SessionKill { id, quiet } => {
                 // 设备互斥：写操作，他人持有时拒绝（kill 无应答通道，忽略 + log）
                 if let Err(holder) = self.controller_gate(conn_id) {
                     log::warn!(
@@ -789,10 +789,15 @@ impl RemoteState {
                 // 晚到将匹配不到 Tab，各端残留"断开"状态的 Tab；先发保证先执行
                 // 删 Tab（随后到达的 pty-exit 因 Tab 已删而 no-op）。closeTab
                 // 内部的异步 ptyKill 与下方 kill 并发，manager.kill 持锁幂等。
-                // remove_pty 链路（SessionExit）自动通知手机列表移除
+                // remove_pty 链路（SessionExit）自动通知手机列表移除。
+                // quiet=true（重启场景内部清理，与桌面 pty_kill quiet 同语义）：
+                // 跳过 closed 广播——各端保留 Tab 等 respawn，pty-exit 只置 stopped
                 let id = id.clone();
+                let quiet = quiet.unwrap_or(false);
                 std::thread::spawn(move || {
-                    emit_event(crate::events::names::REMOTE_SESSION_CLOSED, &id, "");
+                    if !quiet {
+                        emit_event(crate::events::names::REMOTE_SESSION_CLOSED, &id, "");
+                    }
                     if let Some(manager) = crate::pty::get_pty_manager() {
                         if let Err(e) = manager.kill(&id) {
                             log::warn!("[remote] session kill {} failed: {}", id, e);

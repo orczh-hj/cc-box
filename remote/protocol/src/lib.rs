@@ -42,9 +42,15 @@ pub enum ClientMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         session_name: Option<String>,
     },
-    /// 关闭（杀掉）指定会话
+    /// 关闭（杀掉）指定会话；quiet=true 为重启场景的内部清理——不广播
+    /// remote-session-closed（各端保留 Tab 等 respawn，pty-exit 只置 stopped），
+    /// 默认显式关闭（先广播再 kill，各端联动删 Tab）
     #[serde(rename = "session.kill")]
-    SessionKill { id: String },
+    SessionKill {
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        quiet: Option<bool>,
+    },
     /// 查询指定项目的历史会话（恢复用）
     #[serde(rename = "sessions.history")]
     SessionsHistory { path: String },
@@ -255,6 +261,23 @@ mod tests {
     #[test]
     fn contract_client_session_kill() {
         round_trip_client(include_str!("../samples/client-session-kill.json"));
+    }
+
+    /// 重启场景的静默 kill：quiet=true 不广播 remote-session-closed（各端
+    /// 保留 Tab 等 respawn），与显式关闭（默认，联动删 Tab）区分
+    #[test]
+    fn contract_client_session_kill_quiet() {
+        round_trip_client(include_str!("../samples/client-session-kill-quiet.json"));
+        let msg: ClientMessage =
+            serde_json::from_str(include_str!("../samples/client-session-kill-quiet.json"))
+                .unwrap();
+        assert_eq!(
+            msg,
+            ClientMessage::SessionKill {
+                id: "0b6b2d8e-1a2b-4c3d-9e8f-7a6b5c4d3e2f".to_string(),
+                quiet: Some(true),
+            }
+        );
     }
 
     #[test]

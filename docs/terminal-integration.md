@@ -130,7 +130,7 @@ PTY 是字节流，子进程可能输出 UTF-8 或 GBK（Windows 中文 cmd.exe�
 | pty_spawn | renderer→main | { cwd, cols, rows, type, args } | PtySpawnResult |
 | pty_input | renderer→main | { id, data } | boolean |
 | pty_resize | renderer→main | { id, cols, rows } | boolean |
-| pty_kill | renderer→main | { id } | boolean |
+| pty_kill | renderer→main | { id, quiet? } | boolean（quiet=true 重启场景内部清理：不广播 remote-session-closed，默认显式关闭先广播再 kill） |
 | pty_kill_all | renderer→main | - | void |
 
 ### PTY 事件

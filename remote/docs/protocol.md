@@ -19,7 +19,7 @@
 | `sessions.list` | `{}` | 拉取运行中会话列表 |
 | `projects.list` | `{}` | 可操作项目白名单 |
 | `session.create` | `path, sessionId?, skipPermissions?, customArgs?` | 新建（无 sessionId）或恢复（--resume sessionId）会话 |
-| `session.kill` | `id` | 关闭会话（ptyId）。显式关闭：先广播 `remote-session-closed` 再 kill（各端联动删 Tab），与桌面 `pty_kill` 双路径同语义 |
+| `session.kill` | `id, quiet?` | 关闭会话（ptyId）。显式关闭：先广播 `remote-session-closed` 再 kill（各端联动删 Tab），与桌面 `pty_kill` 双路径同语义；`quiet=true` 为重启场景内部清理——不广播 closed（各端保留 Tab 等 respawn，pty-exit 只置 stopped） |
 | `sessions.history` | `path` | 项目历史会话（恢复入口） |
 | `session.subscribe` | `id` | 只读订阅输出（附回放快照） |
 | `session.unsubscribe` | `id` | 取消订阅 |

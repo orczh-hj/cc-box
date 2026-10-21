@@ -117,7 +117,7 @@ R1 已实现消息集（ver=1；正本在 `remote/protocol/src/lib.rs` 与 `prot
 | 手机→桌面 | `projects.list` → `projects` | `{}` → `{list:[{path,name}]}` | 项目列表（新建/恢复入口） |
 | 手机→桌面 | `sessions.history` → `history.sessions` | `{path}` → `{list:[{id,name,lastActiveAt}]}` | 项目历史会话（恢复用） |
 | 手机→桌面 | `session.create` → `session.created` / `session.create.failed` | `{path, sessionId?, skipPermissions?, customArgs?}` / `{id,path}` / `{error}` | 新建（无 sessionId）或恢复（--resume）会话；启动选项与桌面一致（拼 CLI 参数） |
-| 手机→桌面 | `session.kill` | `{id}` | 关闭会话（pty-exit 链路通知两端） |
+| 手机→桌面 | `session.kill` | `{id, quiet?}` | 关闭会话：显式关闭先广播 `remote-session-closed`（各端删 Tab）；`quiet=true` 重启场景内部清理不广播（保留 Tab 等 respawn） |
 | 手机→桌面 | `session.subscribe` → `session.subscribed` | `{id}` → `{id, tail}` | 只读订阅，附输出回放快照（TailBuffer 256KB，ANSI 边界对齐） |
 | 手机→桌面 | `session.unsubscribe` → `session.unsubscribed` | `{id}` | 取消订阅 |
 | 桌面→手机 | `pty.output` | `{id, data}` | 增量输出流 |

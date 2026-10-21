@@ -11,6 +11,8 @@ use crate::hook_events::{
 };
 use crate::remote_state::RemoteState;
 
+use super::TestConfigDirGuard;
+
 /// recv 超时（ms）：任何未到达的消息视为测试失败而非永久挂起
 /// 部分回包经 spawn 线程异步发出（如 session.create 白名单拒绝），留足调度余量
 const RECV_TIMEOUT_MS: u64 = 3000;
@@ -758,7 +760,7 @@ async fn RemoteState_SessionKill_广播closed给远程连接() {
     let conn = crate::remote_state::next_conn_id();
     state.add_conn(conn, tx);
 
-    state.handle_client_message(conn, &ClientMessage::SessionKill { id: "pk1".into() });
+    state.handle_client_message(conn, &ClientMessage::SessionKill { id: "pk1".into(), quiet: None });
 
     let result = match recv_timeout(&mut rx).await {
         ServerMessage::RpcEvent { name, payload } => {
@@ -771,6 +773,46 @@ async fn RemoteState_SessionKill_广播closed给远程连接() {
 
     state.remove_conn(conn);
     result
+}
+
+/// session.kill quiet=true（重启场景内部清理）不广播 remote-session-closed：
+/// 广播会让各端 closeTab 删 Tab，重启被误判为关闭（Tab 删后 respawn 无处绑回）
+#[tokio::test]
+async fn RemoteState_SessionKillQuiet_不广播closed() {
+    let state = &crate::remote_state::REMOTE_STATE;
+    state.register_pty("pkq1", "claude", "/tmp");
+    let (tx, mut rx) = mpsc::channel(16);
+    let conn = crate::remote_state::next_conn_id();
+    state.add_conn(conn, tx);
+
+    state.handle_client_message(
+        conn,
+        &ClientMessage::SessionKill { id: "pkq1".into(), quiet: Some(true) },
+    );
+
+    // 观察窗口内不应收到本 pty 的 closed（全局实例上并行测试的无关广播可能
+    // 先入队，跳过；无 pty manager 时 kill 仅告警无输出）。窗口 300ms：
+    // 覆盖慢环境下 handler spawn 线程的调度延迟，防回归事件晚到漏报
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(300);
+    loop {
+        let remain = deadline.saturating_duration_since(std::time::Instant::now());
+        if remain.is_zero() {
+            break;
+        }
+        match tokio::time::timeout(remain, rx.recv()).await {
+            Err(_) => break, // 窗口内无更多消息：quiet 未广播 ✓
+            Ok(Some(ServerMessage::RpcEvent { name, payload })) => {
+                assert!(
+                    !(name == "remote-session-closed" && payload["id"] == "pkq1"),
+                    "quiet kill 不应广播本会话 closed"
+                );
+                // 其他测试的串扰广播，跳过
+            }
+            Ok(other) => panic!("unexpected message: {:?}", other),
+        }
+    }
+
+    state.remove_conn(conn);
 }
 
 /// session.create 在途上限：达到上限后立即拒绝（不进线程、不查白名单）
@@ -1137,6 +1179,8 @@ async fn Rpc_GetAppConfig_全链路应答() {
 /// （曾把各开发者的 theme 污染成 dark）
 #[tokio::test]
 async fn Rpc_UpdateAppConfig_写命令自动持有() {
+    // GUI_CONFIG_DIR_OVERRIDE 全局互斥：与其他配置隔离用户并行会互相清除
+    let _cfg_lock = super::CONFIG_DIR_TEST_LOCK.lock();
     // 真实 ~/.cc-box/config.json 快照：测试结束前后必须字节一致（污染守卫）
     let real_config_path = dirs::home_dir().map(|h| h.join(".cc-box").join("config.json"));
     let real_before = real_config_path
@@ -1194,25 +1238,6 @@ async fn Rpc_UpdateAppConfig_写命令自动持有() {
 /// 把 GUI 配置目录临时指到独立临时目录（RAII Drop 还原覆盖并清理）。
 /// 全局覆盖与并行测试：当前仅 update_app_config 全链路测试需要写隔离；
 /// 并行只读测试（Rpc_GetAppConfig）可能短暂读到隔离目录的默认配置，无害
-struct TestConfigDirGuard(std::path::PathBuf);
-
-impl TestConfigDirGuard {
-    fn new(tag: &str) -> Self {
-        let dir = std::env::temp_dir()
-            .join(format!("cc-box-rpc-test-{}-{}", tag, std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
-        *crate::store::GUI_CONFIG_DIR_OVERRIDE.lock() = Some(dir.clone());
-        Self(dir)
-    }
-}
-
-impl Drop for TestConfigDirGuard {
-    fn drop(&mut self) {
-        *crate::store::GUI_CONFIG_DIR_OVERRIDE.lock() = None;
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
 /// 桌面显式接管（controller_takeover command）：桌面获得控制权 + 剥离远程终端
 /// + 广播（hello.ok 视角 controller=Some(0)=桌面；远程写操作被拒）
 #[tokio::test]

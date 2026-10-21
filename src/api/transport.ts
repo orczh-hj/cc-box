@@ -36,8 +36,8 @@ export interface Transport {
   sessionInput(id: string, data: string): Promise<boolean>
   /** 尺寸调整 */
   sessionResize(id: string, cols: number, rows: number): Promise<boolean>
-  /** 关闭会话 */
-  sessionKill(id: string): Promise<boolean>
+  /** 关闭会话；quiet=true 为重启场景内部清理——不广播 remote-session-closed（各端保留 Tab 等 respawn） */
+  sessionKill(id: string, quiet?: boolean): Promise<boolean>
   /** 夺回控制权（桌面 pty_claim；浏览器重新 attach 抢占，cols/rows 为当前实际尺寸） */
   sessionClaim(id: string, cols?: number, rows?: number): Promise<void>
 }

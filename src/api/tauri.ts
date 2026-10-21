@@ -99,8 +99,8 @@ export const ptyResize = async (id: string, cols: number, rows: number): Promise
   return transport.sessionResize(id, cols, rows);
 };
 
-export const ptyKill = async (id: string): Promise<boolean> => {
-  return transport.sessionKill(id);
+export const ptyKill = async (id: string, quiet?: boolean): Promise<boolean> => {
+  return transport.sessionKill(id, quiet);
 };
 
 export const ptyKillAll = async (): Promise<void> => {

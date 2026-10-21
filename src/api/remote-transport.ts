@@ -441,8 +441,8 @@ class RemoteTransportImpl implements Transport {
     return true
   }
 
-  async sessionKill(id: string): Promise<boolean> {
-    this.sendClient({ type: 'session.kill', id })
+  async sessionKill(id: string, quiet?: boolean): Promise<boolean> {
+    this.sendClient({ type: 'session.kill', id, ...(quiet ? { quiet } : {}) })
     return true
   }
 

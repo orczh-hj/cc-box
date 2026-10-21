@@ -21,7 +21,7 @@
    - 协议改动：确认四处同步（crate 定义 / protocol.ts / samples / remote/docs/protocol.md，见 CLAUDE.md 检查清单）
    - 远程功能改动：remote/docs/manual-test-cases.md U/R 系列关键条目真机走查
 2. **桌面版本发布**：`npm run release -- --bump <type> --notes "..."`（见下节全自动流程）
-3. **relay 部署**（上表"必须"时）：完整命令见 remote/docs/deploy.md §3.5（npm run build → musl 交叉编译 → scp → systemctl restart → 三查）
+3. **relay 部署**（上表"必须"时）：`npm run deploy:relay`（一键：前端构建 → musl 交叉编译 → scp `.new` + md5 校验 → 确认后切换重启 → 三查自动执行；手动细节见 remote/docs/deploy.md §3.5）
    - **顺序：先桌面版本，后 relay 部署**——新桌面向后兼容旧 UI；反序会出现新 UI 调用旧桌面 rpc 白名单外的命令
 4. **发布后验证**
    - relay 三查：md5 比对 / bundle hash / 新功能特征字符串（deploy.md §3.5 第 4 步）
@@ -37,40 +37,52 @@
 
 ## 自动化发布（推荐）
 
-使用 `scripts/release.js` 脚本全自动发布：
+使用 `scripts/release.js` 脚本全自动发布（2026-10 重构为**两阶段 + 断点续跑**版）：
 
 ```bash
-# 设置代理（GitHub 访问需要）
-export HTTP_PROXY=http://127.0.0.1:33210
-export HTTPS_PROXY=http://127.0.0.1:33210
-
-# 使用 npm 命令
+# 全程开着代理即可一次跑完（脚本按命令分域,不需要中途开关）
 npm run release -- --bump patch --notes "### Fixed\n- Fix terminal copy issue"
 
 # 或直接运行脚本
 node scripts/release.js --bump minor --notes "### Features\n- Add sidebar panel\n\n### Fixed\n- Memory leak"
 ```
 
+### 设计要点（为什么这样）
+
+- **网络域路由**：每条网络命令显式声明域——GitHub（推送/CI/产物下载,注入代理,默认 `127.0.0.1:33210`,`CC_BOX_PROXY` 可覆盖）/ Gitee·OSS·阿里云（强制直连,清空代理 env,不受外部污染）。**开着代理可一次跑完**,阶段二的 ossutil 永不走代理
+- **断点续跑**：每个阶段幂等（版本文件/CHANGELOG 段/Release commit/远端 ref/CI 结论/Release 状态/产物 digest/OSS HEAD 逐项检查）,任何一步失败后**重跑同一命令自动跳过已完成部分**——不再需要 `--exact/--skip-ci` 组合记忆
+- **分仓库推送**：origin 配置了双 push URL,一条 `git push origin` 跨两域必挂一半——脚本改为单 URL 显式分推：GitHub（代理,失败阻断）+ Gitee（直连,失败仅告警可后补）。**注意：GitHub Actions 并不会自动同步 Gitee**（release.yml 注释声称同步但无此代码）,Gitee 同步只能靠脚本的手动推送
+- **CI 按 tag 匹配**：轮询等待该 tag 的 run 出现再 watch（避免错拿别的 run）;CI 失败立即中止（旧版继续走会在 Release 步骤卡死）
+- **产物完整性**：size + sha256 digest 双校验（防半截文件,也防 CI re-run 后同 size 不同内容的漂移）
+- **GIT_TERMINAL_PROMPT=0**：git 凭据缺失时直接失败,不在 execSync 下挂死等输入
+
 ### 参数说明
 
 | 参数 | 必填 | 说明 |
 |------|------|------|
 | `--bump` | ✓* | 版本更新类型：`major` / `minor` / `patch`（与 `--exact` 二选一） |
-| `--exact` | ✓* | 使用当前版本发布，不 bump 版本号（用于重新发布） |
+| `--exact` | ✓* | 使用当前版本发布，不 bump 版本号（断点续跑时通常不需要——直接重跑原命令） |
 | `--notes` | ✓ | Release notes 内容，用 `\n` 表示换行 |
 | `--skip-ci` |  | 跳过 CI 监控（用于已构建的标签） |
-| `--oss-only` |  | 仅下载指定版本并上传 OSS（如 `--oss-only v0.5.1`） |
+| `--oss-only` |  | 仅下载指定版本并上传 OSS（如 `--oss-only v0.5.1`；产物已完整时全程免代理） |
 
 ### 执行流程
 
-脚本自动执行以下步骤：
-1. 更新版本号（Cargo.toml, package.json, tauri.conf.json）
-2. 更新 CHANGELOG.md
-3. Git 提交并推送（自动使用代理）
-4. 创建并推送标签
-5. 监控 CI 构建
-6. 发布 GitHub Release
-7. 下载 Release 产物并上传到阿里云 OSS（国内更新渠道）
+```
+阶段一 GitHub 域（代理）
+  1. 更新版本号（Cargo.toml, package.json, tauri.conf.json）
+  2. 更新 CHANGELOG.md（幂等:已含该版本段则跳过）
+  3. Git 提交（幂等:Release commit 已存在则跳过）
+  4. 分仓库推送 main + tag（GitHub 阻断 / Gitee 告警）
+  5. 按 tag 匹配并监控 CI（失败中止）
+  6. GitHub Release:draft 转正式 + 定制 notes（幂等）
+  7. 下载产物到 releases/<ver>/（size+digest 校验,完整则跳过）
+
+阶段二 国内直连域（清空代理）
+  8. OSS 上传（幂等:latest.json version + 三产物 HEAD 校验）
+```
+
+失败时脚本会打印续跑指引——**开/关代理（如需）后重跑同一命令**即可。
 
 ### Release Notes 格式
 
@@ -98,12 +110,15 @@ npm run release -- --oss-only v0.5.1
 已有 Release 产物，只需上传到 OSS：
 
 ```bash
-# 无需代理（OSS 国内直连）
+# 产物已完整（releases/<ver>/ 通过 size+digest 校验）时全程免代理；
+# 产物不完整时会先从 GitHub 下载（需代理，失败打印断点提示）
 npm run release:oss -- v0.5.1
 
 # 或直接运行
 node scripts/release.js --oss-only v0.5.1
 ```
+
+OSS 侧幂等：latest.json version 正确且三主安装包 HEAD 200 时自动跳过重复上传。
 
 ## OSS 配置
 
@@ -195,19 +210,19 @@ CI 自动构建并上传：
 
 ## 发布故障恢复（脚本中断后续跑）
 
-脚本若在某步失败退出（如 push 阶段），后续步骤可手工续完：
+脚本若在某步失败退出,2026-10 重构后**首选重跑同一命令**（各阶段幂等,自动跳过已完成部分）；以下为仍需人工介入的场景：
 
-1. **Gitee 推送失败**（`CRYPT_E_REVOCATION_OFFLINE`，TLS 吊销检查不可达；代理与直连均败）——一次性禁校验推送（公开代码无风险，不改全局配置）：
+1. **Gitee 推送告警**（脚本内直连失败,不阻断发布）——一次性禁校验补推（公开代码无风险,不改全局配置）：
 
    ```bash
-   git -c http.sslVerify=false push https://gitee.com/orczh/cc-box.git main
+   git -c http.sslVerify=false push https://gitee.com/orczh/cc-box.git main --tags
    ```
 
-   多 URL origin 下 `git push origin` 会连推两仓库，Gitee 在代理环境必失败——**分 URL 推送**：GitHub 用代理、Gitee 直连+禁校验。
+   注意：多 URL origin 下手动 `git push origin` 仍会连推两仓库（代理环境 Gitee 必失败）——**始终分 URL 推送**：GitHub 用代理、Gitee 直连。
 
 2. **commit 需要修正**（如误入构建产物）：先确认 GitHub 未收到（`git ls-remote https://github.com/orczh-hj/cc-box.git refs/heads/main` 是否为本地 HEAD），未收到才可安全 amend；产物文件用 `git rm -r --cached <target>` 移出跟踪后 amend。
 
-3. **手工续跑剩余步骤**（tag → CI → Release → OSS）：
+3. **特殊情况手动步骤**（脚本已覆盖常规断点,以下仅在脚本本身故障时使用）：
 
    ```bash
    git tag -a v<x.y.z> -m "Release v<x.y.z>" && git push <两远程> v<x.y.z>   # 触发 CI

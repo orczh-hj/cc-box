@@ -109,6 +109,15 @@ describe('Remote_ProtocolContract_字段值保真', () => {
     })
   })
 
+  it('session.kill quiet 字段保真（重启静默 kill 不触发各端删 Tab）', () => {
+    // 默认（显式关闭）：无 quiet 字段，联动删 Tab 语义不变
+    expect(parseClientMessage(loadSample('client-session-kill.json')))
+      .toEqual({ type: 'session.kill', id: expect.any(String) })
+    // quiet=true：重启场景的内部清理，不广播 remote-session-closed
+    expect(parseClientMessage(loadSample('client-session-kill-quiet.json')))
+      .toEqual({ type: 'session.kill', id: expect.any(String), quiet: true })
+  })
+
   it('session.create 启动选项字段保真（skipPermissions/customArgs）', () => {
     const msg = parseClientMessage(loadSample('client-session-create-opts.json'))
     expect(msg).toEqual({

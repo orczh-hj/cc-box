@@ -48,8 +48,8 @@ export const tauriTransport: Transport = {
   sessionResize(id, cols, rows) {
     return tauriInvoke<boolean>('pty_resize', { id, cols, rows })
   },
-  sessionKill(id) {
-    return tauriInvoke<boolean>('pty_kill', { id })
+  sessionKill(id, quiet) {
+    return tauriInvoke<boolean>('pty_kill', { id, quiet })
   },
   async sessionClaim(id) {
     await tauriInvoke<void>('pty_claim', { id })

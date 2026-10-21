@@ -34,6 +34,44 @@ mod state_broadcast;
 pub(crate) static HOOK_TEST_LOCK: std::sync::LazyLock<parking_lot::Mutex<()>> =
     std::sync::LazyLock::new(|| parking_lot::Mutex::new(()));
 
+/// remote_server 全局态（RUNNING/SERVER_TASK/CURRENT_PORT）的测试互斥锁：
+/// start/stop 级测试必须串行执行，并行互相 stop 对方的 server
+#[cfg(test)]
+pub(crate) static REMOTE_SERVER_TEST_LOCK: std::sync::LazyLock<parking_lot::Mutex<()>> =
+    std::sync::LazyLock::new(|| parking_lot::Mutex::new(()));
+
+/// GUI_CONFIG_DIR_OVERRIDE 全局的测试互斥锁：TestConfigDirGuard 用户
+/// （remote_state 的 Rpc 写命令链、remote_host 的 start/stop 链）必须串行——
+/// 并行时一方 Drop 清除 override，另一方读配置回退真实 ~/.cc-box（端口变
+/// 8747 等，测试随环境漂移）
+#[cfg(test)]
+pub(crate) static CONFIG_DIR_TEST_LOCK: std::sync::LazyLock<parking_lot::Mutex<()>> =
+    std::sync::LazyLock::new(|| parking_lot::Mutex::new(()));
+
+/// GUI 配置目录隔离（RAII）：指向独立临时目录，Drop 还原并清理。落盘类
+/// 测试必须使用（走真实命令链路意味着真实写 ~/.cc-box/config.json）
+#[cfg(test)]
+pub(crate) struct TestConfigDirGuard(std::path::PathBuf);
+
+#[cfg(test)]
+impl TestConfigDirGuard {
+    pub(crate) fn new(tag: &str) -> Self {
+        let dir = std::env::temp_dir()
+            .join(format!("cc-box-rpc-test-{}-{}", tag, std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        *crate::store::GUI_CONFIG_DIR_OVERRIDE.lock() = Some(dir.clone());
+        Self(dir)
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestConfigDirGuard {
+    fn drop(&mut self) {
+        *crate::store::GUI_CONFIG_DIR_OVERRIDE.lock() = None;
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 #[cfg(test)]
 mod build_claude_args_tests {
     use crate::pty::build_claude_args;

@@ -141,16 +141,22 @@ pub async fn rename_session(pty_id: String, name: String) -> Result<(), String> 
     Ok(())
 }
 
-/// 杀掉 PTY（用户显式关闭：桌面 closeTab/closeAllTabs 唯一后端路径）
+/// 杀掉 PTY（用户显式关闭：桌面 closeTab/closeAllTabs 唯一后端路径）；
+/// quiet=true 为重启场景的内部清理（restartTab 清旧 PTY）——不广播
+/// remote-session-closed，pty-exit 照常到达只置 stopped 保留 Tab 等 respawn
 #[tauri::command]
-pub async fn pty_kill(id: String) -> Result<bool, String> {
+pub async fn pty_kill(id: String, quiet: Option<bool>) -> Result<bool, String> {
     let manager = get_pty_manager().ok_or_else(|| "PTY manager not initialized".to_string())?;
 
     // 先广播 remote-session-closed 再 kill（与远程 session.kill 同一语义与
     // 顺序）：各端（含其他浏览器端）联动删 Tab，"打开的标签页"不残留 stopped
     // 条目；自然退出（pty-exit 只置 stopped 保留 Tab）与此相区分。先发保证
-    // closed 先于 exit 到达（同连接保序），晚到会因 ptyId 已清而匹配不到 Tab
-    crate::remote_state::emit_event(crate::events::names::REMOTE_SESSION_CLOSED, &id, "");
+    // closed 先于 exit 到达（同连接保序），晚到会因 ptyId 已清而匹配不到 Tab。
+    // quiet（重启清理）跳过广播：closed 会让各端 closeTab 删 Tab，重启被
+    // 误判为关闭（Tab 已删，respawn 的 setTabPty 无处可绑）
+    if !quiet.unwrap_or(false) {
+        crate::remote_state::emit_event(crate::events::names::REMOTE_SESSION_CLOSED, &id, "");
+    }
 
     manager.kill(&id).map(|_| true).map_err(|e| e.to_string())
 }

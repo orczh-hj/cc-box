@@ -777,9 +777,11 @@ async function restartTab(tabId: string) {
   let fitAddon: FitAddon | null = null
 
   try {
-    // 如果有旧 PTY 在运行，先 kill
+    // 如果有旧 PTY 在运行，先 quiet kill（不广播 remote-session-closed：
+    // 广播会让各端 closeTab 删 Tab，重启被误判为关闭；pty-exit 照常置 stopped
+    // 保留 Tab，等下方 respawn 绑回）
     if (tab.ptyId) {
-      try { await ptyKill(tab.ptyId) } catch {}
+      try { await ptyKill(tab.ptyId, true) } catch {}
     }
 
     // 清理旧 Terminal 实例（dispose 失败不阻断重启流程，仍需清理 Map 引用）

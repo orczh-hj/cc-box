@@ -12,6 +12,11 @@ import type { Unlisten } from '../../src/api/transport'
 class FakeWebSocket {
   static instances: FakeWebSocket[] = []
   static SENT: Array<Record<string, unknown>> = []
+  // WebSocket 状态常量（sendClient 等实现按 WebSocket.OPEN 判定就绪）
+  static readonly CONNECTING = 0
+  static readonly OPEN = 1
+  static readonly CLOSING = 2
+  static readonly CLOSED = 3
   readyState = 0
   onopen: (() => void) | null = null
   onmessage: ((ev: { data: string }) => void) | null = null
@@ -182,5 +187,38 @@ describe('remote-transport 控制权与 revision', () => {
     ws.serverSend({ type: 'rpc.event', name: 'state-changed', payload: { id: 'mcp', data: '21' } })
     expect(sections).toEqual(['mcp'])
     un()
+  })
+})
+
+describe('remote-transport sessionKill quiet 参数', () => {
+  beforeEach(() => {
+    FakeWebSocket.instances = []
+    FakeWebSocket.SENT = []
+  })
+
+  /** 建立连接并完成 hello 握手，返回过滤掉 hello 的已发送消息列表 */
+  async function connectAndCollect(): Promise<void> {
+    remoteTransport.connectWithToken('test-token')
+    const ws = lastWs()
+    ws.serverOpen()
+    ws.serverSend({ type: 'hello.ok', ver: 1, deviceName: 'D', connId: 7, controller: 7, revision: 3 })
+  }
+
+  function sentKills(): Array<Record<string, unknown>> {
+    return FakeWebSocket.SENT.filter(m => m.type === 'session.kill')
+  }
+
+  // 显式关闭（默认）：不带 quiet 字段，服务端广播 remote-session-closed 各端删 Tab
+  it('RemoteTransport_SessionKill默认显式关闭_001', async () => {
+    await connectAndCollect()
+    await remoteTransport.sessionKill('pty-1')
+    expect(sentKills()).toEqual([{ type: 'session.kill', id: 'pty-1' }])
+  })
+
+  // 重启场景内部清理（quiet=true）：带 quiet 字段，不触发各端删 Tab（保留 Tab 等 respawn）
+  it('RemoteTransport_SessionKillQuiet不删Tab_002', async () => {
+    await connectAndCollect()
+    await remoteTransport.sessionKill('pty-1', true)
+    expect(sentKills()).toEqual([{ type: 'session.kill', id: 'pty-1', quiet: true }])
   })
 })

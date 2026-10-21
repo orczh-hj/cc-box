@@ -14,7 +14,7 @@ export type ClientMessage =
   | { type: 'sessions.list' }
   | { type: 'projects.list' }
   | { type: 'session.create'; path: string; sessionId?: string; skipPermissions?: boolean; customArgs?: string; sessionName?: string }
-  | { type: 'session.kill'; id: string }
+  | { type: 'session.kill'; id: string; quiet?: boolean }
   | { type: 'sessions.history'; path: string }
   | { type: 'session.subscribe'; id: string }
   | { type: 'session.unsubscribe'; id: string }
@@ -130,7 +130,14 @@ export function parseClientMessage(raw: unknown): ClientMessage | null {
       }
       return null
     case 'session.kill':
-      if (str(raw.id)) return { type: 'session.kill', id: raw.id }
+      if (str(raw.id)) {
+        const quiet = raw.quiet
+        return {
+          type: 'session.kill',
+          id: raw.id,
+          ...(typeof quiet === 'boolean' ? { quiet } : {}),
+        }
+      }
       return null
     case 'sessions.history':
       if (str(raw.path)) return { type: 'sessions.history', path: raw.path }

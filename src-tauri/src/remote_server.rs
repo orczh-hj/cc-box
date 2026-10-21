@@ -6,7 +6,7 @@
 //! - 绑定 0.0.0.0:port（默认 8747），仅在远程开关开启时启动
 
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::LazyLock;
 use std::time::Duration;
 
@@ -36,6 +36,9 @@ static SHUTDOWN: LazyLock<(watch::Sender<bool>, watch::Receiver<bool>)> =
 static SERVER_TASK: LazyLock<Mutex<Option<tokio::task::JoinHandle<()>>>> =
     LazyLock::new(|| Mutex::new(None));
 static RUNNING: AtomicBool = AtomicBool::new(false);
+/// 实际监听端口（bind 成功时记录）：stop 后等待端口释放以它为准——
+/// 不能现读配置（用户可能在停止前改过端口配置，等错端口）
+static CURRENT_PORT: AtomicU16 = AtomicU16::new(0);
 
 /// 应用启动时调用：开关开启则启动服务器
 pub async fn init(_app_handle: AppHandle) {
@@ -76,18 +79,11 @@ pub async fn start() -> Result<(), String> {
         .fallback(|uri| cc_box_web_assets::serve_static(WEB_DIR_ENV, uri));
 
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
-    let listener = match tokio::net::TcpListener::bind(addr).await {
-        Ok(l) => l,
+    let listener = match bind_with_retry(addr, port).await {
+        Ok(Some(l)) => l,
+        // 宿主制：本机另一实例已提供服务（token 共享），跳过启动
+        Ok(None) => return Ok(()),
         Err(e) => {
-            // 宿主制：端口已被本机另一 CC-Box 实例持有且服务可达 → 不报错不启动，
-            // 面板将显示宿主的直连 URL（token 共享）；探测不通才是真错误（端口被其他程序占用）
-            if probe_host(port).await {
-                log::info!(
-                    "[remote] Remote already hosted by another instance on port {}, skipping start",
-                    port
-                );
-                return Ok(());
-            }
             log::error!("[remote] Failed to bind {}: {}", addr, e);
             return Err(format!(
                 "failed to bind port {} (another CC-Box instance may be running): {}",
@@ -96,6 +92,9 @@ pub async fn start() -> Result<(), String> {
         }
     };
 
+    // 先记端口再置运行态：若顺序相反，微窗口内并发的 stop() 会 swap 到 0、
+    // 跳过等待端口释放（错失本轮清理窗口）
+    CURRENT_PORT.store(port, Ordering::SeqCst);
     RUNNING.store(true, Ordering::SeqCst);
     let _ = SHUTDOWN.0.send(false); // 重置关停信号（再次开启时）
     let task = tokio::spawn(async move {
@@ -115,17 +114,70 @@ pub async fn start() -> Result<(), String> {
     Ok(())
 }
 
-/// 停止服务器：abort 监听任务 + 通知所有在线 WS 连接退出（各自清理后 remove_conn）
+/// 停止服务器：abort 监听任务 + 通知所有在线 WS 连接退出（各自清理后 remove_conn）。
+/// abort 后 Windows 上端口释放有延迟（IOCP pending accept 清理，实测 ~100ms 起，
+/// 有在线连接时更久——曾实测 v0.15.1 实例停止后端口长期不释放、新实例 bind
+/// 10048）：轮询 bind 试探直至端口可重绑（试探 listener 未挂 accept，drop 即
+/// 释放不产生 TIME_WAIT），上限 5s——放行后若仍被占，start 的 bind 会给出
+/// 明确错误，不能为等待释放挂死 stop（UI 等待该命令返回）
 pub async fn stop() {
     if !RUNNING.load(Ordering::SeqCst) {
         return;
     }
     let _ = SHUTDOWN.0.send(true);
+    let port = CURRENT_PORT.swap(0, Ordering::SeqCst);
     if let Some(task) = SERVER_TASK.lock().take() {
         task.abort();
     }
     RUNNING.store(false, Ordering::SeqCst);
+    if port != 0 {
+        let addr = SocketAddr::from(([0, 0, 0, 0], port));
+        // 注：等待期间若并发 start() 抢先绑到端口，此处会空转满 5s 才返回——
+        // 状态无破坏（新 server 正常运行），仅本次 stop 返回偏慢，可接受
+        for _ in 0..50 {
+            if tokio::net::TcpListener::bind(addr).await.is_ok() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
     log::info!("[remote] Remote server stopped");
+}
+
+/// bind + 失败时的宿主探测与短重试：
+/// - Ok(Some(listener))：绑定成功
+/// - Ok(None)：端口被本机另一 CC-Box 实例持有且服务可达（宿主制跳过，面板
+///   显示宿主 URL）；仅首轮探测——宿主在 ~1.5s 重试窗口内出现的竞态概率极
+///   低且误报后重开一次即命中跳过，不值得为此多付一次 3s 探测超时
+/// - Err：真错误。探测不通可能是「宿主刚停止、端口释放延迟」的残骸（TCP
+///   可连但不响应）——短窗口重试 bind；仍失败即端口被其他程序占用或残骸
+///   未消（v0.15.1 stop 泄漏场景），报错由用户处置。
+///   最坏耗时 ~4.5s（首轮探测 3s + 5×300ms），start 为 UI await 命令，
+///   失败路径的等待时长按此上限控制
+async fn bind_with_retry(
+    addr: SocketAddr,
+    port: u16,
+) -> Result<Option<tokio::net::TcpListener>, String> {
+    let mut last_err = String::new();
+    for attempt in 0..6 {
+        match tokio::net::TcpListener::bind(addr).await {
+            Ok(l) => return Ok(Some(l)),
+            Err(e) => {
+                last_err = e.to_string();
+                if attempt == 0 && probe_host(port).await {
+                    log::info!(
+                        "[remote] Remote already hosted by another instance on port {}, skipping start",
+                        port
+                    );
+                    return Ok(None);
+                }
+                if attempt < 5 {
+                    tokio::time::sleep(Duration::from_millis(300)).await;
+                }
+            }
+        }
+    }
+    Err(last_err)
 }
 
 pub fn is_running() -> bool {

@@ -133,7 +133,14 @@ curl -s https://orczh.top:8800/ | grep -o 'assets/index-[^"]*'   # hash 应为�
 
 > 首次启用需一次性配置：systemd 单元加 `Environment=CC_BOX_RELAY_WEB_DIR=/opt/cc-box/web`、`mkdir -p /opt/cc-box/web` 并 `systemctl daemon-reload && systemctl restart cc-box-relay`（重启即重新配对，属常规流程）。桌面端对称支持 `CC_BOX_WEB_DIR`（release 桌面同样获得免重编更新通道；debug 本就实时读 dist）。
 
-**relay 更新一条龙**（Windows Git Bash，在仓库根目录）：
+**relay 更新一条龙**（2026-10 起首选一键脚本，Windows Git Bash，在仓库根目录）：
+
+```bash
+# 构建 → musl 交叉编译 → scp .new + md5 校验 → 确认后切换重启 → 三查全自动
+npm run deploy:relay          # 加 --yes 跳过切换确认（重启会踢掉所有手机连接）
+```
+
+脚本实现 `scripts/deploy-relay.mjs`（全程直连无需代理；切换前确认是因为重启 = 内存态清空）。脚本不可用时的手动等价流程：
 
 ```bash
 # 1. 前端最新产物（即使没改前端也建议跑，保证嵌入版本一致）
@@ -146,7 +153,7 @@ RUSTFLAGS="-C linker=rust-lld" cargo build --release --target x86_64-unknown-lin
 # 3. 上传 + 切换 + 重启（scp 可能传完不退出，不等返回、远端 md5 校验）
 BIN=target/x86_64-unknown-linux-musl/release/cc-box-relay
 timeout 90 scp $BIN root@orczh.top:/usr/local/bin/cc-box-relay.new
-ssh root@orczh.top 'mv /usr/local/bin/cc-box-relay.new /usr/local/bin/cc-box-relay && chmod +x /usr/local/bin/cc-box-relay && systemctl restart cc-box-relay && sleep 2 && systemctl is-active cc-box-relay'
+ssh root@orczh.top 'cd /usr/local/bin && mv cc-box-relay cc-box-relay.old && mv cc-box-relay.new cc-box-relay && chmod +x cc-box-relay && systemctl restart cc-box-relay && sleep 2 && systemctl is-active cc-box-relay'
 
 # 4. 验证（三查）
 md5sum $BIN                                    # 与远端 md5sum 比对

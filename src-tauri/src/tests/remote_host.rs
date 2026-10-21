@@ -60,3 +60,42 @@ async fn ProbeHost_SilentTcpTimesOut_003() {
         "超时保护应生效（3s 超时 + 余量）"
     );
 }
+
+/// stop() 后端口必须立即可重绑 + 立即可再开启（start/stop 全链路）。
+/// 背景：abort serve 任务后 Windows 上端口释放有延迟（IOCP pending accept
+/// 清理，实测 ~100ms 起且不稳定）——曾实测 v0.15.1 实例关闭远程后端口长期
+/// LISTENING 残留且不响应 HTTP，「停止→再开启」与多实例宿主接管均 10048。
+/// stop 内部已轮询等待端口可重绑，此处断言对外语义：stop 返回即端口可用
+#[tokio::test]
+async fn RemoteServer_Stop后端口立即可重绑_001() {
+    let _lock = super::REMOTE_SERVER_TEST_LOCK.lock();
+    // 配置目录隔离与 remote_state 的 Rpc 写命令链测试互斥（override 全局单值）
+    let _cfg_lock = super::CONFIG_DIR_TEST_LOCK.lock();
+    let _cfg = super::TestConfigDirGuard::new("remote-stop");
+
+    // 随机端口：防与真实实例（8747）及其他并行测试冲突
+    let probe = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = probe.local_addr().unwrap().port();
+    drop(probe);
+    remote_server::save_remote_config(None, None, Some(port)).unwrap();
+
+    remote_server::start().await.unwrap();
+    assert!(remote_server::is_running(), "start 后应处于运行态");
+
+    remote_server::stop().await;
+    assert!(!remote_server::is_running(), "stop 后应处于停止态");
+
+    // 断言 1：stop 返回即端口可重绑（不依赖外部等待）
+    let rebound = tokio::net::TcpListener::bind(("0.0.0.0", port)).await;
+    assert!(
+        rebound.is_ok(),
+        "stop 后端口应立即可重绑，实际: {:?}",
+        rebound.err()
+    );
+    drop(rebound);
+
+    // 断言 2：立即再开启也成功（「停止→开启」快速切换路径）
+    remote_server::start().await.unwrap();
+    assert!(remote_server::is_running());
+    remote_server::stop().await;
+}
