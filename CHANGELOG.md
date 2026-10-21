@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.15.1] - 2026-10-21
+
+### Fixed
+- Mac: blank terminal when opening or creating sessions. Claude is now spawned directly on Unix/macOS (no shell wrapper), and immediate exits are detected with the CLI's own output shown as an error message in the terminal
+- Remote: get_installed_claude_version allowed over RPC (mobile CLI version page was blocked)
+- Less log noise: empty project directories no longer warn on every refresh; duplicate PTY kill is silent
+
+### Features
+- Home header gains pin / snap-left / snap-right buttons (same as terminal header)
+- Closed sessions appear in the recent list immediately
+- Mobile web terminal: media control symbols fall back to widely-supported glyphs
+
 ## [0.15.0] - 2026-10-21
 
 ### Features
