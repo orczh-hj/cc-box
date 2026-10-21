@@ -34,7 +34,7 @@
           @click="$emit('select', preset)"
         >
           <div class="preset-icon" :style="{ color: preset.iconColor || '#6366F1' }">
-            {{ getIconChar(preset.icon) }}
+            <ProviderIcon :icon="preset.icon" />
           </div>
           <div class="preset-info">
             <span class="preset-name">{{ preset.name }}</span>
@@ -49,8 +49,10 @@
 <script setup lang="ts">
 import { ref, computed } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { providerPresets, getCategoryLabel } from '@/config/providerPresets'
+import { providerPresets } from '@/config/providerPresets'
+import { getCategoryLabel } from '@/config/providerCategories'
 import type { ProviderPreset } from '@/types/provider'
+import ProviderIcon from './ProviderIcon.vue'
 
 const emit = defineEmits<{
   close: []
@@ -72,6 +74,7 @@ const categories = computed(() => [
   { value: 'aggregator', label: t('categoryAggregator') },
   { value: 'cloud_provider', label: t('categoryCloud') },
   { value: 'third_party', label: t('categoryThirdParty') },
+  { value: 'local', label: t('categoryLocal') },
 ])
 
 const selectedCategory = ref<string>('')
@@ -87,31 +90,6 @@ function handleSelectCustom() {
   if (customPreset.value) {
     emit('select', customPreset.value)
   }
-}
-
-function getIconChar(icon?: string): string {
-  if (!icon) return 'P'
-  const iconChars: Record<string, string> = {
-    anthropic: 'A',
-    deepseek: 'D',
-    zhipu: 'Z',
-    baidu: 'B',
-    bailian: 'B',
-    kimi: 'K',
-    stepfun: 'S',
-    minimax: 'M',
-    doubao: 'D',
-    siliconflow: 'S',
-    openrouter: 'O',
-    gemini: 'G',
-    github: 'G',
-    aws: 'A',
-    aihubmix: 'A',
-    modelscope: 'M',
-    generic: 'P',
-    custom: 'C',
-  }
-  return iconChars[icon] || icon[0].toUpperCase()
 }
 </script>
 

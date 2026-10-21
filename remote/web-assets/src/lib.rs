@@ -133,6 +133,13 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 
+    /// 内嵌资产含 favicon（public/icon.png 经 vite build 拷入 dist；
+    /// 若 public 拷贝链断裂或 dist 过期，index.html 的 /icon.png 将 404）
+    #[test]
+    fn WebAssets_内嵌资产含图标() {
+        assert!(EmbeddedAssets::get("icon.png").is_some());
+    }
+
     /// 内嵌未知路径 404（与原两处实现行为一致）
     #[tokio::test]
     async fn WebAssets_内嵌miss404() {

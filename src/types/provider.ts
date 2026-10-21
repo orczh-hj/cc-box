@@ -5,6 +5,7 @@ export type ProviderCategory =
   | 'cloud_provider' // 云服务商（AWS Bedrock、Vertex AI）
   | 'aggregator'     // API 聚合平台（OpenRouter、SiliconFlow）
   | 'third_party'    // 第三方供应商
+  | 'local'          // 本机推理服务（Ollama、LM Studio 等）
   | 'custom'         // 自定义
   | 'omo'            // Oh My OpenCode
   | 'omo-slim'       // Oh My OpenCode Slim

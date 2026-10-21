@@ -94,7 +94,8 @@ cc-box/
 │   │   └── settings/           # 设置（SettingsOverlay > SettingsView + sections/）
 │   │       └── providers/      # **Provider 组件**（ProviderList > ProviderCard、EditPanel、PresetPanel、CommonConfigPanel）
 │   ├── config/
-│   │   └── providerPresets.ts  # **Provider 预设模板**（50+ 厂商）
+│   │   ├── providerPresets.ts  # **Provider 预设模板**（133 厂商，**生成物勿手改**：下载 cc-switch zip 后 `npm run sync:presets -- --zip <zip路径>` 同步预设与图标，策略见 docs/provider-management.md）
+│   │   └── providerCategories.ts  # 分类标签/筛选（手写，从生成物迁出）
 │   ├── stores/                 # Pinia：app、session、sidebar、config、providers
 │   ├── state/
 │   │   └── sections.ts         # **状态同步中心**（state-changed section → loader 注册表：查表分发/暂存防覆盖/级联刷新；App.vue 只订阅转发，新功能加一行登记）
@@ -299,7 +300,7 @@ UI 已浏览器化（一套 UI 走桌面 Tauri / 宽屏浏览器 / 手机浏览�
 
 - **纯样式分支**一律写 `@media (max-width: 768px)`（IconBar 底部横栏、SidebarPanel 抽屉、ProjectSelectView 单栏折叠、ProviderCard 按钮换行等）
 - **结构分支**（两套 DOM，如 SettingsView 竖导航/顶部 tab）用 `useIsMobile()`（`src/composables/useMediaQuery.ts`，与 CSS 断点一致）
-- **终端字号**：手机 = 桌面设置 × 0.75（`XTermTerminal` 的 `effectiveFontSize`），断点跨越自动重算
+- **终端字号**：手机 = 桌面设置 × 0.9（`XTermTerminal` 的 `effectiveFontSize`），断点跨越自动重算
 - **软键盘**：App.vue 同步 `visualViewport.height` 到 app-root 高度，驱动终端 fit
 - **safe-area**：底部栏用 `--safe-area-bottom`（env(safe-area-inset-bottom)），视口 meta 带 viewport-fit=cover
 - **触屏适配**：所有"hover 才显示"的操作按钮必须包 `@media (hover: hover)`（触屏设备 hover:none 无悬停，按钮常显——SessionItem/ProviderCard 已改）；快捷键工具条（QuickKeyBar）补软键盘按不出的控制键（Esc/⇧Tab/Ctrl+J/Ctrl+U/↑↓←→）+「选择复制」action 按钮（软键盘由点击终端区域唤出，「键盘」按钮已按用户决策移除）

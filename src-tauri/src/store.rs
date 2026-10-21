@@ -212,8 +212,19 @@ fn default_true() -> bool {
     true
 }
 
+/// 测试注入：覆盖 GUI 配置目录（隔离真实 ~/.cc-box）。remote_state 的 rpc
+/// 全链路测试经真实 update_app_config 落盘，曾把各开发者的 theme 污染成 dark
+#[cfg(test)]
+pub(crate) static GUI_CONFIG_DIR_OVERRIDE: std::sync::LazyLock<
+    parking_lot::Mutex<Option<PathBuf>>,
+> = std::sync::LazyLock::new(|| parking_lot::Mutex::new(None));
+
 /// 获取 GUI 配置目录
 fn get_gui_config_dir() -> Result<PathBuf> {
+    #[cfg(test)]
+    if let Some(dir) = GUI_CONFIG_DIR_OVERRIDE.lock().clone() {
+        return Ok(dir);
+    }
     dirs::home_dir()
         .map(|h| h.join(".cc-box"))
         .context("Home directory not found")

@@ -1132,9 +1132,20 @@ async fn Rpc_GetAppConfig_全链路应答() {
     }
 }
 
-/// update_app_config 写命令全链路 + 成功后自动持有 controller（复现接管风暴源头）
+/// update_app_config 写命令全链路 + 成功后自动持有 controller（复现接管风暴源头）。
+/// 落盘必须隔离到临时目录：走真实命令链路意味着真实写 ~/.cc-box/config.json
+/// （曾把各开发者的 theme 污染成 dark）
 #[tokio::test]
 async fn Rpc_UpdateAppConfig_写命令自动持有() {
+    // 真实 ~/.cc-box/config.json 快照：测试结束前后必须字节一致（污染守卫）
+    let real_config_path = dirs::home_dir().map(|h| h.join(".cc-box").join("config.json"));
+    let real_before = real_config_path
+        .as_ref()
+        .and_then(|p| std::fs::read_to_string(p).ok());
+
+    // GUI 配置目录指到独立临时目录（RAII Drop 还原覆盖并清理）
+    let _cfg_guard = TestConfigDirGuard::new("update-app-config");
+
     // dispatch 走全局 REMOTE_STATE 的 broadcast；持有逻辑在 handle_rpc 走全局，
     // 因此在全局实例上验证（先记录原 controller 以便还原）
     let (conn, mut rx) = setup_conn(&crate::remote_state::REMOTE_STATE);
@@ -1163,8 +1174,43 @@ async fn Rpc_UpdateAppConfig_写命令自动持有() {
     if before.is_none() {
         assert_eq!(crate::remote_state::REMOTE_STATE.controller(), Some(crate::remote_state::ControllerHolder::Remote(conn)));
     }
+    // 命令确实落盘——但落在隔离目录（而非真实 ~/.cc-box）
+    let isolated = std::fs::read_to_string(_cfg_guard.0.join("config.json"))
+        .expect("隔离 config.json 应已落盘");
+    let isolated_json: serde_json::Value = serde_json::from_str(&isolated).unwrap();
+    assert_eq!(isolated_json["theme"], "dark", "写命令应真实执行（写到隔离目录）");
+    // 真实配置未被污染（修复前此处失败：theme 被写成 dark）
+    let real_after = real_config_path
+        .as_ref()
+        .and_then(|p| std::fs::read_to_string(p).ok());
+    assert_eq!(
+        real_before, real_after,
+        "rpc 写命令测试不得污染真实 ~/.cc-box/config.json"
+    );
     // 还原：移除测试连接（顺带释放其可能持有的 controller），避免污染其他测试
     crate::remote_state::REMOTE_STATE.remove_conn(conn);
+}
+
+/// 把 GUI 配置目录临时指到独立临时目录（RAII Drop 还原覆盖并清理）。
+/// 全局覆盖与并行测试：当前仅 update_app_config 全链路测试需要写隔离；
+/// 并行只读测试（Rpc_GetAppConfig）可能短暂读到隔离目录的默认配置，无害
+struct TestConfigDirGuard(std::path::PathBuf);
+
+impl TestConfigDirGuard {
+    fn new(tag: &str) -> Self {
+        let dir = std::env::temp_dir()
+            .join(format!("cc-box-rpc-test-{}-{}", tag, std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        *crate::store::GUI_CONFIG_DIR_OVERRIDE.lock() = Some(dir.clone());
+        Self(dir)
+    }
+}
+
+impl Drop for TestConfigDirGuard {
+    fn drop(&mut self) {
+        *crate::store::GUI_CONFIG_DIR_OVERRIDE.lock() = None;
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
 }
 
 /// 桌面显式接管（controller_takeover command）：桌面获得控制权 + 剥离远程终端

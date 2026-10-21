@@ -35,7 +35,8 @@ export default {
   remoteTakenOverHint: 'Content is still syncing; claim it back anytime',
   remoteClaimBack: 'Claim back',
   remoteRelayConnecting: 'Relay connecting…',
-  remoteRelayPairHint: 'Scan to pair (pair once, stays valid)',
+  remoteRelayPairHint: 'Scan to pair (code is single-use; refresh it for another device)',
+  remoteRefreshPair: 'New Pairing Code',
   remoteRelayNotConfigured: 'Relay not connected, retrying automatically…',
   remoteHostedElsewhere: 'Remote is hosted by another CC-Box instance on this machine; scanning connects to that instance',
 
@@ -406,6 +407,7 @@ export default {
   categoryAggregator: 'Aggregator',
   categoryCloud: 'Cloud',
   categoryThirdParty: 'Third-party',
+  categoryLocal: 'Local',
   categoryCustom: 'Custom',
 
   // Common config panel

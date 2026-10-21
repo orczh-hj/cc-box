@@ -265,6 +265,10 @@ export const setRemoteEnabled = (enabled: boolean): Promise<RemoteStatus> =>
 export const setRelayUrl = (url: string | null): Promise<RemoteStatus> =>
   invoke<RemoteStatus>('set_relay_url', { url });
 
+/** 手动更新中继配对码（一次性码被设备消费后为下一台设备重申），返回最新状态 */
+export const refreshRelayPairCode = (): Promise<RemoteStatus> =>
+  invoke<RemoteStatus>('refresh_relay_pair_code');
+
 export const getDefaultClaudeOptions = (): Promise<DefaultClaudeOptions> =>
   invoke<DefaultClaudeOptions>('get_default_claude_options');
 

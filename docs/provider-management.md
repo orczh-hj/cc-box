@@ -468,34 +468,55 @@ ProvidersSection.vue          # 主面板容器
 
 ## 预设配置
 
-预设定义在 `src/config/providerPresets.ts`，包含 50+ 厂商模板。
+预设定义在 `src/config/providerPresets.ts`（**生成物，勿手改**），由 `scripts/sync-provider-presets.mts` 从 cc-switch 上游生成，当前 133 个厂商模板。
+
+> **如何更新预设及图标（一句话）**：从 https://github.com/farion1231/cc-switch 下载 main 分支 zip，然后 `npm run sync:presets -- --zip <zip路径>`（自动生成预设 + 复制图标，转换策略见 `scripts/lib/transform-presets.ts`）。
+
+### 同步策略（2026-10 用户决策）
+
+- **全量同步**上游 `src/config/claudeProviderPresets.ts`（仅排除 `hidden` 条目）
+- **剥离全部推广跟踪码**：URL 查询参数黑名单（track_id/aff/utm_*/ic/from/code/source/ac/rc 等）+ 路径推广段（/invite/XX、/i/XX）
+- **不引入** cc-switch 赞助体系（isPartner/partnerPromotionKey/primePartner）与预设族折叠（family/planKey/regionKey/theme/nameKey）
+- CC-Box 自有 `Custom Provider` 恒在尾部；排序按分类（official→cn_official→cloud_provider→aggregator→third_party→local）+ 组内名称
+- 图标从上游 `src/icons/extracted/` 三级匹配（精确 stem → 归一化 → 唯一前缀）复制到 `src/assets/icons/providers/` 并重命名为 icon 名；上游无资产的（34 个小众中转/本机工具）前端回退字母头像
+- 生成物 + `providerPresets.meta.json`（条目数/缺失清单）由守卫测试 `tests/config/providerPresets.guard.test.ts` 锚定
 
 ### 分类
 
 | 分类 | 厂商示例 |
 |------|---------|
 | `official` | Claude Official |
-| `cn_official` | DeepSeek、智谱 GLM、阿里云百炼、Kimi、MiniMax、StepFun、豆包、百度千帆 |
-| `aggregator` | OpenRouter、SiliconFlow、ModelScope、DMXAPI、TheRouter、AIHubMix |
-| `cloud_provider` | AWS Bedrock、Google Vertex AI |
-| `third_party` | GitHub Copilot、PackyCode、Cubence、AIGoCode |
+| `cn_official` | DeepSeek、智谱 GLM、Kimi、MiniMax、火山（豆包）、腾讯 Token Plan、QwenCloud、百度千帆、Longcat、BaiLing |
+| `aggregator` | OpenRouter、SiliconFlow、ModelScope、DMXAPI、PPIO 等 |
+| `cloud_provider` | AWS Bedrock、SambaNova、Fireworks、DigitalOcean、Microsoft Foundry |
+| `third_party` | GitHub Copilot、Codex、xAI (Grok)、Gemini Native、PackyCode |
+| `local` | Ollama、LM Studio、llama.cpp、vLLM（本机推理，无 Key） |
 
 ### 模板变量（templateValues）
 
 部分预设包含模板变量（如 AWS Bedrock 需填 AWS_REGION、AWS_ACCESS_KEY_ID），创建时占位符自动替换。
+
+### cc-switch 导入兼容性（2026-10 验证结论）
+
+`import_from_cc_switch` 对 cc-switch 最新版**兼容无需更新**：providers 表 schema（含 `app_type` 多应用列与 `is_current`）、Provider 结构完全一致；ProviderMeta 新增字段均为 codex/opencode/Claude Desktop 专属，claude 条目不出现，serde 忽略未知字段无影响；CC-Box 只读其 db 永不写回，无数据破坏风险。
 
 ## 关键文件
 
 | 文件 | 职责 |
 |------|------|
 | `src/types/provider.ts` | TypeScript 类型定义 |
-| `src/config/providerPresets.ts` | 预设模板配置 |
+| `src/config/providerPresets.ts` | 预设模板（**生成物**，sync:presets 产出） |
+| `src/config/providerCategories.ts` | 分类标签/筛选（手写，从生成物迁出） |
+| `scripts/sync-provider-presets.mts` | 预设+图标同步脚本（--zip/--dir/--file） |
+| `scripts/lib/transform-presets.ts` | 转换纯函数（剥离策略，可单测） |
+| `src/assets/icons/providers/` | 厂商图标资产（同步脚本复制，74 个） |
 | `src/api/provider.ts` | Tauri invoke 封装 |
 | `src/stores/providers.ts` | Pinia Store（状态 + 操作） |
 | `src-tauri/src/providers.rs` | Rust 后端（存储 + 合并 + 导入） |
 | `src/components/settings/sections/ProvidersSection.vue` | 主面板 |
 | `src/components/settings/providers/ProviderList.vue` | 列表（useDraggable） |
 | `src/components/settings/providers/ProviderCard.vue` | 卡片组件 |
+| `src/components/settings/providers/ProviderIcon.vue` | 图标（资产渲染 + 字母回退） |
 | `src/components/settings/providers/ProviderEditPanel.vue` | 编辑面板 |
 | `src/components/settings/providers/ProviderPresetPanel.vue` | 预设选择 |
 | `src/components/settings/providers/CommonConfigPanel.vue` | 通用配置编辑 |

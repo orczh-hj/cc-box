@@ -35,7 +35,8 @@ export default {
   remoteTakenOverHint: '内容仍在同步，点击按钮随时接管回来',
   remoteClaimBack: '接管回来',
   remoteRelayConnecting: '中继连接中…',
-  remoteRelayPairHint: '手机扫码配对（一次配对，长期有效）',
+  remoteRelayPairHint: '手机扫码配对（连接码一次性，换设备先点更新）',
+  remoteRefreshPair: '更新连接码',
   remoteRelayNotConfigured: '中继未连接，正在自动重试…',
   remoteHostedElsewhere: '远程服务由本机另一 CC-Box 实例提供，扫码连接的是该实例',
 
@@ -406,6 +407,7 @@ export default {
   categoryAggregator: '聚合',
   categoryCloud: '云服务',
   categoryThirdParty: '第三方',
+  categoryLocal: '本机',
   categoryCustom: '自定义',
 
   // Common config panel

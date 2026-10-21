@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
-import { getCategoryLabel, filterPresetsByCategory, providerPresets } from '@/config/providerPresets'
+import { providerPresets } from '@/config/providerPresets'
+import { getCategoryLabel, filterPresetsByCategory } from '@/config/providerCategories'
 import type { ProviderPreset, ProviderCategory } from '@/types/provider'
 
 describe('getCategoryLabel', () => {

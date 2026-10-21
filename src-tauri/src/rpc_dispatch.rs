@@ -48,6 +48,8 @@ pub const EXCLUDED: &[&str] = &[
     "get_app_path",
     // 安全：中继重定向=窃取 device_key 的通道（详见 rpc_table 尾注释）
     "set_relay_url",
+    // 桌面专属：重申一次性配对码，新码仅经桌面扫码面板展示，远程调用无意义
+    "refresh_relay_pair_code",
 ];
 
 /// 状态广播 section（state-changed 事件 payload 的 id 字段）。

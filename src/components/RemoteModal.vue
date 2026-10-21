@@ -50,6 +50,10 @@
                       {{ copiedRelay ? t('remoteCopied') : t('remoteCopyUrl') }}
                     </button>
                   </div>
+                  <!-- 连接码一次性：设备配对成功即消费，为下一台设备重申新码 -->
+                  <button class="refresh-btn" :disabled="refreshingPair" @click="refreshPairCode">
+                    {{ refreshingPair ? t('loading') : t('remoteRefreshPair') }}
+                  </button>
                 </template>
                 <!-- 未配置中继地址：提示去启动面板配置 -->
                 <p v-else-if="!status.relayEnabled" class="hint">{{ t('remoteRelayNotConfigured') }}</p>
@@ -86,7 +90,7 @@ import { ref, watch, onUnmounted } from 'vue'
 import { useI18n } from 'vue-i18n'
 import QRCode from 'qrcode'
 import { copyText } from '@/api/platform'
-import { getRemoteStatus, setRemoteEnabled } from '@/api/tauri'
+import { getRemoteStatus, setRemoteEnabled, refreshRelayPairCode } from '@/api/tauri'
 import type { RemoteStatus } from '@/types'
 
 const props = defineProps<{ visible: boolean }>()
@@ -103,6 +107,8 @@ const stopping = ref(false)
 const copied = ref(false)
 const copiedRelay = ref(false)
 const error = ref('')
+/** 连接码手动更新中（等待 relay 往返新码） */
+const refreshingPair = ref(false)
 /** 局域直连模式（默认公网中继） */
 const lanOnly = ref(false)
 /** 中继状态轮询（连接/配对码异步就绪） */
@@ -212,6 +218,25 @@ async function copyRelayUrl() {
     setTimeout(() => { copiedRelay.value = false }, 2000)
   } catch {
     // 忽略复制失败
+  }
+}
+
+/** 手动更新一次性连接码：等后端拿到新码（含 relay 往返），成功后原位刷新
+ *  URL 与二维码——不走 applyStatus（其中继保底逻辑会在码暂空时误切局域视图） */
+async function refreshPairCode() {
+  if (refreshingPair.value) return
+  refreshingPair.value = true
+  error.value = ''
+  try {
+    const s = await refreshRelayPairCode()
+    status.value = s
+    if (s.relayPairUrl) {
+      await refreshRelayQr()
+    }
+  } catch (e) {
+    error.value = String(e)
+  } finally {
+    refreshingPair.value = false
   }
 }
 
@@ -355,6 +380,27 @@ async function copyUrl() {
 
 .copy-btn:hover {
   opacity: 0.9;
+}
+
+/* 更新一次性连接码（次级按钮：不同于复制的主色动作） */
+.refresh-btn {
+  padding: 7px 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.refresh-btn:hover {
+  background: var(--hover-bg);
+  color: var(--text-primary);
+}
+
+.refresh-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .stop-btn {

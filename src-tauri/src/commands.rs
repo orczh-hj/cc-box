@@ -456,6 +456,15 @@ pub async fn set_relay_url(url: Option<String>) -> Result<RemoteStatus, String> 
     get_remote_status().await
 }
 
+/// 手动更新中继配对码（一次性码被设备消费后，为下一台设备重申新码），
+/// 等新码到达才返回（面板即时刷新二维码）。桌面专属（新码仅经桌面面板
+/// 展示，远程调用无意义）→ rpc_dispatch EXCLUDED
+#[tauri::command]
+pub async fn refresh_relay_pair_code() -> Result<RemoteStatus, String> {
+    crate::remote_client::refresh_pair_code().await?;
+    get_remote_status().await
+}
+
 /// 获取系统 locale（BCP-47 标签，如 "zh-CN"、"en-US"）
 ///
 /// 通过 `sys-locale` crate 调用平台原生 API（Windows GetUserDefaultLocaleName /

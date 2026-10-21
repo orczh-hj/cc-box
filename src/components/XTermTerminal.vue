@@ -250,10 +250,10 @@ function pickFontFamily(): string {
   return '"Cascadia Code", "Fira Code", "JetBrains Mono", Consolas, "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", "Noto Sans SC", "Segoe UI Emoji", monospace'
 }
 
-/** 手机断点字号 = 桌面设置 × 0.75（手机物理宽度小，缩小字号使每行列数接近桌面） */
+/** 手机断点字号 = 桌面设置 × 0.9（手机物理宽度小，缩小字号使每行列数接近桌面） */
 function effectiveFontSize(size: number | undefined): number {
   const base = size ?? 12
-  return isMobile.value ? Math.max(6, Math.round(base * 0.75)) : base
+  return isMobile.value ? Math.max(6, Math.round(base * 0.9)) : base
 }
 
 // 在 term.open(el) 之后加载 Unicode 11 + WebGL addon
@@ -596,7 +596,7 @@ watch(() => props.fontSize, (newSize) => {
   }
 })
 
-/** 手机断点跨越（窗口缩放/旋转）时重算所有实例字号（×0.75 缩放） */
+/** 手机断点跨越（窗口缩放/旋转）时重算所有实例字号（×0.9 缩放） */
 watch(isMobile, () => {
   for (const instance of terminalInstances.values()) {
     instance.term.options.fontSize = effectiveFontSize(props.fontSize)

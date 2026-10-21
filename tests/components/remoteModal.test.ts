@@ -212,6 +212,67 @@ describe('RemoteModal（统一扫码：默认公网中继 + 局域访问复选�
     wrapper.unmount()
   })
 
+  // 配对码一次性：设备 A 消费后，手动「更新连接码」为设备 B 重申新码——
+  // 点击按钮 → refresh_relay_pair_code → 新码 URL/二维码替换旧码
+  it('RemoteModal_RefreshPairCode_008', async () => {
+    const RELAY_READY_B = {
+      ...RELAY_READY,
+      relayPairUrl: 'https://cc.orczh.top/#pair=99AABBCC',
+      relayPairCode: '99AABBCC',
+    }
+    let refreshCalls = 0
+    mockIPC((cmd) => {
+      if (cmd === 'get_remote_status') return RELAY_READY
+      if (cmd === 'refresh_relay_pair_code') {
+        refreshCalls++
+        return RELAY_READY_B
+      }
+      return null
+    })
+
+    const wrapper = mountModal()
+    await flushPromises()
+
+    expect(bodyText()).toContain('584744A5')
+    const btn = [...document.body.querySelectorAll('button')]
+      .find(b => b.textContent?.includes('remoteRefreshPair')) as HTMLButtonElement
+    expect(btn).toBeTruthy()
+
+    btn.click()
+    await flushPromises()
+
+    expect(refreshCalls).toBe(1)
+    const text = bodyText()
+    expect(text).toContain('99AABBCC')
+    expect(text).not.toContain('584744A5')
+    wrapper.unmount()
+  })
+
+  // 更新失败（中继未连接/超时）→ 显示错误，不更新已展示的码
+  it('RemoteModal_RefreshPairCodeError_009', async () => {
+    mockIPC((cmd) => {
+      if (cmd === 'get_remote_status') return RELAY_READY
+      if (cmd === 'refresh_relay_pair_code') {
+        throw new Error('relay not connected')
+      }
+      return null
+    })
+
+    const wrapper = mountModal()
+    await flushPromises()
+
+    const btn = [...document.body.querySelectorAll('button')]
+      .find(b => b.textContent?.includes('remoteRefreshPair')) as HTMLButtonElement
+    btn.click()
+    await flushPromises()
+
+    const text = bodyText()
+    expect(text).toContain('relay not connected')
+    // 旧码保持展示（未被清空）
+    expect(text).toContain('584744A5')
+    wrapper.unmount()
+  })
+
   // 已启用中继但配对码未就绪（连接中/已过期）→ 保底默认局域视图（URL 常可见）；
   // 手动切回中继视图才显示"中继连接中…"
   it('RemoteModal_RelayPendingFallbackLan_004', async () => {

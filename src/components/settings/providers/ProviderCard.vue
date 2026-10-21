@@ -2,7 +2,7 @@
   <div class="provider-card" :class="{ active: isActive }">
     <span class="drag-handle" :title="t('dragToSort')">⋮⋮</span>
     <div class="provider-icon" :style="{ color: provider.iconColor || 'var(--accent-primary)' }">
-      {{ getIconChar(provider.icon) }}
+      <ProviderIcon :icon="provider.icon" />
     </div>
     <div class="provider-info">
       <span class="provider-name">{{ provider.name }}</span>
@@ -29,6 +29,7 @@
 <script setup lang="ts">
 import { useI18n } from 'vue-i18n'
 import type { Provider } from '@/types/provider'
+import ProviderIcon from './ProviderIcon.vue'
 
 const { t } = useI18n()
 
@@ -44,31 +45,6 @@ defineEmits<{
   test: []
   delete: []
 }>()
-
-function getIconChar(icon?: string): string {
-  if (!icon) return 'P'
-  const iconChars: Record<string, string> = {
-    anthropic: 'A',
-    deepseek: 'D',
-    zhipu: 'Z',
-    baidu: 'B',
-    bailian: 'B',
-    kimi: 'K',
-    stepfun: 'S',
-    minimax: 'M',
-    doubao: 'D',
-    siliconflow: 'S',
-    openrouter: 'O',
-    gemini: 'G',
-    github: 'G',
-    aws: 'A',
-    aihubmix: 'A',
-    modelscope: 'M',
-    generic: 'P',
-    custom: 'C',
-  }
-  return iconChars[icon] || icon[0].toUpperCase()
-}
 </script>
 
 <style scoped>
@@ -154,6 +130,13 @@ function getIconChar(icon?: string): string {
   .provider-card.active .card-actions {
     opacity: 1;
   }
+}
+
+.card-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
 }
 
 .action-btn {

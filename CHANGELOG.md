@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.16.0] - 2026-10-21
+
+### Features
+- Sync provider presets from cc-switch: 133 vendors with 74 vendor icons, new Local category (Ollama/LM Studio/llama.cpp/vLLM), one-command resync via npm run sync:presets
+- Add manual pairing-code refresh button for relay remote access (pairing a second device no longer blocked by the one-time code)
+- Add app icon and apple-touch-icon for the remote web UI
+
+### Fixed
+- Fix cargo tests polluting real ~/.cc-box/config.json (theme was forced to dark on every test run)
+- Fix provider card action buttons losing spacing
+- Increase mobile terminal font scale from 0.75 to 0.9 for readability
+
 ## [0.15.1] - 2026-10-21
 
 ### Fixed

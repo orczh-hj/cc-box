@@ -53,13 +53,44 @@ pub(crate) fn resolve_relay_url() -> String {
         .unwrap_or_else(|| normalize_relay_url(DEFAULT_RELAY_URL))
 }
 
+/// 发送 pair.create；中继未连接（DEVICE_TX 未挂载）或通道关闭时报错
+fn send_pair_create() -> Result<(), String> {
+    let Some(tx) = DEVICE_TX.lock().clone() else {
+        return Err("relay not connected".into());
+    };
+    tx.try_send(r#"{"type":"pair.create"}"#.to_string())
+        .map_err(|_| "relay channel closed".to_string())
+}
+
 /// 按需重申配对码：当前码缺失/过期（面板显示中继视图但无码可扫）时，
 /// 由 get_remote_status 触发；结果经 pair.created 异步写入状态，面板轮询拿到
 pub fn request_pair_code() {
-    let Some(tx) = DEVICE_TX.lock().clone() else {
-        return;
-    };
-    let _ = tx.try_send(r#"{"type":"pair.create"}"#.to_string());
+    let _ = send_pair_create();
+}
+
+/// 手动重申配对码并等待新码到达（面板「更新连接码」按钮）。
+/// 配对码一次性消费：设备 A 配对成功后旧码即失效，且本地状态仍留着已
+/// 消费的旧码（非空）导致按需重申不触发——靠此入口立即为设备 B 重申新码。
+/// 返回新码；中继未连接或超时内未收到 pair.created 报错
+pub async fn refresh_pair_code() -> Result<String, String> {
+    let old_code = RELAY.lock().pair_code.clone();
+    send_pair_create()?;
+    // 等 run_once 接收循环把 pair.created 写入状态（50ms 轮询，3s 超时）
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let (code, at) = {
+            let st = RELAY.lock();
+            (st.pair_code.clone(), st.pair_code_at)
+        };
+        let fresh = at.is_some_and(|t| t.elapsed() < Duration::from_secs(5 * 60));
+        if fresh && code != old_code {
+            return Ok(code);
+        }
+        if Instant::now() >= deadline {
+            return Err("relay did not return a new pair code".into());
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 }
 
 /// 中继运行状态（设置页展示）
@@ -489,4 +520,58 @@ async fn run_once(
     write_task.abort();
     *DEVICE_TX.lock() = None;
     end
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// DEVICE_TX/RELAY 全局单例：测试必须串行（并行时挂载/清空互相踩踏）
+    static TEST_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+    /// 测试后恢复全局态，勿污染其他测试
+    fn reset_globals() {
+        *DEVICE_TX.lock() = None;
+        let mut st = RELAY.lock();
+        st.pair_code.clear();
+        st.pair_code_at = None;
+    }
+
+    /// 中继未连接（DEVICE_TX 未挂载）→ 立即报错，不进等待循环
+    #[tokio::test]
+    async fn RefreshPairCode_未连接报错() {
+        let _g = TEST_LOCK.lock();
+        reset_globals();
+        let err = refresh_pair_code().await.unwrap_err();
+        assert_eq!(err, "relay not connected");
+        reset_globals();
+    }
+
+    /// 设备 A 消费一次性配对码后手动重申：模拟 relay 往返（接收端收到
+    /// pair.create 后延迟写入 pair.created 新码）→ 等待逻辑返回新码
+    #[tokio::test]
+    async fn RefreshPairCode_新码到达返回新码() {
+        let _g = TEST_LOCK.lock();
+        reset_globals();
+        // 旧码已被设备 A 消费，但本地状态仍保留（本 bug 的卡死状态）
+        {
+            let mut st = RELAY.lock();
+            st.pair_code = "OLDCODE1".into();
+            st.pair_code_at = Some(Instant::now());
+        }
+        // 模拟 run_once 接收循环：DEVICE_TX 挂载，收到 pair.create 后写新码
+        let (tx, mut rx) = mpsc::channel::<String>(8);
+        *DEVICE_TX.lock() = Some(tx);
+        tokio::spawn(async move {
+            let _ = rx.recv().await; // pair.create 到达
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let mut st = RELAY.lock();
+            st.pair_code = "NEWCODE99".into();
+            st.pair_code_at = Some(Instant::now());
+        });
+
+        let code = refresh_pair_code().await.expect("new pair code");
+        assert_eq!(code, "NEWCODE99");
+        reset_globals();
+    }
 }

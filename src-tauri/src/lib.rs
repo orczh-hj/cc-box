@@ -233,6 +233,7 @@ pub fn run(initial_dir: Option<String>) {
             commands::get_remote_status,
             commands::set_remote_enabled,
             commands::set_relay_url,
+            commands::refresh_relay_pair_code,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
