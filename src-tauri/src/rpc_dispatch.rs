@@ -15,7 +15,7 @@ use cc_box_remote_protocol::ServerMessage;
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value};
 
-/// 显式排除（不可经远程调用）：installer 13 个系统级 + PTY 6 个（走专用消息）
+/// 显式排除（不可经远程调用）：installer 12 个系统级 + PTY 6 个（走专用消息）
 /// + 文件管理器/新实例（桌面级）+ app_path/log（仅桌面有意义）
 pub const EXCLUDED: &[&str] = &[
     // installer（系统级：下载/安装/杀进程）
@@ -26,7 +26,6 @@ pub const EXCLUDED: &[&str] = &[
     "kill_claude_processes",
     "download_and_install_claude",
     "cancel_auto_install",
-    "get_installed_claude_version",
     "list_claude_versions",
     "download_claude_version",
     "cancel_claude_download",
@@ -146,6 +145,9 @@ registry! {
     "run_checks" => read() => | | crate::commands::run_checks,
     "test_communication" => read() => |message: String| crate::commands::test_communication,
     "get_system_locale" => read() => | | crate::commands::get_system_locale,
+    // 本地已装 Claude 版本号（纯本地只读，无 HTTP 无副作用）：手机端
+    // Claude CLI 版本页展示需要；下载/安装类 installer 命令仍排除
+    "get_installed_claude_version" => read() => | | crate::installer::get_installed_claude_version,
     // 前端日志上报（高频调用，浏览器端统一进桌面日志）
     "log_message" => read() => |level: String, message: String| log_message_rpc,
 
@@ -446,6 +448,19 @@ mod tests {
 
         let err = dispatch("nonexistent_cmd", &args).await.unwrap_err();
         assert!(err.contains("not allowed"));
+    }
+
+    /// installer 系统级命令整体排除，但纯本地只读的 get_installed_claude_version
+    /// 必须放行（手机端 Claude CLI 版本页展示依赖；曾因一刀切排除报 not allowed）
+    #[tokio::test]
+    async fn rpc_已装版本号只读命令放行() {
+        let args = Map::new();
+        // 不再被白名单拒绝（调用成功与否取决于本机是否装了 claude，只断言通过白名单）
+        let result = dispatch("get_installed_claude_version", &args).await;
+        assert!(
+            result.is_ok() || !result.unwrap_err().contains("not allowed"),
+            "get_installed_claude_version 不应被 not allowed 拒绝"
+        );
     }
 
     #[tokio::test]

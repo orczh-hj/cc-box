@@ -282,14 +282,19 @@ pub fn invalidate_project_path_mapping() {
 }
 
 /// 从 JSONL 文件提取真实项目路径
+///
+/// 日志分级：目录里存在可读的会话文件却提取不出 cwd 才 warn（CLI 格式
+/// 变化信号）；空目录 / 仅 agent- 文件 / 文件读取失败是正常状态（会话
+/// 删除后的残留目录、权限、编码），debug 即可——否则 error.log 被无害
+/// 信息刷屏（Mac 实例曾每次首页刷新刷 3 条 warn）
 fn extract_project_path_from_jsonl(project_dir: &Path) -> Option<String> {
     if !project_dir.exists() {
         return None;
     }
 
-    // 从 JSONL/TXT 内容提取 cwd
-    for entry in fs::read_dir(project_dir).ok()? {
-        let entry = entry.ok()?;
+    // 从 JSONL/TXT 内容提取 cwd（单个目录项读取失败跳过该项，不放弃整个目录）
+    let mut saw_readable_session_file = false;
+    for entry in fs::read_dir(project_dir).ok()?.flatten() {
         let path = entry.path();
 
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
@@ -300,17 +305,35 @@ fn extract_project_path_from_jsonl(project_dir: &Path) -> Option<String> {
                 .map(|n| n.to_str().unwrap_or("").starts_with("agent-"))
                 .unwrap_or(false)
         {
-            if let Ok(content) = fs::read_to_string(&path) {
-                // 读取所有行直到找到 cwd（通常在前几行，但不确定具体位置）
-                for line in content.lines() {
-                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(line) {
-                        if let Some(cwd) = json.get("cwd").and_then(|v| v.as_str()) {
-                            return Some(cwd.to_string());
+            match fs::read_to_string(&path) {
+                Ok(content) => {
+                    saw_readable_session_file = true;
+                    // 读取所有行直到找到 cwd（通常在前几行，但不确定具体位置）
+                    for line in content.lines() {
+                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(line) {
+                            if let Some(cwd) = json.get("cwd").and_then(|v| v.as_str()) {
+                                return Some(cwd.to_string());
+                            }
                         }
                     }
                 }
+                Err(e) => {
+                    log::debug!("Could not read session file {:?}: {}", path, e);
+                }
             }
         }
+    }
+
+    if saw_readable_session_file {
+        log::warn!(
+            "Session files exist but no cwd found in {:?}",
+            project_dir
+        );
+    } else {
+        log::debug!(
+            "No readable session files in {:?} (empty or agent-only)",
+            project_dir
+        );
     }
 
     None
@@ -465,12 +488,10 @@ pub fn get_projects(limit: Option<usize>, offset: Option<usize>) -> Result<Vec<P
             continue;
         }
 
+        // 提取失败（空残留目录/无 cwd）直接跳过，日志已在函数内分级记录
         let real_path = match extract_project_path_from_jsonl(&path) {
             Some(p) => p,
-            None => {
-                log::warn!("Could not extract path from JSONL for {:?}", path);
-                continue;
-            }
+            None => continue,
         };
 
         // 跳过原始路径已不存在的项目

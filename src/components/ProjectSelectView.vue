@@ -79,10 +79,25 @@
       <header class="panel-header">
         <div class="header-row">
           <h2>{{ t('projects') }}</h2>
-          <button class="settings-btn" @click="handleSettingsClick" :title="t('titleSettings', { key: ctrl + '+,' })">
-            <img src="@/assets/icons/settings.svg" alt="Settings" />
-            <span v-if="sidebarStore.updateAvailable" class="update-badge"></span>
-          </button>
+          <div class="header-actions">
+            <!-- 窗口管理按钮（置顶/半屏停靠）：与终端 header 一致，仅桌面 Tauri -->
+            <template v-if="isTauriEnv">
+              <button class="header-btn" :class="{ active: appStore.alwaysOnTop }" @click="appStore.toggleAlwaysOnTop()" :title="t('toggleAlwaysOnTop', { key: cmd + '+Shift+T' })">
+                <img v-if="appStore.alwaysOnTop" src="@/assets/icons/pin-active.svg" alt="Pin" />
+                <img v-else src="@/assets/icons/pin.svg" alt="Pin" />
+              </button>
+              <button class="header-btn" @click="snapWindow('left')" :title="t('snapLeft', { key: ctrl + '+Shift+←' })">
+                <img src="@/assets/icons/half-left.svg" alt="Snap left" />
+              </button>
+              <button class="header-btn" @click="snapWindow('right')" :title="t('snapRight', { key: ctrl + '+Shift+→' })">
+                <img src="@/assets/icons/half-right.svg" alt="Snap right" />
+              </button>
+            </template>
+            <button class="settings-btn" @click="handleSettingsClick" :title="t('titleSettings', { key: ctrl + '+,' })">
+              <img src="@/assets/icons/settings.svg" alt="Settings" />
+              <span v-if="sidebarStore.updateAvailable" class="update-badge"></span>
+            </button>
+          </div>
         </div>
         <div class="search-box">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -167,7 +182,9 @@ import { useAppStore } from '@/stores/app'
 import { useSessionStore } from '@/stores/session'
 import { useSidebarStore } from '@/stores/sidebar'
 import { useIsMobile } from '@/composables/useMediaQuery'
-import { ctrl } from '@/utils/platform'
+import { snapWindow } from '@/composables/useAppShortcuts'
+import { ctrl, cmd } from '@/utils/platform'
+import { isTauriEnv } from '@/api/platform'
 import type { SessionInfo } from '@/api/tauri'
 
 const { t } = useI18n()
@@ -596,6 +613,42 @@ async function handleSaveDefault() {
   align-items: center;
   justify-content: space-between;
   margin-bottom: 12px;
+}
+
+/* 右侧操作按钮组（窗口管理 + 设置，规格与 TerminalHeader 一致） */
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+.header-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  border-radius: 6px;
+  transition: all 0.15s ease;
+}
+
+.header-btn img {
+  width: 18px;
+  height: 18px;
+}
+
+.header-btn:hover {
+  background: var(--hover-bg);
+  color: var(--text-primary);
+}
+
+.header-btn.active {
+  color: var(--accent-color);
 }
 
 .projects-panel .panel-header h2 {

@@ -184,7 +184,7 @@ fn GetDefaultShell_Program_001() {
 
 // ---- get_claude_shell ----
 
-// 无 git_bash_path 时 Unix 返回 bash，Windows 返回 powershell
+// 无 git_bash_path 时 Windows 返回 powershell；Unix 不再 shell 中转（空返回）
 #[test]
 fn GetClaudeShell_NoGitBash_001() {
     let (program, args) = get_claude_shell("claude", None);
@@ -195,12 +195,12 @@ fn GetClaudeShell_NoGitBash_001() {
     }
     #[cfg(not(target_os = "windows"))]
     {
-        assert_eq!(program, "/bin/bash");
-        assert!(args.contains(&"-i".to_string()));
+        assert_eq!(program, "");
+        assert!(args.is_empty());
     }
 }
 
-// 有 git_bash_path 时 Windows 返回 bash，Unix 仍返回 bash
+// 有 git_bash_path 时 Windows 返回 bash -c；Unix 同样空返回
 #[test]
 fn GetClaudeShell_WithGitBash_001() {
     let (program, args) = get_claude_shell("claude --foo", Some("C:\\bash.exe"));
@@ -212,8 +212,8 @@ fn GetClaudeShell_WithGitBash_001() {
     }
     #[cfg(not(target_os = "windows"))]
     {
-        assert_eq!(program, "/bin/bash");
-        assert!(args.contains(&"claude --foo".to_string()));
+        assert_eq!(program, "");
+        assert!(args.is_empty());
     }
 }
 

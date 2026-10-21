@@ -322,10 +322,11 @@ pub(crate) fn get_platform_id() -> String {
 
 // ---- 7. Shell 选择 ----
 
-/// 获取启动 Claude CLI 的 shell 程序和参数
+/// 获取启动 Claude CLI 的 shell 程序和参数（仅 Windows 使用）
 ///
-/// `git_bash_path` 仅 Windows 使用，传入检测到的 Git Bash 路径，
-/// 为 None 时回退到 PowerShell。Unix 始终使用 bash -i。
+/// `git_bash_path` 传入检测到的 Git Bash 路径，为 None 时回退到
+/// PowerShell。Unix 不经 shell 中转（pty.rs 直接 exec claude 完整路径），
+/// 保留签名仅供跨平台编译与测试引用。
 pub(crate) fn get_claude_shell(
     claude_cmd: &str,
     git_bash_path: Option<&str>,
@@ -350,11 +351,8 @@ pub(crate) fn get_claude_shell(
     }
     #[cfg(not(target_os = "windows"))]
     {
-        let _ = git_bash_path;
-        (
-            "/bin/bash".to_string(),
-            vec!["-i".to_string(), "-c".to_string(), claude_cmd.to_string()],
-        )
+        let _ = (claude_cmd, git_bash_path);
+        (String::new(), Vec::new())
     }
 }
 

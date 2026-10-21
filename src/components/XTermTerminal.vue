@@ -61,6 +61,7 @@ import { registerTerminalCommand } from '@/composables/useTerminalCommand'
 import { useIsMobile } from '@/composables/useMediaQuery'
 import { safeDispose } from '@/utils/dispose'
 import { relativizePath } from '@/utils/path'
+import { mapTerminalGlyphs } from '@/utils/terminal-glyphs'
 import type { SnapshotData } from '@/utils/terminal-reflow'
 import { copyText as platformCopyText, readClipboardText as platformReadText } from '@/api/platform'
 import { transport } from '@/api/transport'
@@ -541,7 +542,9 @@ async function setupEventListeners() {
   unlistenPtyOutput = await onPtyOutput(({ id, data }) => {
     for (const [_tabId, instance] of terminalInstances) {
       if (instance.ptyId === id) {
-        instance.term.write(data)
+        // 浏览器远程模式：移动端字体缺媒体控制符字形（⏵⏵/⏸ 渲染为 tofu），
+        // 写入前兜底替换为等义通用符号；桌面端有系统字体回退，原样写入
+        instance.term.write(isTauriEnv ? data : mapTerminalGlyphs(data))
         break
       }
     }
@@ -706,12 +709,15 @@ async function startTab(tabId: string) {
 
   isPtyStarting.value = true
 
+  let term: Terminal | null = null
+  let fitAddon: FitAddon | null = null
+
   try {
     const args = buildClaudeArgs(tab)
     const cwd = tab.projectPath
 
-    const term = createTerminal(tabId)
-    const fitAddon = new FitAddon()
+    term = createTerminal(tabId)
+    fitAddon = new FitAddon()
     term.loadAddon(fitAddon)
 
     const info = await ptySpawn({
@@ -750,6 +756,9 @@ async function startTab(tabId: string) {
   } catch (err) {
     console.error('[XTerm] startTab ERROR:', err)
     logMessage('error', `startTab failed, tabId=${tabId}: ${err}`)
+    // spawn 失败（工作目录不存在/CLI 未检出/exec 失败）必须打开终端写入
+    // 错误，否则表现为静默白屏（Mac 打开历史会话白屏的教训）
+    if (term && fitAddon) await showSpawnError(tabId, term, fitAddon, err)
   } finally {
     isPtyStarting.value = false
   }
@@ -763,6 +772,9 @@ async function restartTab(tabId: string) {
   if (!tab || isPtyStarting.value) return
 
   isPtyStarting.value = true
+
+  let term: Terminal | null = null
+  let fitAddon: FitAddon | null = null
 
   try {
     // 如果有旧 PTY 在运行，先 kill
@@ -781,8 +793,8 @@ async function restartTab(tabId: string) {
     const args = buildClaudeArgs(tab)
     const cwd = tab.projectPath
 
-    const term = createTerminal(tabId)
-    const fitAddon = new FitAddon()
+    term = createTerminal(tabId)
+    fitAddon = new FitAddon()
     term.loadAddon(fitAddon)
 
     const info = await ptySpawn({
@@ -819,9 +831,27 @@ async function restartTab(tabId: string) {
   } catch (err) {
     console.error('[XTerm] restartTab ERROR:', err)
     logMessage('error', `restartTab failed, tabId=${tabId}: ${err}`)
+    // 同 startTab：失败必须可见（写入终端），不允许静默白屏
+    if (term && fitAddon) await showSpawnError(tabId, term, fitAddon, err)
   } finally {
     isPtyStarting.value = false
   }
+}
+
+/**
+ * spawn 失败反馈：打开终端并写入错误（startTab/restartTab 的 catch 调用）。
+ * 失败时 term 尚未 open，错误只进 console 的话终端区一片空白、无任何提示
+ * （Mac 打开历史会话"白屏"的直接表象）——错误文本即 Rust spawn_pty_core
+ * 的 Err 消息（如 "Working directory does not exist: ..."）
+ */
+async function showSpawnError(tabId: string, term: Terminal, fitAddon: FitAddon, err: unknown) {
+  const el = await waitForElement(tabId)
+  if (el && !term.element) {
+    term.open(el)
+    loadRendererAddons(term)
+    requestAnimationFrame(() => fitAddon.fit())
+  }
+  term.write(`\r\n\x1b[31m[CC-Box] 启动 Claude CLI 失败: ${String(err)}\x1b[0m\r\n\r\n`)
 }
 
 /**

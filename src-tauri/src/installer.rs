@@ -1066,8 +1066,8 @@ pub async fn check_installed_versions() -> Result<std::collections::HashMap<Stri
 // Claude CLI 版本列表与历史版本下载
 // ============================================
 
-/// 获取本地已安装的 Claude CLI 版本号（轻量命令，纯本地，无 HTTP）
-#[tauri::command]
+/// 获取本地已安装的 Claude CLI 版本号（轻量纯本地，无 HTTP）。
+/// command 注册与远程 rpc 白名单统一走 commands.rs 转发入口
 pub async fn get_installed_claude_version() -> Result<Option<String>, String> {
     tokio::task::spawn_blocking(|| read_local_claude_version())
         .await

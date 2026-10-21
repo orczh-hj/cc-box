@@ -6,6 +6,7 @@ import {
   ptyKill,
   searchSessionMessages
 } from '@/api/tauri'
+import { useAppStore } from './app'
 import type { SessionSearchResult } from '@/types'
 
 // ==================== Tab-Centric 数据模型 ====================
@@ -199,6 +200,22 @@ export const useSessionStore = defineStore('session', () => {
   }
 
   /**
+   * 会话结束（用户关闭/自然退出）时把 Tab 已知信息就地并入首页「近期
+   * 会话」缓存（appStore.mergeRecentSession 按 sessionId 去重）：零请求
+   * 即时可见，且不重置首页项目列表分页。sessionId 为空（从未启动/CLI
+   * 未上报）的 Tab 无历史记录可指，跳过
+   */
+  function mergeTabIntoRecentSessions(tab: TerminalTab) {
+    if (!tab.sessionId) return
+    useAppStore().mergeRecentSession({
+      sessionId: tab.sessionId,
+      name: tab.name,
+      projectPath: tab.projectPath,
+      lastActiveAt: Date.now(),
+    })
+  }
+
+  /**
    * 处理 PTY 退出
    * 只更新状态，不删除 Tab
    */
@@ -209,6 +226,9 @@ export const useSessionStore = defineStore('session', () => {
         tab.status = 'stopped'
         tab.working = false
         tab.lastActiveAt = Date.now()
+        // 会话已结束：并入近期会话缓存，首页立即可见（重启该 Tab 时运行中
+        // 条目优先、缓存同 id 被排重，无副作用）
+        mergeTabIntoRecentSessions(tab)
         break
       }
     }
@@ -225,8 +245,9 @@ export const useSessionStore = defineStore('session', () => {
     const projectPath = tab.projectPath
     const ptyId = tab.ptyId
 
-    // 先删除 tab，UI 立即更新（历史列表通过 computed 自动显示释放的 sessionId）
+    // 先删除 tab，UI 立即更新；Tab 携带的会话信息并入近期会话缓存
     tabs.delete(tabId)
+    mergeTabIntoRecentSessions(tab)
 
     if (activeTabId.value === tabId) {
       // 关闭当前活跃标签后，聚焦到同项目的相邻标签
@@ -256,6 +277,7 @@ export const useSessionStore = defineStore('session', () => {
     tabs.forEach((tab, tabId) => {
       if (tab.projectPath === projectPath) {
         tabs.delete(tabId)
+        mergeTabIntoRecentSessions(tab)
       }
     })
 
@@ -283,6 +305,7 @@ export const useSessionStore = defineStore('session', () => {
       if (tab.tabId !== keepTabId) {
         if (tab.ptyId) ptyIds.push(tab.ptyId)
         tabs.delete(tab.tabId)
+        mergeTabIntoRecentSessions(tab)
       }
     }
 

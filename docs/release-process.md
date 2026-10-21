@@ -190,6 +190,32 @@ CI 自动构建并上传：
 2. **CHANGELOG.md 用英文编写**，便于国际用户阅读
 3. **GitHub 操作需要代理**（国内环境），OSS 操作无需代理
 4. **OSS 配置文件包含敏感信息**，已在 `.gitignore` 中排除
+5. **新增 Rust crate 时必须把它的 `target/` 加入 `.gitignore`**——release 脚本 `git add -A` 会把构建产物（.o/.pdb/.dll，数百文件）提交进 Release commit
+6. **OSS 安装包路径带 v 前缀**：`/cc-box/v<x.y.z>/`（验收时注意，latest.json 内 url 为准）
+
+## 发布故障恢复（脚本中断后续跑）
+
+脚本若在某步失败退出（如 push 阶段），后续步骤可手工续完：
+
+1. **Gitee 推送失败**（`CRYPT_E_REVOCATION_OFFLINE`，TLS 吊销检查不可达；代理与直连均败）——一次性禁校验推送（公开代码无风险，不改全局配置）：
+
+   ```bash
+   git -c http.sslVerify=false push https://gitee.com/orczh/cc-box.git main
+   ```
+
+   多 URL origin 下 `git push origin` 会连推两仓库，Gitee 在代理环境必失败——**分 URL 推送**：GitHub 用代理、Gitee 直连+禁校验。
+
+2. **commit 需要修正**（如误入构建产物）：先确认 GitHub 未收到（`git ls-remote https://github.com/orczh-hj/cc-box.git refs/heads/main` 是否为本地 HEAD），未收到才可安全 amend；产物文件用 `git rm -r --cached <target>` 移出跟踪后 amend。
+
+3. **手工续跑剩余步骤**（tag → CI → Release → OSS）：
+
+   ```bash
+   git tag -a v<x.y.z> -m "Release v<x.y.z>" && git push <两远程> v<x.y.z>   # 触发 CI
+   gh run watch <run-id> --exit-status                                        # 监控 CI
+   sed -n '/^## \[<ver>\]/,/^## \[/p' CHANGELOG.md | sed '$d' > /tmp/notes.txt
+   gh release edit v<x.y.z> --draft=false --notes-file /tmp/notes.txt         # CI 建 draft 后转正式
+   npm run release -- --oss-only v<x.y.z>                                     # OSS 上传
+   ```
 
 ## 回滚流程
 

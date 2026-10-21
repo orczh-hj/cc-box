@@ -199,7 +199,7 @@ CC_BOX_RELAY_URL=192.168.5.105:8800 npm run tauri:dev
 要点：
 
 - **远程面板是显式开关**：打开面板只查状态，点「开启远程访问」才启动（安全阻断，停止后重启软件不会自动恢复）
-- **改前端后需 `npm run build`**：8747 由 rust-embed 实时读 `dist/`（debug 模式），浏览器端刷新页面拿新版本
+- **改前端后需 `npm run build`**：8747 由 rust-embed 实时读 `dist/`（debug 模式），浏览器端刷新页面拿新版本——**手机不能直连 vite dev server (:1420) 当远程 UI**：浏览器模式需要 `/ws` WebSocket 端点（remote-transport 连 `ws://host/ws`），只有 8747 的 axum 服务器提供，vite dev server 没有
 - **多实例宿主制**：先开远程的实例为宿主（占 8747）；后开实例自动探测到宿主（`remote_server::probe_host`）后不 bind、不连中继（防同 `device_id` 互踢），面板直接显示宿主的 URL/二维码（token 共享自 config）；宿主退出后其他实例再开即可无缝接管
 - 真机走查条目见 `remote/docs/manual-test-cases.md`（U 系列）
 

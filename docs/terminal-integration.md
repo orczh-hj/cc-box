@@ -61,24 +61,36 @@ Claude CLI 有多种安装方式，启动命令构建需要智能检测启动类
 否则 → direct
 ```
 
-#### 命令构建逻辑
+#### 命令构建逻辑（pty.rs spawn_claude 实际实现）
+
+`get_claude_path()` 检测（配置 claudePath 优先 → where/which）返回**完整路径**，检测结果即执行路径：
 
 ```rust
-// Windows
-if ends_with(".exe") { CommandBuilder::new(&claude_path) }
-else if needs_node_launcher() { CommandBuilder::new("node").arg(&claude_path) }
-else { CommandBuilder::new("cmd.exe").arg("/C").arg(&claude_path) }
+// Windows：npm 的 .cmd/batch 包装必须经 shell 中转（Git Bash -c，未检出
+// 回退 PowerShell）；完整路径加引号后拼参数字符串
+CommandBuilder::new(git_bash).args(["-c", "\"<claude_path>\" --resume x ..."])
 
-// Mac/Linux
-if needs_node_launcher() { CommandBuilder::new("node").arg(&claude_path) }
-else { CommandBuilder::new(&claude_path) }
+// Mac/Linux：直接 exec 完整路径（结构化参数，不经 shell）
+CommandBuilder::new(claude_path).arg("--resume").arg(id)...
 ```
 
-#### 配置存储
+Unix 不经 shell 中转的原因（Mac 打开历史会话白屏的教训）：
+1. `bash -i -c` 交互模式的 job control 在 PTY 下可能把 TUI 子进程停入后台（SIGTTIN/SIGTTOU），表现为终端白屏
+2. GUI 应用继承的 PATH 与登录 shell 不同，裸命令名 `claude` 让 shell 二次从 PATH 查找会 command not found
+3. 结构化参数免引号拼接与分词歧义（路径含空格等）
 
-检测结果保存到 `~/.cc-box/config.json`：`{ "claudeLauncherType": "node" | "direct" }`
+npm 安装的 claude 是带 `#!/usr/bin/env node` shebang 的脚本，直接 exec 由内核 shebang 处理（要求 PATH 里有 node）；native 可执行文件直接运行。
 
-PTY 启动时优先从配置读取，无值时检测并保存。
+#### 立即退出检测（startup_check，spawn 契约：返回即存活）
+
+进程可能在启动等待期（50ms）内就退出——此时前端终端实例尚未建立，pty-exit 与输出事件全部丢失，表现为**纯白屏且 Rust 侧仍报 spawned successfully**（Mac native claude 12ms 秒退白屏的实测根因）。`spawn_claude`/`spawn_shell` 共用 `startup_check` 收尾：
+
+- reader 线程旁路收集启动期输出到 `StartupBuf`（上限 4KB，超限丢头部）
+- 50ms 后 `child.try_wait()`：已退出 → 返回 `Err`（携带退出状态 + PTY 尾部输出，`strip_ansi` 清理后拼入错误信息）→ 前端 `showSpawnError` 红字显示 claude 自己的报错文本
+- 存活 → 关闭缓存（不再收集），正常注册实例
+- try_wait 自身失败不阻断启动（保守放行）
+
+前端对称：`startTab`/`restartTab` 的 catch 打开终端写入 `[CC-Box] 启动失败: <原因>`——spawn 调用只有两个结局（有流的终端 / 有原因的红字），"成功但白屏"的第三态不可表达。
 
 ### 数据流
 
@@ -178,12 +190,17 @@ const term = new Terminal({
 // 用户输入 → PTY
 term.onData(data => { ptyInput(instance.ptyId, data) })
 
-// PTY 输出 → Terminal
-onPtyOutput(({ id, data }) => { instance.term.write(data) })
+// PTY 输出 → Terminal（浏览器远程模式经 mapTerminalGlyphs 兜底替换，
+// 见下方「终端符号兜底替换」）
+onPtyOutput(({ id, data }) => { instance.term.write(isTauriEnv ? data : mapTerminalGlyphs(data)) })
 
 // resize 同步
 term.onResize(({ cols, rows }) => { ptyResize(instance.ptyId, cols, rows) })
 ```
+
+### 终端符号兜底替换（浏览器远程模式）
+
+`src/utils/terminal-glyphs.ts` 的 `mapTerminalGlyphs`：Claude CLI 输出中的媒体控制符（"⏵⏵" 提示、⏸ 暂停等，U+23EF/U+23F4–U+23FA）在移动端系统字体普遍缺字形（渲染为 tofu），桌面端有 Segoe UI Symbol 等系统回退不受影响。浏览器端在写入 xterm 前替换为字形覆盖广的等义符号（▶ ◀ ▲ ▼ ‖ ■ ●，替换前后均为 1 列，不影响布局）；仅作用于 `!isTauriEnv` 路径，桌面端原样写入。
 
 ### Ctrl+V 粘贴处理
 

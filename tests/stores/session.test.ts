@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { setActivePinia, createPinia } from 'pinia'
 import { useSessionStore } from '@/stores/session'
+import { useAppStore } from '@/stores/app'
 import { getSessions } from '@/api/tauri'
 import { randomUUID } from 'crypto'
 
@@ -17,11 +18,23 @@ if (typeof globalThis.crypto === 'undefined' || !globalThis.crypto.randomUUID) {
 }
 
 // Mock @/api/tauri
+// （session store → app store 链上的全部导出都需提供，缺导出会在 import 时抛错）
 vi.mock('@/api/tauri', () => ({
+  // session.ts 使用
   ptyKill: vi.fn().mockResolvedValue(true),
   getSessionCount: vi.fn().mockResolvedValue(0),
   getSessions: vi.fn().mockResolvedValue([]),
   searchSessionMessages: vi.fn().mockResolvedValue([]),
+  // app.ts 使用（经 useAppStore 间接引入）
+  getAppConfig: vi.fn().mockResolvedValue({}),
+  updateAppConfig: vi.fn().mockResolvedValue(undefined),
+  saveLastProject: vi.fn().mockResolvedValue(undefined),
+  saveDefaultClaudeOptions: vi.fn().mockResolvedValue(undefined),
+  getHomeData: vi.fn().mockResolvedValue({ projects: [], recentSessions: [], hasMore: false }),
+  getProjects: vi.fn().mockResolvedValue([]),
+  getCheckResults: vi.fn().mockResolvedValue([]),
+  runChecks: vi.fn().mockResolvedValue([]),
+  getSystemLocale: vi.fn().mockResolvedValue('en'),
 }))
 
 describe('session store', () => {
@@ -131,6 +144,41 @@ describe('session store', () => {
       expect(store.claimedSessionIds.has('sess-release')).toBe(true)
       await store.closeTab(tabId)
       expect(store.claimedSessionIds.has('sess-release')).toBe(false)
+    })
+
+    // 关闭带 sessionId 的 tab：会话信息并入首页近期会话缓存（零请求即时可见）
+    it('CloseTab_MergesIntoRecent_001', async () => {
+      const appStore = useAppStore()
+      const store = useSessionStore()
+      const tabId = store.createTab('/project', { sessionId: 'sess-recent', name: '我的会话' })
+
+      await store.closeTab(tabId)
+      const merged = appStore.cachedRecentSessions.find(s => s.sessionId === 'sess-recent')
+      expect(merged).toBeDefined()
+      expect(merged?.name).toBe('我的会话')
+      expect(merged?.projectPath).toBe('/project')
+    })
+
+    // 关闭无 sessionId 的 tab（从未启动）：无历史记录可指，不并入缓存
+    it('CloseTab_NoSessionId_NoMerge_002', async () => {
+      const appStore = useAppStore()
+      const store = useSessionStore()
+      const tabId = store.createTab('/project')
+
+      await store.closeTab(tabId)
+      expect(appStore.cachedRecentSessions).toHaveLength(0)
+    })
+
+    // 重复关闭同 sessionId（closeTab 后 resume 再 closeTab）：按 id 去重，不产生重复条目
+    it('CloseTab_MergeDedup_003', async () => {
+      const appStore = useAppStore()
+      const store = useSessionStore()
+      const tabId = store.createTab('/project', { sessionId: 'sess-dup' })
+
+      await store.closeTab(tabId)
+      const tabId2 = store.createTab('/project', { sessionId: 'sess-dup' })
+      await store.closeTab(tabId2)
+      expect(appStore.cachedRecentSessions.filter(s => s.sessionId === 'sess-dup')).toHaveLength(1)
     })
   })
 

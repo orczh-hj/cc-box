@@ -164,6 +164,13 @@ pub async fn pty_kill_all() -> Result<(), String> {
     Ok(())
 }
 
+/// 本地已装 Claude CLI 版本号（纯本地只读；转发 installer 实现，桌面
+/// invoke 与远程 rpc 白名单共用此统一入口）
+#[tauri::command]
+pub async fn get_installed_claude_version() -> Result<Option<String>, String> {
+    crate::installer::get_installed_claude_version().await
+}
+
 // ==================== Store Commands ====================
 
 /// 获取环境检查结果

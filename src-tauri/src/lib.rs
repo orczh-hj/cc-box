@@ -209,7 +209,8 @@ pub fn run(initial_dir: Option<String>) {
             installer::kill_claude_processes,
             installer::download_and_install_claude,
             installer::cancel_auto_install,
-            installer::get_installed_claude_version,
+            // 本地只读版本查询经 commands.rs 统一入口（远程 RPC 白名单同源）
+            commands::get_installed_claude_version,
             installer::list_claude_versions,
             installer::download_claude_version,
             installer::cancel_claude_download,

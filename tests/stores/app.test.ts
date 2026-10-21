@@ -2,6 +2,7 @@ import { setActivePinia, createPinia } from 'pinia'
 import { mockIPC } from '@tauri-apps/api/mocks'
 import { beforeEach, describe, it, expect, vi } from 'vitest'
 import { useAppStore } from '@/stores/app'
+import type { SessionInfo } from '@/types'
 import i18n from '@/i18n'
 
 beforeEach(() => {
@@ -188,5 +189,42 @@ describe('detectSystemLocale', () => {
     const lang = navigator.language.startsWith('zh') ? 'zh' : 'en'
     expect(lang).toBe('en')
     Object.defineProperty(navigator, 'language', { value: original, configurable: true })
+  })
+})
+
+describe('mergeRecentSession', () => {
+  const session = (id: string, over: Partial<SessionInfo> = {}): SessionInfo => ({
+    sessionId: id,
+    name: id,
+    projectPath: '/proj/a',
+    lastActiveAt: 100,
+    ...over,
+  })
+
+  // 新会话（本次运行新建后关闭）插入缓存顶部，首页近期会话即时可见
+  it('MergeRecentSession_New_InsertsTop_001', () => {
+    const store = useAppStore()
+    store.refreshRecentSessions([session('old-1')])
+    store.mergeRecentSession(session('closed-new', { lastActiveAt: 999 }))
+    expect(store.cachedRecentSessions.map(s => s.sessionId)).toEqual(['closed-new', 'old-1'])
+    expect(store.cachedRecentSessions[0].lastActiveAt).toBe(999)
+  })
+
+  // 已存在的 sessionId（恢复后关闭）就地更新，不产生重复条目
+  it('MergeRecentSession_Existing_UpdatesInPlace_002', () => {
+    const store = useAppStore()
+    store.refreshRecentSessions([session('old-1', { name: '旧名' })])
+    store.mergeRecentSession(session('old-1', { name: '新名', lastActiveAt: 500 }))
+    expect(store.cachedRecentSessions).toHaveLength(1)
+    expect(store.cachedRecentSessions[0].name).toBe('新名')
+    expect(store.cachedRecentSessions[0].lastActiveAt).toBe(500)
+  })
+
+  // 合入条目代表已结束的会话：working/pending 强制清 false（不残留运行态圆点）
+  it('MergeRecentSession_ClearsWorkingPending_003', () => {
+    const store = useAppStore()
+    store.mergeRecentSession(session('s1', { working: true, pending: true }))
+    expect(store.cachedRecentSessions[0].working).toBe(false)
+    expect(store.cachedRecentSessions[0].pending).toBe(false)
   })
 })

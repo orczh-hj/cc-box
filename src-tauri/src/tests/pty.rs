@@ -39,3 +39,55 @@ fn PtyDecode_Utf8Bytes_BothCorrect_001() {
     assert_eq!(lossy, "你好世界");
     assert_eq!(decoded, "你好世界");
 }
+
+// ===================== 启动期输出缓存与 ANSI 清理 =====================
+// 秒退检测（startup_check）的错误信息携带 PTY 尾部输出：claude 自身的
+// 报错文本不再随「前端终端尚未建立」丢失（Mac native claude 秒退白屏）。
+
+use crate::pty::{StartupBuf, STARTUP_BUF_MAX};
+
+// active=false 后不再收集（spawn 已收尾，缓存退役）
+#[test]
+fn StartupBuf_InactiveStopsCollecting_001() {
+    let mut buf = StartupBuf {
+        active: false,
+        data: Vec::new(),
+    };
+    buf.append(b"late output");
+    assert!(buf.data.is_empty());
+}
+
+// 超出上限丢弃头部、保留尾部（报错通常在最后）
+#[test]
+fn StartupBuf_CapsAtLimit_002() {
+    let mut buf = StartupBuf {
+        active: true,
+        data: Vec::new(),
+    };
+    let big = vec![b'x'; STARTUP_BUF_MAX + 100];
+    buf.append(&big);
+    assert_eq!(buf.data.len(), STARTUP_BUF_MAX);
+    // 头部 100 字节被丢弃
+    assert_eq!(&buf.data[..100], &vec![b'x'; 100][..]);
+}
+
+// SGR 颜色序列被移除，文本保留
+#[test]
+fn StripAnsi_RemovesSgr_001() {
+    assert_eq!(
+        crate::pty::strip_ansi("\x1b[31merror\x1b[0m: bad args"),
+        "error: bad args"
+    );
+}
+
+// 光标移动等多参数 CSI 与 OSC（标题）序列同样移除
+#[test]
+fn StripAnsi_RemovesCsiAndOsc_002() {
+    assert_eq!(crate::pty::strip_ansi("\x1b[2J\x1b[Hhi\x1b]0;title\x07end"), "hiend");
+}
+
+// 纯文本与中文不受影响
+#[test]
+fn StripAnsi_KeepsPlainText_003() {
+    assert_eq!(crate::pty::strip_ansi("你好 world\ttab"), "你好 world\ttab");
+}

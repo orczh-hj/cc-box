@@ -182,6 +182,19 @@ export const useAppStore = defineStore('app', () => {
     cachedRecentSessions.value = sessions
   }
 
+  /** 就地合并一条近期会话（按 sessionId 去重）：会话关闭/自然结束时把
+   *  Tab 上已有的信息（sessionId/名称/项目路径）直接并入缓存，首页
+   *  「近期会话」零请求即时可见——比重拉 getHomeData 高效，且不重置
+   *  项目列表分页状态。缓存条目代表已结束的会话，working/pending 清 false */
+  function mergeRecentSession(session: SessionInfo) {
+    const existing = cachedRecentSessions.value.find(s => s.sessionId === session.sessionId)
+    if (existing) {
+      Object.assign(existing, session, { working: false, pending: false })
+    } else {
+      cachedRecentSessions.value.unshift({ ...session, working: false, pending: false })
+    }
+  }
+
   function setCwd(path: string) {
     cwd.value = path
     openedProjectPaths.value.add(path)
@@ -344,6 +357,7 @@ export const useAppStore = defineStore('app', () => {
     loadCache,
     loadMoreProjects,
     refreshCache,
+    mergeRecentSession,
     ensureProjectInList,
     isKnownProject,
     refreshRecentSessions,

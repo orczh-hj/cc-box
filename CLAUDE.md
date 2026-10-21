@@ -278,6 +278,7 @@ UI 已浏览器化（一套 UI 走桌面 Tauri / 宽屏浏览器 / 手机浏览�
 - **新事件** → `events.rs` 常量 + `emit_all`；远程会话类事件用 `remote_state::emit_event`（桌面+广播）/`emit_event_ex`（排除接管者）/`emit_desktop_only`（仅桌面）
 - **新协议消息** → `remote/protocol/` 四处同步：crate 定义 → protocol.ts → samples/ JSON 样例 → remote/docs/protocol.md（Rust 与 Vitest 契约测试共跑样例）
 - **CLI 启动参数拼接** → 只改 `pty::build_claude_args`（Rust 单一核心，session.create 与桌面 spawn 共用），勿在前端另写一份
+- **CLI 进程启动方式** → Windows 经 Git Bash `-c` 中转（npm .cmd 包装需要）；**Unix 直接 exec `get_claude_path()` 的完整路径 + 结构化参数**，勿改回 shell 中转（`bash -i -c` 的 job control 在 PTY 下会把 TUI 子进程停入后台致 Mac 白屏；裸命令名 PATH 二次查找在 GUI 应用下 command not found）。**spawn 契约 = 返回即存活**：`startup_check`（spawn_claude/spawn_shell 共用）在 50ms 启动期后 `try_wait()` 检测秒退，秒退转 Err 并携带 `StartupBuf` 缓存的 PTY 尾部输出（claude 自身报错不丢，前端红字显示）——否则事件落在前端终端实例建立之前全部丢失、表现为纯白屏
 - **前端 invoke/listen** → 一律经 `src/api/transport.ts`（组件禁止直接 import @tauri-apps/api；桌面专属 API 用 `transport.env.isTauri` 守卫）
 
 ### 全局控制权（设备互斥）与状态同步
@@ -305,6 +306,8 @@ UI 已浏览器化（一套 UI 走桌面 Tauri / 宽屏浏览器 / 手机浏览�
 - **触摸手势隔离**（XTermTerminal.vue 内联手势处理，阈值 10px）：终端 tap 无自定义行为（点击/光标跳转由 xterm 自然处理）；拖动滚动＝capture 阶段接管触摸、按行累积派发**合成 WheelEvent** 给 xterm（CLI 开 mouse reporting 时编码滚轮序列走 TUI 内部滚动，未开时滚 scrollback，坐标可控无 NaN）且 blur 收起已弹出的键盘（高度回升只 fit 不滚底）。**软键盘由点击终端区域唤出**（xterm 自然聚焦；「键盘」按钮已移除）。**复制部分内容**＝「选择复制」按钮打开复制阅读器（TerminalCopyReader）：`captureSnapshot` 抓 buffer 全量快照 → `reflowSnapshot`（`src/utils/terminal-reflow.ts`）反渲染还原逻辑段落（isWrapped 拼接/围栏原样/满宽启发式 CJK 显示宽度/表格 diff 保护）→ 全屏 pre 展示，**系统原生长按选择手柄**选择 → getSelection → `copyText`（http 非安全上下文 execCommand 降级）；`@contextmenu.stop` 放行 Android 长按菜单（main.ts 拦截仅 PROD，须生产构建验证）；智能/原始双模式，误拼兜底
 - **会话身份链**：CLI `--resume` 会 fork 新 sessionId，`TerminalTab.sessionIds` 记录演变历史（旧 id 保留认领）；**所有恢复入口（App/TerminalView 历史、remote-session-created）统一走 `sessionStore.resumeSessionTab`**（复用优先：命中切 Tab/重启，未命中才新建），防二次 spawn、重复 Tab 与名字变 sessionId 编码；**用户显式关闭双路径对称广播 `remote-session-closed`**（桌面 pty_kill / 远程 session.kill，先广播后 kill）→ 各端联动删 Tab，自然退出（pty-exit）只置 stopped 保留 Tab；remote 会话列表经 `RemoteSession.sessionId` 下发（hook 建立 ptyId→sessionId 映射），浏览器端采纳 Tab 名优先取历史会话名（未加载时回退项目名，加载后 backfillTabNamesFromHistory 回填）
 - **触屏已知限制**：Provider 列表拖拽排序（HTML5 drag）移动端不可用，待需要时补上/下移按钮
+- **终端符号兜底替换**：浏览器远程模式下 CLI 输出的媒体控制符（"⏵⏵" 提示/⏸ 暂停，U+23EF/U+23F4–U+23FA）移动端字体缺字形，写入 xterm 前经 `mapTerminalGlyphs`（`src/utils/terminal-glyphs.ts`）替换为 ▶◀▲▼‖■●（均 1 列不影响布局）；桌面端有系统字体回退原样写入（`!isTauriEnv` 路径才替换）
+- **会话结束并入近期会话缓存（本地合并，零请求）**：`cachedRecentSessions` 启动时只加载一次，会话结束（closeTab/closeAllTabs/closeOtherTabs/handlePtyExit）时把 Tab 已知信息（sessionId/名称/项目路径）经 `mergeTabIntoRecentSessions` → `appStore.mergeRecentSession` 按 sessionId 去重就地并入缓存，首页「近期会话」即时可见——不重拉 getHomeData（低效且重置项目分页）；无 sessionId 的 Tab 不并入；缓存条目 working/pending 清 false（已结束）
 - 构建产物由 remote/web-assets 共享 crate 供给（两端同一实现）：默认 rust-embed 内嵌（debug 实时读 dist，改前端后 `npm run build` 在 8747 即时生效）；配置 `CC_BOX_RELAY_WEB_DIR` / `CC_BOX_WEB_DIR` 指向磁盘目录后优先读盘（miss 回退内嵌）——**中继端配置后仅前端更新 scp dist 即生效免重编**，未配置时 release 仍是编译期嵌入、须重编 relay 并重部署——完整流程见 remote/docs/deploy.md「日常更新部署（复用手册）」
 
 ### 测试要求
