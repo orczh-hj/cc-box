@@ -23,6 +23,8 @@ export interface TerminalTab {
   projectPath: string
   ptyId: string | null
   sessionId: string | null
+  /** sessionId 演变历史（CLI --resume 会 fork 出新 id，旧 id 仍属同一对话） */
+  sessionIds: string[]
   name: string
   status: 'starting' | 'running' | 'stopped'
   createdAt: number
@@ -82,11 +84,11 @@ export const useSessionStore = defineStore('session', () => {
       .map(t => t.tabId)
   })
 
-  /** 已被 Tab 占用的 sessionId 集合 */
+  /** 已被 Tab 占用的 sessionId 集合（含演变历史——resume fork 出的新旧 id 都算占用） */
   const claimedSessionIds = computed<Set<string>>(() => {
     const ids = new Set<string>()
     for (const tab of tabs.values()) {
-      if (tab.sessionId) ids.add(tab.sessionId)
+      for (const sid of tab.sessionIds) ids.add(sid)
     }
     return ids
   })
@@ -121,6 +123,7 @@ export const useSessionStore = defineStore('session', () => {
       projectPath,
       ptyId: null,
       sessionId: opts?.sessionId ?? null,
+      sessionIds: opts?.sessionId ? [opts.sessionId] : [],
       name: opts?.name ?? (opts?.sessionId ? opts.sessionId.slice(0, 8) : 'New Session'),
       status: 'stopped',
       createdAt: now,
@@ -148,26 +151,50 @@ export const useSessionStore = defineStore('session', () => {
   /**
    * 浏览器远程模式：采纳服务端运行中的会话列表（刷新/新设备连接后的恢复入口）。
    * 已有同 ptyId 的 Tab 仅更新 working/pending；新会话建 Tab 绑定 ptyId
-   * （不 attach——用户点击 Tab 时才接管控制权，独占语义保持）
+   * （不 attach——用户点击 Tab 时才接管控制权，独占语义保持）。
+   * Tab 名优先取历史会话名（sessionId 匹配）；历史未加载时回退项目名，
+   * 加载完成后经 backfillTabNamesFromHistory 修正
    */
-  function adoptRemoteSessions(list: Array<{ id: string; type: string; cwd: string; working: boolean; pending: boolean }>) {
+  function adoptRemoteSessions(list: Array<{ id: string; type: string; cwd: string; working: boolean; pending: boolean; sessionId?: string }>) {
     for (const s of list) {
       const existing = getTabByPtyId(s.id)
       if (existing) {
         existing.working = s.working
         existing.pending = s.pending
         existing.lastActiveAt = Date.now()
+        if (s.sessionId && existing.sessionId !== s.sessionId) {
+          setTabSessionId(existing.tabId, s.sessionId)
+        }
         continue
       }
+      const histName = s.sessionId
+        ? historyCacheMap.get(s.cwd)?.find(h => h.sessionId === s.sessionId)?.name?.trim()
+        : ''
       const parts = s.cwd.replace(/\\/g, '/').split('/')
-      const name = parts[parts.length - 1] || s.cwd
-      const tabId = createTab(s.cwd, { name })
+      const name = histName || parts[parts.length - 1] || s.cwd
+      const tabId = createTab(s.cwd, { name, sessionId: s.sessionId })
       setTabPty(tabId, s.id)
       const tab = tabs.get(tabId)
       if (tab) {
         tab.working = s.working
         tab.pending = s.pending
       }
+    }
+  }
+
+  /**
+   * 远程采纳 Tab 的会话名回填：采纳时历史未加载只能用项目名，历史加载
+   * 完成后按 sessionId 修正为真实会话名。名字已不是项目名的 Tab 不动
+   * （可能已被用户重命名或 hook 自动命名覆盖）
+   */
+  function backfillTabNamesFromHistory() {
+    for (const tab of tabs.values()) {
+      if (!tab.sessionId) continue
+      const projName = tab.projectPath.replace(/\\/g, '/').split('/').pop() || tab.projectPath
+      if (tab.name !== projName) continue
+      const histName = historyCacheMap.get(tab.projectPath)
+        ?.find(h => h.sessionId === tab.sessionId)?.name?.trim()
+      if (histName) tab.name = histName
     }
   }
 
@@ -279,14 +306,52 @@ export const useSessionStore = defineStore('session', () => {
   }
 
   /**
-   * 更新 Tab 的 sessionId（匹配后赋值）
+   * 重命名广播 key：running 用 ptyId；stopped Tab 的 ptyId 已被 handlePtyExit
+   * 置空，用 sessionId（接收端按演变历史匹配）。两者都没有（从未启动的
+   * New Session）返回 null——不广播，双端各自本地命名。
+   */
+  function renameKeyForTab(tabId: string): string | null {
+    const tab = tabs.get(tabId)
+    if (!tab) return null
+    return tab.ptyId ?? tab.sessionId ?? null
+  }
+
+  /**
+   * 应用远端重命名广播：key 为 ptyId（running）或 sessionId（stopped，
+   * 按演变历史匹配 resume fork 的新旧 id）。命中返回 true。
+   */
+  function applyRemoteRename(key: string, name: string): boolean {
+    const tab = getTabByPtyId(key) ?? getTabBySessionId(key)
+    if (!tab) return false
+    tab.name = name
+    return true
+  }
+
+  /**
+   * 更新 Tab 的 sessionId（匹配后赋值；新值记入演变历史，旧 id 保留认领）
    */
   function setTabSessionId(tabId: string, sessionId: string, name?: string) {
     const tab = tabs.get(tabId)
     if (!tab) return
     tab.sessionId = sessionId
+    if (!tab.sessionIds.includes(sessionId)) tab.sessionIds.push(sessionId)
     if (name) tab.name = name
     tab.lastActiveAt = Date.now()
+  }
+
+  /**
+   * 恢复会话入口的统一决策（复用优先）：按 sessionId 演变历史找同项目已有 Tab
+   * ——命中即复用（running 切换显示 / stopped 由 startTab 走 --resume 重启，
+   * 原名保留），未命中才新建。所有恢复路径（App/TerminalView 历史、
+   * remote-session-created）必须经此方法，防同一对话二次 spawn/重复 Tab。
+   */
+  function resumeSessionTab(projectPath: string, sessionId: string, name?: string): { tabId: string; reused: boolean } {
+    const existing = getTabBySessionId(sessionId)
+    if (existing && existing.projectPath === projectPath) {
+      existing.lastActiveAt = Date.now()
+      return { tabId: existing.tabId, reused: true }
+    }
+    return { tabId: createTab(projectPath, { sessionId, name }), reused: false }
   }
 
   // ---- 活跃 Tab 管理 ----
@@ -317,7 +382,8 @@ export const useSessionStore = defineStore('session', () => {
 
   function getTabBySessionId(sessionId: string): TerminalTab | null {
     for (const tab of tabs.values()) {
-      if (tab.sessionId === sessionId) return tab
+      // 匹配演变历史：resume 旧 id 与 fork 新 id 指向同一对话
+      if (tab.sessionIds.includes(sessionId)) return tab
     }
     return null
   }
@@ -327,7 +393,7 @@ export const useSessionStore = defineStore('session', () => {
   function assignSessionIdByPtyId(ptyId: string, sessionId: string, model?: string) {
     for (const tab of tabs.values()) {
       if (tab.ptyId === ptyId) {
-        tab.sessionId = sessionId
+        setTabSessionId(tab.tabId, sessionId)
         if (model) tab.model = model
         tab.lastActiveAt = Date.now()
         return true
@@ -486,12 +552,16 @@ export const useSessionStore = defineStore('session', () => {
     createTab,
     setTabPty,
     adoptRemoteSessions,
+    backfillTabNamesFromHistory,
     handlePtyExit,
     closeTab,
     closeAllTabs,
     closeOtherTabs,
     updateTabName,
+    renameKeyForTab,
+    applyRemoteRename,
     setTabSessionId,
+    resumeSessionTab,
 
     // Active tab
     setActiveTab,

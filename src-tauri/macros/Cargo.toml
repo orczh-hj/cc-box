@@ -1,0 +1,13 @@
+[package]
+name = "cc-box-macros"
+version = "0.1.0"
+edition = "2021"
+description = "CC-Box 命令属性宏（写命令出口自动广播 state-changed）"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = { version = "2", features = ["full"] }
+quote = "1"
+proc-macro2 = "1"

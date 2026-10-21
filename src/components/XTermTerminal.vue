@@ -4,9 +4,8 @@
     class="xterm-container"
     :class="{ 'drag-over': isDragOver }"
     :style="termBgStyle"
-    @click="handleTapFocus"
-    @touchstart="handleTouchStart"
-    @touchend="handleTouchEnd"
+    @touchstart.capture="handleTouchStartCapture"
+    @touchmove.capture="handleTouchMoveCapture"
   >
     <!-- 动态渲染每个 Tab 的终端容器 -->
     <div
@@ -42,7 +41,6 @@ import '@xterm/xterm/css/xterm.css'
 import '@fontsource/cascadia-code/400.css'
 import { useAppStore } from '@/stores/app'
 import { useSessionStore } from '@/stores/session'
-import { useHookStore } from '@/stores/hook'
 import { useI18n } from 'vue-i18n'
 import { isMac } from '@/utils/platform'
 import { isUndoShortcut, READLINE_UNDO } from '@/utils/keyboard'
@@ -63,6 +61,7 @@ import { registerTerminalCommand } from '@/composables/useTerminalCommand'
 import { useIsMobile } from '@/composables/useMediaQuery'
 import { safeDispose } from '@/utils/dispose'
 import { relativizePath } from '@/utils/path'
+import type { SnapshotData } from '@/utils/terminal-reflow'
 import { copyText as platformCopyText, readClipboardText as platformReadText } from '@/api/platform'
 import { transport } from '@/api/transport'
 import { getCurrentWindow } from '@tauri-apps/api/window'
@@ -79,7 +78,6 @@ const emit = defineEmits<{
 
 const appStore = useAppStore()
 const sessionStore = useSessionStore()
-const hookStore = useHookStore()
 const isMobile = useIsMobile()
 
 const { t } = useI18n()
@@ -574,9 +572,6 @@ async function setupEventListeners() {
         // 更新 store（Tab 保留，状态变 stopped）
         sessionStore.handlePtyExit(id)
 
-        // 清理 hook 状态（防止残留旧数据）
-        hookStore.clearSession(id)
-
         // 销毁 Terminal 实例（释放资源）
         void disposeTerminal(instance.term, `onPtyExit(tabId=${tabId})`)
         terminalInstances.delete(tabId)
@@ -725,8 +720,12 @@ async function startTab(tabId: string) {
       rows: 24,
       type: 'claude',
       args,
-      // 浏览器远程模式：结构化启动选项（Rust 侧按同一规则拼接 CLI 参数）
+      // 浏览器远程模式：结构化启动选项（Rust 侧按同一规则拼接 CLI 参数）；
+      // resumeName 带上有意义的显示名（历史会话名/prompt 名），桌面建 Tab 防编码名
       resume: tab.sessionId ?? undefined,
+      resumeName: tab.name && tab.name !== 'New Session' && tab.name !== tab.sessionId?.slice(0, 8)
+        ? tab.name
+        : undefined,
       skipPermissions: appStore.claudeOptions.skipPermissions || undefined,
       customArgs: appStore.claudeOptions.customArgs || undefined,
     })
@@ -769,7 +768,6 @@ async function restartTab(tabId: string) {
     // 如果有旧 PTY 在运行，先 kill
     if (tab.ptyId) {
       try { await ptyKill(tab.ptyId) } catch {}
-      hookStore.clearSession(tab.ptyId)
     }
 
     // 清理旧 Terminal 实例（dispose 失败不阻断重启流程，仍需清理 Map 引用）
@@ -902,12 +900,15 @@ function sendText(text: string) {
   }
 }
 
-// 聚焦活跃终端
+// 聚焦活跃终端（唤起软键盘）：iOS/Android 对 xterm 内部 focus
+// （preventScroll:true）不弹键盘——直接聚焦裸 textarea（工具栏
+// 「键盘」按钮手势内调用，属于用户激活态，键盘可靠唤出）
 function focus() {
-  const tabId = currentDisplayTabId.value
-  if (!tabId) return
-  const instance = terminalInstances.get(tabId)
-  if (instance) instance.term.focus()
+  const instance = currentInstance()
+  if (!instance) return
+  const ta = instance.term.textarea
+  if (ta) ta.focus()
+  else instance.term.focus()
 }
 
 // 浏览器远程模式：确保 Tab 已 attach（输出流 + 控制权；后 attach 优先抢占，
@@ -935,33 +936,110 @@ function refreshRemoteSessions() {
   transport.sendClient({ type: 'sessions.list' })
 }
 
-// 触屏聚焦：iOS 对屏幕外 textarea 或合成 mousedown 内的 focus 不弹软键盘，
-// 必须在原生 click/touchend 手势内显式聚焦当前终端
-function handleTapFocus() {
-  if (!isMobile.value) return
+// 当前显示终端实例（触摸/选择/键盘的统一取用）
+function currentInstance() {
   const tabId = currentDisplayTabId.value
-  if (!tabId) return
-  const instance = terminalInstances.get(tabId)
-  if (!instance) return
-  // iOS/Android：xterm 内部 focus 带 { preventScroll: true }，部分移动浏览器
-  // 对这种聚焦不唤起软键盘——手势内直接聚焦裸 textarea（无 preventScroll）
-  const ta = instance.term.textarea
-  if (ta) ta.focus()
-  else instance.term.focus()
+  return tabId ? terminalInstances.get(tabId) : undefined
 }
 
-// 区分 tap 与滚动：touchend 时位移超阈值视为滚动，不抢焦点弹键盘
-let touchStartX = 0
-let touchStartY = 0
-function handleTouchStart(e: TouchEvent) {
-  const t = e.touches[0]
-  touchStartX = t.clientX
-  touchStartY = t.clientY
+// ===== 快照抓取（手机复制部分内容）=====
+// 抓取当前 buffer 全量（scrollback + viewport）供复制阅读器反渲染展示；
+// 终端不暂停，快照为静态视图，退出阅读器后重进可重抓最新
+
+/** 快照行数上限：超出截头部（保留最新），防超大 scrollback 拖垮 DOM */
+const MAX_SNAPSHOT_LINES = 5000
+
+function captureSnapshot(): SnapshotData {
+  const instance = currentInstance()
+  if (!instance) return { lines: [], wrapped: [], cols: 80, truncated: false }
+  const buf = instance.term.buffer.active
+  const total = buf.length
+  if (total === 0) return { lines: [], wrapped: [], cols: instance.term.cols, truncated: false }
+  const start = Math.max(0, total - MAX_SNAPSHOT_LINES)
+  const lines: string[] = []
+  const wrapped: boolean[] = []
+  for (let i = start; i < total; i++) {
+    const line = buf.getLine(i)
+    // trimRight：剥离行尾渲染填充空格（跨行拼接质量由 reflowSnapshot 保证）
+    lines.push(line?.translateToString(true) ?? '')
+    wrapped.push(line?.isWrapped ?? false)
+  }
+  return { lines, wrapped, cols: instance.term.cols, truncated: start > 0 }
 }
-function handleTouchEnd(e: TouchEvent) {
-  const t = e.changedTouches[0]
-  if (Math.abs(t.clientX - touchStartX) < 10 && Math.abs(t.clientY - touchStartY) < 10) {
-    handleTapFocus()
+
+/** 终端渲染区（.xterm-screen）矩形 */
+function screenRect(): DOMRect | null {
+  const instance = currentInstance()
+  const el = instance?.term.element?.querySelector('.xterm-screen')
+  return el?.getBoundingClientRect() ?? null
+}
+
+function cellHeight(): number {
+  const r = screenRect()
+  const instance = currentInstance()
+  if (!r || !instance || instance.term.rows <= 0) return 20
+  return r.height / instance.term.rows
+}
+
+// ===== 普通模式触摸：滚动自管（capture 阶段接管） =====
+// stopPropagation 断开 xterm 内部 touch 处理（其 touchmove 在应用鼠标模式
+// 下转序列时坐标异常，产生 "aN;NaNM" 垃圾输入——根因）。滚动的正确通道是
+// 合成 wheel 派发给 xterm：CLI 开 mouse reporting 时 xterm 编码滚轮序列发给
+// CLI（TUI 内部滚动）；未开时 xterm 滚 scrollback——两条路都通，坐标由我们
+// 提供永不为 NaN。tap（位移 <10px）不 preventDefault，合成 click/mousedown
+// 照常透传给 xterm（光标跳转等原生响应）
+let touchStartY = 0
+let touchLastY = 0
+let touchScrolling = false
+let wheelAccum = 0
+
+/** 拖动量转为合成 wheel 派发给 xterm（deltaY 像素，触点为有效坐标） */
+function dispatchWheelToXterm(deltaY: number, x: number, y: number) {
+  const instance = currentInstance()
+  const el = instance?.term.element
+  if (!el) return
+  el.dispatchEvent(new WheelEvent('wheel', {
+    bubbles: true,
+    cancelable: true,
+    clientX: x,
+    clientY: y,
+    deltaX: 0,
+    deltaY,
+    deltaZ: 0,
+    deltaMode: WheelEvent.DOM_DELTA_PIXEL,
+  }))
+}
+
+function handleTouchStartCapture(e: TouchEvent) {
+  if (!isMobile.value) return
+  e.stopPropagation()
+  touchStartY = touchLastY = e.touches[0].clientY
+  touchScrolling = false
+  wheelAccum = 0
+}
+function handleTouchMoveCapture(e: TouchEvent) {
+  if (!isMobile.value) return
+  e.stopPropagation()
+  const t = e.touches[0]
+  const y = t.clientY
+  if (!touchScrolling && Math.abs(y - touchStartY) >= 10) {
+    touchScrolling = true
+    // 滚动手势：收起已弹出的软键盘（键盘不挡翻阅；高度回升只 fit 不滚底）
+    const ta = currentInstance()?.term.textarea
+    if (ta && document.activeElement === ta) ta.blur()
+  }
+  if (touchScrolling) {
+    e.preventDefault()
+    // 手指上滑（y 减小）→ 内容上移看新内容 → wheel deltaY 为正（下滚方向）
+    const dy = touchLastY - y
+    touchLastY = y
+    wheelAccum += dy
+    const ch = cellHeight()
+    const steps = Math.trunc(wheelAccum / ch)
+    if (steps !== 0) {
+      wheelAccum -= steps * ch
+      dispatchWheelToXterm(steps * ch, t.clientX, t.clientY)
+    }
   }
 }
 
@@ -1020,6 +1098,7 @@ defineExpose({
   focus,
   fitCurrentTerminal,
   refreshRemoteSessions,
+  captureSnapshot,
 })
 </script>
 

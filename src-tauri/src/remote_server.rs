@@ -1,6 +1,7 @@
 //! 远程访问服务器（局域网直连模式）
 //!
-//! - `GET /` 手机 Web UI（rust-embed 嵌入 remote/web 构建产物）
+//! - `GET /` 手机 Web UI（cc-box-web-assets：CC_BOX_WEB_DIR 磁盘目录优先、
+//!   内嵌 dist 兜底，与 relay 共用同一实现）
 //! - `GET /ws` WebSocket，首条消息必须是 hello（token 认证）
 //! - 绑定 0.0.0.0:port（默认 8747），仅在远程开关开启时启动
 
@@ -9,15 +10,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::LazyLock;
 use std::time::Duration;
 
-use axum::body::Body;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::http::{header, StatusCode, Uri};
 use axum::response::Response;
 use axum::routing::get;
 use axum::Router;
 use futures_util::{sink::SinkExt, StreamExt};
 use parking_lot::Mutex;
-use rust_embed::RustEmbed;
 use tauri::AppHandle;
 use tokio::sync::{mpsc, watch};
 
@@ -25,12 +23,9 @@ use cc_box_remote_protocol::{ClientMessage, ServerMessage};
 
 use crate::remote_state::{next_conn_id, REMOTE_STATE};
 
-/// 远程 Web UI：主应用构建产物（vite build → dist/，与 Tauri frontendDist 同一份；
-/// debug 构建下 rust-embed 动态读取该目录，无需重新编译 Rust。
-/// 注意 folder 相对 crate 根（src-tauri/）：../dist = 项目根 dist）
-#[derive(RustEmbed)]
-#[folder = "../dist"]
-struct WebAssets;
+/// Web UI 磁盘目录环境变量（优先于内嵌；debug 构建本就动态读 dist，
+/// release 借此获得同样的免重编更新通道）
+const WEB_DIR_ENV: &str = "CC_BOX_WEB_DIR";
 
 pub const DEFAULT_PORT: u16 = 8747;
 
@@ -77,7 +72,8 @@ pub async fn start() -> Result<(), String> {
 
     let app = Router::new()
         .route("/ws", get(ws_handler))
-        .fallback(serve_static);
+        // Web UI 静态资源：磁盘目录（CC_BOX_WEB_DIR）优先、内嵌兜底
+        .fallback(|uri| cc_box_web_assets::serve_static(WEB_DIR_ENV, uri));
 
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     let listener = match tokio::net::TcpListener::bind(addr).await {
@@ -286,40 +282,6 @@ pub fn current_token() -> String {
         .and_then(|r| r.token)
         .filter(|t| !t.is_empty())
         .unwrap_or_default()
-}
-
-// ==================== 静态资源 ====================
-
-async fn serve_static(uri: Uri) -> Response {
-    let path = uri.path().trim_start_matches('/');
-    let path = if path.is_empty() { "index.html" } else { path };
-
-    match WebAssets::get(path) {
-        Some(file) => {
-            let mime = mime_for(path);
-            Response::builder()
-                .header(header::CONTENT_TYPE, mime)
-                .body(Body::from(file.data))
-                .unwrap()
-        }
-        None => Response::builder()
-            .status(StatusCode::NOT_FOUND)
-            .body(Body::from("not found"))
-            .unwrap(),
-    }
-}
-
-fn mime_for(path: &str) -> &'static str {
-    match path.rsplit('.').next() {
-        Some("html") => "text/html; charset=utf-8",
-        Some("js") => "application/javascript; charset=utf-8",
-        Some("css") => "text/css; charset=utf-8",
-        Some("json") => "application/json; charset=utf-8",
-        Some("svg") => "image/svg+xml",
-        Some("png") => "image/png",
-        Some("webmanifest") => "application/manifest+json",
-        _ => "application/octet-stream",
-    }
 }
 
 // ==================== WebSocket ====================

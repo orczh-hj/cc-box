@@ -1,0 +1,16 @@
+[package]
+name = "cc-box-web-assets"
+version = "0.1.0"
+edition = "2021"
+description = "CC-Box Web UI 静态资源服务（磁盘目录优先 + rust-embed 内嵌兜底，relay 与桌面 remote_server 共用）"
+license = "MIT"
+
+[dependencies]
+axum = "0.7"
+tower = "0.5"
+tower-http = { version = "0.5", features = ["fs"] }
+rust-embed = "8"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "macros"] }
+tempfile = "3"

@@ -63,6 +63,19 @@ async fn recv_timeout(rx: &mut mpsc::Receiver<ServerMessage>) -> ServerMessage {
     }
 }
 
+/// 读取下一条 controller-changed 广播（跳过途中其他帧，如 taken-over），
+/// 返回 payload.id（空串 = 无人持有）。attach/takeover/断连都会触发该广播
+async fn recv_controller_changed(rx: &mut mpsc::Receiver<ServerMessage>) -> String {
+    loop {
+        match recv_timeout(rx).await {
+            ServerMessage::RpcEvent { name, payload } if name == "controller-changed" => {
+                return payload["id"].as_str().unwrap_or("").to_string()
+            }
+            _ => continue,
+        }
+    }
+}
+
 #[test]
 fn RemoteState_HookStateMachine_UserPrompt开启working_Stop后pending() {
     let state = RemoteState::new();
@@ -258,11 +271,32 @@ async fn RemoteState_SessionsList_按注册顺序返回() {
 
     state.handle_client_message(conn, &ClientMessage::SessionsList);
     match recv_timeout(&mut rx).await {
-        ServerMessage::Sessions { list } => {
+        ServerMessage::Sessions { list, .. } => {
             assert_eq!(list.len(), 2);
             assert_eq!(list[0].id, "s1");
             assert_eq!(list[0].pty_type, "claude");
             assert_eq!(list[1].id, "s2");
+        }
+        other => panic!("expected Sessions, got {:?}", other),
+    }
+}
+
+#[tokio::test]
+async fn RemoteState_SessionList_下发sessionId() {
+    let state = RemoteState::new();
+    state.register_pty("s10", "claude", "/a");
+    state.register_pty("s11", "shell", "/b");
+    // hook SessionStart 记录 sessionId（重复设置幂等）
+    state.set_session_id("s10", "sess-fork-123");
+    state.set_session_id("s10", "sess-fork-123");
+
+    let (conn, mut rx) = setup_conn(&state);
+    state.handle_client_message(conn, &ClientMessage::SessionsList);
+    match recv_timeout(&mut rx).await {
+        ServerMessage::Sessions { list, .. } => {
+            // claude 会话携带 sessionId，shell 会话为 None
+            assert_eq!(list[0].session_id.as_deref(), Some("sess-fork-123"));
+            assert_eq!(list[1].session_id, None);
         }
         other => panic!("expected Sessions, got {:?}", other),
     }
@@ -301,8 +335,8 @@ async fn RemoteState_Tail_超过上限截断保留尾部() {
     let state = RemoteState::new();
     state.register_pty("p10", "claude", "/tmp");
 
-    // 写入超过 TAIL_LIMIT 的内容（含多字节中文字符）
-    let chunk = "中文内容块".repeat(5000);
+    // 写入超过预算的内容（含多字节中文字符；15B × 20000 = 300KB > 256KB）
+    let chunk = "中文内容块".repeat(20000);
     state.push_output("p10", &format!("HEAD{}", chunk));
     state.push_output("p10", "TAIL_MARKER");
 
@@ -310,7 +344,7 @@ async fn RemoteState_Tail_超过上限截断保留尾部() {
     state.handle_client_message(conn, &ClientMessage::SessionSubscribe { id: "p10".into() });
     match recv_timeout(&mut rx).await {
         ServerMessage::SessionSubscribed { tail, .. } => {
-            assert!(tail.len() <= crate::remote_state::TAIL_LIMIT + "TAIL_MARKER".len());
+            assert!(tail.len() <= crate::remote_state::TAIL_BUDGET + "TAIL_MARKER".len());
             assert!(tail.ends_with("TAIL_MARKER"));
             assert!(!tail.contains("HEAD"), "head should be truncated");
             // UTF-8 边界安全：起点是字符边界，不含残缺字节
@@ -321,6 +355,133 @@ async fn RemoteState_Tail_超过上限截断保留尾部() {
 }
 
 // ==================== R2：attach 独占接管 ====================
+
+#[tokio::test]
+async fn RemoteState_Tail_超预算淘汰整块并对齐转义边界() {
+    // 复现：TAIL_LIMIT=16KB 时代，attach 运行中会话回放只剩一屏转义序列
+    let state = RemoteState::new();
+    state.register_pty("t1", "claude", "/tmp");
+
+    // 块 A（130KB）：含 HEAD 标记
+    let a = format!("HEAD-AAA\x1b[31m{}", "a".repeat(130 * 1024));
+    state.push_output("t1", &a);
+    // 块 B（130KB）：以残缺转义延续 "1m" 开头（模拟块边界切在转义中间），
+    // 块内含完整 ESC 序列
+    let b = format!("1m{}b{}\x1b[32m{}", "b".repeat(97), "b".repeat(102), "b".repeat(130 * 1024 - 200));
+    state.push_output("t1", &b);
+    // 块 C：结尾标记
+    state.push_output("t1", "\x1b[0mTAIL_MARKER");
+
+    let (conn, mut rx) = setup_conn(&state);
+    state.handle_client_message(conn, &ClientMessage::SessionSubscribe { id: "t1".into() });
+    match recv_timeout(&mut rx).await {
+        ServerMessage::SessionSubscribed { tail, .. } => {
+            // 总量 ~260KB > 256KB 预算：块 A 被淘汰，回放保留约 256KB
+            assert!(!tail.contains("HEAD-AAA"), "oldest chunk should be evicted");
+            assert!(tail.contains("TAIL_MARKER"));
+            // 新头部对齐到 ESC 边界：丢弃块 B 开头的残缺转义延续 "1m"
+            assert!(tail.starts_with("\x1b[32m") || tail.starts_with("\x1b[0m"),
+                "snapshot head should align to ANSI escape, got: {:?}",
+                &tail[..tail.len().min(24)]);
+            // UTF-8 边界安全
+            assert!(std::str::from_utf8(tail.as_bytes()).is_ok());
+            // 256KB 预算下回放应显著大于旧 16KB 行为（保留了大段中段内容）
+            assert!(tail.len() > 100 * 1024, "replay should keep ~256KB, got {}", tail.len());
+        }
+        other => panic!("expected SessionSubscribed, got {:?}", other),
+    }
+}
+
+#[tokio::test]
+async fn RemoteState_Tail_小块并入尾块内容保序() {
+    // 逐键回显场景：海量小块（<64B）不积累独立块，snapshot 内容完整有序
+    let state = RemoteState::new();
+    state.register_pty("t4", "claude", "/tmp");
+    for i in 0..5000u32 {
+        state.push_output("t4", &format!("k{};", i));
+    }
+    state.push_output("t4", "\x1b[0mEND");
+
+    let (conn, mut rx) = setup_conn(&state);
+    state.handle_client_message(conn, &ClientMessage::SessionSubscribe { id: "t4".into() });
+    match recv_timeout(&mut rx).await {
+        ServerMessage::SessionSubscribed { tail, .. } => {
+            assert!(tail.ends_with("\x1b[0mEND"));
+            // 顺序完整：首个与最后一个小块都在
+            assert!(tail.contains("k0;"));
+            assert!(tail.contains("k4999;"));
+            assert!(std::str::from_utf8(tail.as_bytes()).is_ok());
+        }
+        other => panic!("expected SessionSubscribed, got {:?}", other),
+    }
+}
+
+#[tokio::test]
+async fn RemoteState_Tail_单块超预算块内截断保留尾部() {
+    let state = RemoteState::new();
+    state.register_pty("t2", "claude", "/tmp");
+
+    // 单块 300KB：块内截断保留尾部 ~256KB
+    let big = format!("X{}", "x".repeat(300 * 1024));
+    state.push_output("t2", &big);
+    state.push_output("t2", "TAIL_MARKER");
+
+    let (conn, mut rx) = setup_conn(&state);
+    state.handle_client_message(conn, &ClientMessage::SessionSubscribe { id: "t2".into() });
+    match recv_timeout(&mut rx).await {
+        ServerMessage::SessionSubscribed { tail, .. } => {
+            assert!(tail.ends_with("TAIL_MARKER"));
+            assert!(tail.len() <= 256 * 1024 + "TAIL_MARKER".len() + 8,
+                "single-chunk overflow should truncate in-place, got {}", tail.len());
+            assert!(!tail.contains(&"X".repeat(50 * 1024)), "head should be truncated");
+        }
+        other => panic!("expected SessionSubscribed, got {:?}", other),
+    }
+}
+
+#[tokio::test]
+async fn RemoteState_Attach_快照先于增量入队() {
+    // 并发守护：attach 期间对端持续 push_output，连接收到的首包必须是
+    // SessionAttached（快照），不能是 PtyOutput（旧实现锁外发快照存在
+    // 订阅插入后、快照入队前的乱序窗口）
+    let state = RemoteState::new();
+    state.register_pty("t3", "claude", "/tmp");
+    state.push_output("t3", "history\n");
+
+    let push_state = std::sync::Arc::new(state);
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let producer = {
+        let s = push_state.clone();
+        let stop = stop.clone();
+        std::thread::spawn(move || {
+            let mut i = 0u64;
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                s.push_output("t3", &format!("out{}", i));
+                i += 1;
+            }
+        })
+    };
+
+    for _ in 0..20 {
+        let (conn, mut rx) = setup_conn(&push_state);
+        push_state.handle_client_message(
+            conn,
+            &ClientMessage::SessionAttach { id: "t3".into(), cols: 80, rows: 24 },
+        );
+        match recv_timeout(&mut rx).await {
+            ServerMessage::SessionAttached { .. } => {}
+            other => {
+                stop.store(true, std::sync::atomic::Ordering::Relaxed);
+                producer.join().unwrap();
+                panic!("first message must be SessionAttached snapshot, got {:?}", other);
+            }
+        }
+        push_state.remove_conn(conn);
+    }
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    producer.join().unwrap();
+}
+
 
 #[tokio::test]
 async fn RemoteState_Attach_接管成功附快照并成为输出订阅者() {
@@ -341,6 +502,8 @@ async fn RemoteState_Attach_接管成功附快照并成为输出订阅者() {
         }
         other => panic!("expected SessionAttached, got {:?}", other),
     }
+    // attach 自动持有控制权 → controller-changed 广播
+    let _ = recv_controller_changed(&mut rx).await;
 
     // attach 后收到输出流
     state.push_output("a1", "live output");
@@ -367,8 +530,25 @@ async fn RemoteState_Attach_抢占其他远程连接时旧连接收到遮罩广�
         ServerMessage::RpcEvent { name, .. } => assert_eq!(name, "session-taken-over"),
         other => panic!("conn2 should observe taken-over broadcast, got {:?}", other),
     }
+    // conn1 自动持有控制权的广播
+    assert_eq!(recv_controller_changed(&mut rx1).await, conn1.to_string());
+    let _ = recv_controller_changed(&mut rx2).await;
 
-    // conn2 抢占
+    // 设备互斥：conn2 直接 attach 不能抢占（被拒，须先 takeover）
+    state.handle_client_message(
+        conn2,
+        &ClientMessage::SessionAttach { id: "a2".into(), cols: 100, rows: 30 },
+    );
+    match recv_timeout(&mut rx2).await {
+        ServerMessage::SessionAttachDenied { .. } => {}
+        other => panic!("expected SessionAttachDenied, got {:?}", other),
+    }
+
+    // conn2 显式接管后再 attach：conn1 的终端被剥离（takeover），attach 抢占桌面
+    state.handle_client_message(conn2, &ClientMessage::ControllerTakeover);
+    assert_eq!(recv_controller_changed(&mut rx1).await, conn2.to_string());
+    let _ = recv_controller_changed(&mut rx2).await; // 接管确认
+
     state.handle_client_message(
         conn2,
         &ClientMessage::SessionAttach { id: "a2".into(), cols: 100, rows: 30 },
@@ -434,6 +614,7 @@ async fn RemoteState_Attach_主动detach归还会话() {
         &ClientMessage::SessionAttach { id: "a4".into(), cols: 80, rows: 24 },
     );
     let _ = recv_timeout(&mut rx).await; // attached
+    let _ = recv_controller_changed(&mut rx).await; // attach 自动持有
 
     state.handle_client_message(conn, &ClientMessage::SessionDetach { id: "a4".into() });
     match recv_timeout(&mut rx).await {
@@ -458,6 +639,7 @@ async fn RemoteState_Attach_连接断开自动归还会话() {
         &ClientMessage::SessionAttach { id: "a5".into(), cols: 80, rows: 24 },
     );
     let _ = recv_timeout(&mut rx).await; // attached
+    let _ = recv_controller_changed(&mut rx).await; // attach 自动持有
 
     // 断连 → 自动归还
     state.remove_conn(conn);
@@ -485,6 +667,7 @@ async fn RemoteState_Attach_桌面claim收回并通知手机() {
         &ClientMessage::SessionAttach { id: "a6".into(), cols: 80, rows: 24 },
     );
     let _ = recv_timeout(&mut rx).await; // attached
+    let _ = recv_controller_changed(&mut rx).await; // attach 自动持有
 
     // 桌面接管
     state.claim("a6");
@@ -511,6 +694,7 @@ async fn RemoteState_Attach_会话退出时清理() {
         &ClientMessage::SessionAttach { id: "a7".into(), cols: 80, rows: 24 },
     );
     let _ = recv_timeout(&mut rx).await; // attached
+    let _ = recv_controller_changed(&mut rx).await; // attach 自动持有
 
     state.remove_pty("a7");
     match recv_timeout(&mut rx).await {
@@ -532,7 +716,7 @@ async fn RemoteState_Hello_统一回复HelloOk() {
         &ClientMessage::Hello { ver: 1, client: "web".into(), token: "t".into() },
     );
     match recv_timeout(&mut rx).await {
-        ServerMessage::HelloOk { ver, device_name } => {
+        ServerMessage::HelloOk { ver, device_name, .. } => {
             assert_eq!(ver, 1);
             assert!(!device_name.is_empty());
         }
@@ -553,12 +737,40 @@ async fn RemoteState_SessionCreate_未知项目拒绝() {
             session_id: None,
             skip_permissions: None,
             custom_args: None,
+            session_name: None,
         },
     );
     match recv_timeout(&mut rx).await {
         ServerMessage::SessionCreateFailed { error } => assert_eq!(error, "unknown project"),
         other => panic!("expected SessionCreateFailed, got {:?}", other),
     }
+}
+
+/// session.kill（用户显式关闭）先广播 remote-session-closed 给远程连接：
+/// 各端联动删 Tab（"打开的标签页"不残留 stopped 条目）。广播在 kill 之前
+/// （无 pty manager 时 kill 失败仅告警，不影响广播发出）。
+/// emit_event 固定走全局 REMOTE_STATE（生产语义），连接须注册在全局上
+#[tokio::test]
+async fn RemoteState_SessionKill_广播closed给远程连接() {
+    let state = &crate::remote_state::REMOTE_STATE;
+    state.register_pty("pk1", "claude", "/tmp");
+    let (tx, mut rx) = mpsc::channel(16);
+    let conn = crate::remote_state::next_conn_id();
+    state.add_conn(conn, tx);
+
+    state.handle_client_message(conn, &ClientMessage::SessionKill { id: "pk1".into() });
+
+    let result = match recv_timeout(&mut rx).await {
+        ServerMessage::RpcEvent { name, payload } => {
+            assert_eq!(name, "remote-session-closed");
+            assert_eq!(payload["id"], "pk1");
+            ()
+        }
+        other => panic!("expected RpcEvent(remote-session-closed), got {:?}", other),
+    };
+
+    state.remove_conn(conn);
+    result
 }
 
 /// session.create 在途上限：达到上限后立即拒绝（不进线程、不查白名单）
@@ -570,7 +782,7 @@ async fn RemoteState_SessionCreate_并发上限拒绝() {
     crate::remote_state::REMOTE_SPAWN_INFLIGHT.store(8, std::sync::atomic::Ordering::SeqCst);
     state.handle_client_message(
         conn,
-        &ClientMessage::SessionCreate { path: "/any".into(), session_id: None, skip_permissions: None, custom_args: None },
+        &ClientMessage::SessionCreate { path: "/any".into(), session_id: None, skip_permissions: None, custom_args: None, session_name: None },
     );
     match recv_timeout(&mut rx).await {
         ServerMessage::SessionCreateFailed { error } => {
@@ -596,4 +808,474 @@ fn RemoteState_PathsEquivalent_归一化比较() {
     // 不存在的路径：归一化字符串比较（尾分隔符忽略、大小写折叠）
     assert!(paths_equivalent("Z:/no/such/dir/", "z:/no/such/dir"));
     assert!(!paths_equivalent("Z:/no/such/dir", "Z:/no/such/other"));
+}
+
+/// SessionEnd 结束 working 但不设 turnEnded：后续 activity（如新会话的
+/// 首个工具调用）可恢复 working——与桌面 useStatusMonitor 语义一致
+#[test]
+fn RemoteState_HookStateMachine_SessionEnd后activity恢复working() {
+    let state = RemoteState::new();
+    state.register_pty("p-se", "claude", "/tmp");
+
+    state.on_hook_payload(&hook("p-se", user_prompt()));
+    state.on_hook_payload(&hook(
+        "p-se",
+        HookEventDetail::SessionEnd(crate::hook_events::SessionEndData { reason: None }),
+    ));
+    assert!(!state.session_list()[0].working);
+
+    // turnEnded 未设：activity 恢复 working（区别于 Stop 后的 recap 防护）
+    state.on_hook_payload(&hook("p-se", post_tool_use()));
+    assert!(state.session_list()[0].working);
+}
+
+/// on_hook_payload 返回值 = hook-status 事件载荷：与 SessionStatus 广播同源同值；
+/// 会话未注册返回 None（hook_server 据此跳过事件下发）
+#[tokio::test]
+async fn RemoteState_HookStatus_返回值与SessionStatus广播一致() {
+    let state = RemoteState::new();
+    state.register_pty("p-hs", "claude", "/tmp");
+    let (_conn, mut rx) = setup_conn(&state);
+
+    // 未注册的 pty：None
+    let none = state.on_hook_payload(&hook("unknown", user_prompt()));
+    assert!(none.is_none());
+
+    // userPromptSubmit：状态变化（false,true → true,false）
+    let st = state.on_hook_payload(&hook("p-hs", user_prompt())).unwrap();
+    assert_eq!(st.pty_id, "p-hs");
+    assert!(st.working);
+    assert!(!st.pending);
+    // SessionStatus 广播与返回值同值
+    match recv_timeout(&mut rx).await {
+        ServerMessage::SessionStatus { id, working, pending } => {
+            assert_eq!(id, "p-hs");
+            assert_eq!(working, st.working);
+            assert_eq!(pending, st.pending);
+        }
+        other => panic!("expected SessionStatus, got {:?}", other),
+    }
+
+    // 回合内 activity（working 已 true、pending 已 false）：状态无变化，
+    // 无 SessionStatus 广播，但 hook-status 返回值仍给出当前状态（命名 trigger 不丢）
+    let st2 = state.on_hook_payload(&hook("p-hs", post_tool_use())).unwrap();
+    assert!(st2.working && !st2.pending);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv())
+            .await
+            .is_err(),
+        "状态未变化不应广播 SessionStatus"
+    );
+}
+
+/// rename_session：双端同步的广播中转——经 rpc 分发后以 session-renamed
+/// 事件（payload {id, data} 与桌面 Tauri 事件同构）广播给全部远程连接
+#[tokio::test]
+async fn Rpc_RenameSession_广播sessionRenamed事件() {
+    // emit_event 固定走全局单例（生产路径；测试构建无 EVENT_HOOK，仅广播可验）
+    let (_conn, mut rx) = setup_conn(&crate::remote_state::REMOTE_STATE);
+
+    let mut args = serde_json::Map::new();
+    args.insert("ptyId".to_string(), serde_json::json!("p-rn1"));
+    args.insert("name".to_string(), serde_json::json!("新名字"));
+    crate::rpc_dispatch::dispatch("rename_session", &args).await.unwrap();
+
+    match recv_timeout(&mut rx).await {
+        ServerMessage::RpcEvent { name, payload } => {
+            assert_eq!(name, "session-renamed");
+            assert_eq!(payload["id"], "p-rn1");
+            assert_eq!(payload["data"], "新名字");
+        }
+        other => panic!("expected RpcEvent, got {:?}", other),
+    }
+}
+
+/// state-changed 统一广播：写命令落盘后广播 {id: section, data: revision}，
+/// revision 随每次广播单调递增（前端过滤旧事件的依据）
+#[tokio::test]
+async fn RemoteState_StateChanged_广播半链与revision单调递增() {
+    let state = RemoteState::new();
+    let (_conn, mut rx) = setup_conn(&state);
+
+    state.emit_state_changed(crate::rpc_dispatch::StateSection::Skills);
+    let rev1 = match recv_timeout(&mut rx).await {
+        ServerMessage::RpcEvent { name, payload } => {
+            assert_eq!(name, "state-changed");
+            assert_eq!(payload["id"], "skills");
+            payload["data"].as_str().unwrap().parse::<u64>().unwrap()
+        }
+        other => panic!("expected RpcEvent, got {:?}", other),
+    };
+    assert_eq!(rev1, state.revision());
+
+    state.emit_state_changed(crate::rpc_dispatch::StateSection::Providers);
+    let rev2 = match recv_timeout(&mut rx).await {
+        ServerMessage::RpcEvent { name, payload } => {
+            assert_eq!(name, "state-changed");
+            assert_eq!(payload["id"], "providers");
+            payload["data"].as_str().unwrap().parse::<u64>().unwrap()
+        }
+        other => panic!("expected RpcEvent, got {:?}", other),
+    };
+    assert!(rev2 > rev1, "revision 必须单调递增");
+    assert_eq!(state.revision(), rev2);
+}
+
+/// rename 桌面半链：EVENT_HOOK（lib.rs 设置为 Tauri app.emit）在 rename_session
+/// 分发后必须收到 ("session-renamed", ptyId, name)——与广播半链测试共同覆盖双发。
+/// HOOK_TEST_LOCK：与其他整体 set/clear 全局 hook 的测试串行（防并行覆盖竞态）
+#[tokio::test]
+async fn Rpc_RenameSession_桌面事件半链emitViaHook() {
+    use std::sync::{Arc, Mutex as StdMutex};
+    let _hook_lock = crate::tests::HOOK_TEST_LOCK.lock();
+    let received: Arc<StdMutex<Vec<(String, String, String)>>> = Arc::new(StdMutex::new(Vec::new()));
+    let sink = received.clone();
+    crate::remote_state::set_event_hook(Box::new(move |name, id, data| {
+        sink.lock().unwrap().push((name.to_string(), id.to_string(), data.to_string()));
+    }));
+
+    let mut args = serde_json::Map::new();
+    args.insert("ptyId".to_string(), serde_json::json!("p-rn2"));
+    args.insert("name".to_string(), serde_json::json!("桌面名"));
+    crate::rpc_dispatch::dispatch("rename_session", &args).await.unwrap();
+
+    let got = received.lock().unwrap().clone();
+    assert!(
+        got.iter().any(|(n, i, d)| n == "session-renamed" && i == "p-rn2" && d == "桌面名"),
+        "EVENT_HOOK 未收到 session-renamed，实际: {:?}", got
+    );
+
+    // 清理 hook，避免影响其他测试
+    crate::remote_state::clear_event_hook();
+}
+
+// ==================== 全局控制权（设备互斥）规则矩阵 ====================
+
+/// attach 在无人持有时自动获得控制权并广播 controller-changed
+#[tokio::test]
+async fn Controller_Attach无人时自动持有并广播() {
+    let state = RemoteState::new();
+    state.register_pty("pc1", "claude", "/tmp");
+    let (conn_a, mut rx_a) = setup_conn(&state);
+
+    assert_eq!(state.controller(), None);
+    state.handle_client_message(
+        conn_a,
+        &ClientMessage::SessionAttach { id: "pc1".into(), cols: 80, rows: 24 },
+    );
+    assert_eq!(state.controller(), Some(crate::remote_state::ControllerHolder::Remote(conn_a)));
+    let _ = recv_timeout(&mut rx_a).await; // SessionAttached 先入队
+    assert_eq!(recv_controller_changed(&mut rx_a).await, conn_a.to_string());
+}
+
+/// attach 不能抢占：他人持有时被拒（SessionAttachDenied），不转移控制权
+#[tokio::test]
+async fn Controller_Attach他人持有被拒() {
+    let state = RemoteState::new();
+    state.register_pty("pc2", "claude", "/tmp");
+    let (conn_a, mut rx_a) = setup_conn(&state);
+    let (conn_b, mut rx_b) = setup_conn(&state);
+
+    // A 先持有（B 旁观：收到 taken-over + controller-changed）
+    state.handle_client_message(
+        conn_a,
+        &ClientMessage::SessionAttach { id: "pc2".into(), cols: 80, rows: 24 },
+    );
+    let _ = recv_timeout(&mut rx_a).await; // SessionAttached
+    let _ = recv_controller_changed(&mut rx_a).await;
+    let _ = recv_controller_changed(&mut rx_b).await; // B 消化 A 持有的广播
+
+    // B attach 被拒
+    state.handle_client_message(
+        conn_b,
+        &ClientMessage::SessionAttach { id: "pc2".into(), cols: 80, rows: 24 },
+    );
+    match recv_timeout(&mut rx_b).await {
+        ServerMessage::SessionAttachDenied { id, reason } => {
+            assert_eq!(id, "pc2");
+            assert!(reason.contains("controller"));
+        }
+        other => panic!("expected SessionAttachDenied, got {:?}", other),
+    }
+    assert_eq!(state.controller(), Some(crate::remote_state::ControllerHolder::Remote(conn_a)), "控制权不应被 attach 抢走");
+}
+
+/// takeover：转移控制权 + 剥离旧持有者终端归属（active 归还桌面）+ 广播
+#[tokio::test]
+async fn Controller_Takeover转移并剥离终端归属() {
+    let state = RemoteState::new();
+    state.register_pty("pc3", "claude", "/tmp");
+    let (conn_a, mut rx_a) = setup_conn(&state);
+    let (conn_b, mut rx_b) = setup_conn(&state);
+
+    // A attach 持有终端与控制权（B 旁观收 taken-over + controller-changed）
+    state.handle_client_message(
+        conn_a,
+        &ClientMessage::SessionAttach { id: "pc3".into(), cols: 80, rows: 24 },
+    );
+    let _ = recv_timeout(&mut rx_a).await; // SessionAttached
+    let _ = recv_controller_changed(&mut rx_a).await;
+    let _ = recv_controller_changed(&mut rx_b).await;
+    assert_eq!(state.controller(), Some(crate::remote_state::ControllerHolder::Remote(conn_a)));
+    assert!(state.is_remote_active("pc3"));
+
+    // B takeover：控制权转移 + 终端归还桌面
+    state.handle_client_message(conn_b, &ClientMessage::ControllerTakeover);
+    assert_eq!(state.controller(), Some(crate::remote_state::ControllerHolder::Remote(conn_b)));
+    assert!(!state.is_remote_active("pc3"), "旧持有者终端应被剥离归还桌面");
+
+    // A 收到 controller-changed（不再是自己 → 显示全局遮罩）
+    assert_eq!(recv_controller_changed(&mut rx_a).await, conn_b.to_string());
+    // B 也收到（接管确认 → 解锁 + 全量刷新）
+    assert_eq!(recv_controller_changed(&mut rx_b).await, conn_b.to_string());
+}
+
+/// 持有者断连：控制权释放（广播空 id），终端归还桌面
+#[tokio::test]
+async fn Controller_持有者断连释放() {
+    let state = RemoteState::new();
+    state.register_pty("pc4", "claude", "/tmp");
+    let (conn_a, mut rx_a) = setup_conn(&state);
+    let (conn_b, mut rx_b) = setup_conn(&state);
+
+    state.handle_client_message(
+        conn_a,
+        &ClientMessage::SessionAttach { id: "pc4".into(), cols: 80, rows: 24 },
+    );
+    let _ = recv_timeout(&mut rx_a).await; // SessionAttached
+    let _ = recv_controller_changed(&mut rx_a).await;
+    let _ = recv_controller_changed(&mut rx_b).await; // B 消化 A 持有的广播
+
+    state.remove_conn(conn_a);
+    assert_eq!(state.controller(), None, "断连后控制权应释放");
+    assert!(!state.is_remote_active("pc4"));
+
+    // B 收到释放广播（空 id）
+    match recv_timeout(&mut rx_b).await {
+        ServerMessage::RpcEvent { name, payload } => {
+            assert_eq!(name, "controller-changed");
+            assert_eq!(payload["id"], "");
+        }
+        other => panic!("expected controller-changed release, got {:?}", other),
+    }
+}
+
+/// takeover 后旧持有者的终端输入被拒（controller 不匹配，服务端兜底）
+#[tokio::test]
+async fn Controller_旧持有者输入被拒() {
+    let state = RemoteState::new();
+    state.register_pty("pc5", "claude", "/tmp");
+    let (conn_a, mut rx_a) = setup_conn(&state);
+    let (conn_b, _rx_b) = setup_conn(&state);
+
+    // A attach（终端 + 控制权都是 A）
+    state.handle_client_message(
+        conn_a,
+        &ClientMessage::SessionAttach { id: "pc5".into(), cols: 80, rows: 24 },
+    );
+    let _ = recv_timeout(&mut rx_a).await;
+    let _ = recv_timeout(&mut rx_a).await;
+
+    // B takeover（A 终端被剥离）；此后 A 的输入应被拒（无 panic 即可——
+    // manager 未初始化时不写入，条件判断不通过走 debug log 分支）
+    state.handle_client_message(conn_b, &ClientMessage::ControllerTakeover);
+    state.handle_client_message(
+        conn_a,
+        &ClientMessage::PtyInput { id: "pc5".into(), data: "echo hi".into() },
+    );
+    assert_eq!(state.controller(), Some(crate::remote_state::ControllerHolder::Remote(conn_b)));
+}
+
+/// hello.ok 携带 conn_id / controller / revision（前端遮罩与基线判定依据）
+#[tokio::test]
+async fn Controller_HelloOk携带控制权快照() {
+    let state = RemoteState::new();
+    let (conn_a, mut rx_a) = setup_conn(&state);
+
+    state.handle_client_message(conn_a, &ClientMessage::Hello {
+        ver: 1,
+        client: "web-test".into(),
+        token: "t".into(),
+    });
+    match recv_timeout(&mut rx_a).await {
+        ServerMessage::HelloOk { conn_id, controller, revision, .. } => {
+            assert_eq!(conn_id, conn_a);
+            assert_eq!(controller, None);
+            assert_eq!(revision, 0);
+        }
+        other => panic!("expected HelloOk, got {:?}", other),
+    }
+}
+
+/// 复现手机端 rpc 超时：get_app_config 全链路（handle_rpc 线程 → dispatch →
+///RpcResult 回连接）。页面端该命令 15s 超时，此处验证服务端是否发出应答
+#[tokio::test]
+async fn Rpc_GetAppConfig_全链路应答() {
+    let (_conn, mut rx) = setup_conn(&crate::remote_state::REMOTE_STATE);
+    crate::rpc_dispatch::handle_rpc(
+        _conn,
+        4242,
+        "get_app_config",
+        &serde_json::json!({}),
+    );
+    let msg = loop {
+        match recv_timeout(&mut rx).await {
+            m @ ServerMessage::RpcResult { .. } => break m,
+            // 全局实例上并行测试的广播可能先入队，跳过
+            ServerMessage::RpcEvent { .. } => continue,
+            other => panic!("expected RpcResult, got {:?}", other),
+        }
+    };
+    if let ServerMessage::RpcResult { id, ok, .. } = msg {
+        assert_eq!(id, 4242);
+        assert!(ok, "get_app_config 应成功");
+    }
+}
+
+/// update_app_config 写命令全链路 + 成功后自动持有 controller（复现接管风暴源头）
+#[tokio::test]
+async fn Rpc_UpdateAppConfig_写命令自动持有() {
+    // dispatch 走全局 REMOTE_STATE 的 broadcast；持有逻辑在 handle_rpc 走全局，
+    // 因此在全局实例上验证（先记录原 controller 以便还原）
+    let (conn, mut rx) = setup_conn(&crate::remote_state::REMOTE_STATE);
+    let before = crate::remote_state::REMOTE_STATE.controller();
+
+    crate::rpc_dispatch::handle_rpc(
+        conn,
+        4243,
+        "update_app_config",
+        &serde_json::json!({ "updates": { "theme": "dark" } }),
+    );
+    // 广播（state-changed / controller-changed）先于 RpcResult 入队，循环收到为止
+    let result = loop {
+        match recv_timeout(&mut rx).await {
+            ServerMessage::RpcResult { id, ok, error, .. } => {
+                assert_eq!(id, 4243);
+                assert!(ok, "update_app_config 应成功: {:?}", error);
+                break;
+            }
+            ServerMessage::RpcEvent { .. } => continue,
+            other => panic!("expected RpcResult, got {:?}", other),
+        }
+    };
+    let _ = result;
+    // 成功后无人持有时自动成为 controller
+    if before.is_none() {
+        assert_eq!(crate::remote_state::REMOTE_STATE.controller(), Some(crate::remote_state::ControllerHolder::Remote(conn)));
+    }
+    // 还原：移除测试连接（顺带释放其可能持有的 controller），避免污染其他测试
+    crate::remote_state::REMOTE_STATE.remove_conn(conn);
+}
+
+/// 桌面显式接管（controller_takeover command）：桌面获得控制权 + 剥离远程终端
+/// + 广播（hello.ok 视角 controller=Some(0)=桌面；远程写操作被拒）
+#[tokio::test]
+async fn Controller_桌面接管获得控制权并拒绝远程写() {
+    let state = RemoteState::new();
+    state.register_pty("pd1", "claude", "/tmp");
+    let (conn_a, mut rx_a) = setup_conn(&state);
+
+    // 手机 attach 持有
+    state.handle_client_message(
+        conn_a,
+        &ClientMessage::SessionAttach { id: "pd1".into(), cols: 80, rows: 24 },
+    );
+    let _ = recv_timeout(&mut rx_a).await; // attached
+    let _ = recv_controller_changed(&mut rx_a).await;
+    assert!(state.is_remote_active("pd1"));
+
+    // 桌面接管：控制权归桌面 + 远程终端剥离
+    state.desktop_takeover();
+    assert_eq!(state.controller(), Some(crate::remote_state::ControllerHolder::Desktop));
+    assert!(!state.is_remote_active("pd1"));
+    // 广播 id 标签为 "desktop"
+    assert_eq!(recv_controller_changed(&mut rx_a).await, "desktop");
+
+    // 桌面持有期间远程写操作被拒
+    assert!(state.controller_gate(conn_a).is_err());
+
+    // 幂等：再次桌面接管不重复广播（无新消息到达）
+    state.desktop_takeover();
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(150), rx_a.recv())
+            .await
+            .is_err(),
+        "重复接管不应再广播"
+    );
+}
+
+/// 桌面 claim（终端接管回来）同时获得全局控制权
+#[tokio::test]
+async fn Controller_桌面claim同时获得控制权() {
+    let state = RemoteState::new();
+    state.register_pty("pd2", "claude", "/tmp");
+    let (conn_a, mut rx_a) = setup_conn(&state);
+
+    state.handle_client_message(
+        conn_a,
+        &ClientMessage::SessionAttach { id: "pd2".into(), cols: 80, rows: 24 },
+    );
+    let _ = recv_timeout(&mut rx_a).await; // attached
+    let _ = recv_controller_changed(&mut rx_a).await;
+
+    state.claim("pd2");
+    assert_eq!(state.controller(), Some(crate::remote_state::ControllerHolder::Desktop));
+    // claim 的 reclaimed 走全局 emit_event（独立实例收不到），controller-changed 走 self
+    assert_eq!(recv_controller_changed(&mut rx_a).await, "desktop");
+}
+
+/// revision 取号与广播入队必须同锁窗口（保序）：跨线程并发 emit_state_changed
+/// 与 controller takeover 时，若取号（bump_revision）与入队（broadcast_event）
+/// 分属两个锁窗口，后取号的事件可能先入队——浏览器端 filterStaleEvent 按
+/// revision 单调过滤，低版本后到即被当旧事件丢弃（遮罩/刷新状态永久丢失）。
+/// 回归：两线程交错广播，同一连接到达序的 revision 必须严格递增
+#[test]
+fn Controller_并发广播到达序revision严格递增() {
+    let state = std::sync::Arc::new(RemoteState::new());
+    let (tx, mut rx) = mpsc::channel(8192);
+    // 只注册一个接收连接（每帧广播对每个连接各入队一份，双连接会成对到达）；
+    // takeover 在两连接 id 间交替（transfer 无幂等检查，每次都触发广播），
+    // conn_b 不注册 channel 也能发消息——广播仍只入队 conn_a 一份
+    let conn_a = crate::remote_state::next_conn_id();
+    let conn_b = crate::remote_state::next_conn_id();
+    state.add_conn(conn_a, tx);
+
+    const N: usize = 2000;
+    let s1 = state.clone();
+    let writer = std::thread::spawn(move || {
+        for _ in 0..N {
+            s1.emit_state_changed(crate::rpc_dispatch::StateSection::Config);
+        }
+    });
+    let s2 = state.clone();
+    let taker = std::thread::spawn(move || {
+        for i in 0..N {
+            let who = if i % 2 == 0 { conn_a } else { conn_b };
+            s2.handle_client_message(who, &ClientMessage::ControllerTakeover);
+        }
+    });
+
+    writer.join().unwrap();
+    taker.join().unwrap();
+
+    let mut last: u64 = 0;
+    let mut count = 0;
+    while let Ok(msg) = rx.try_recv() {
+        if let ServerMessage::RpcEvent { name, payload } = msg {
+            if name == "state-changed" || name == "controller-changed" {
+                let rev: u64 = payload["data"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0);
+                assert!(
+                    rev > last,
+                    "到达序 revision 回退：{}({}) 后于 {}",
+                    rev,
+                    name,
+                    last
+                );
+                last = rev;
+                count += 1;
+            }
+        }
+    }
+    // 2N 次广播、容量充足：丢帧容忍，但不应大面积缺失
+    assert!(count > N, "广播帧过少：{}", count);
 }

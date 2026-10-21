@@ -41,6 +41,7 @@ import type {
   HomeData,
   CheckResult,
   HookEventPayload,
+  HookStatusPayload,
   RemoteStatus,
 } from '@/types';
 
@@ -114,6 +115,20 @@ export const ptyClaim = async (id: string, cols?: number, rows?: number): Promis
   return transport.sessionClaim(id, cols, rows);
 };
 
+/** 桌面端显式接管全局控制权（设备互斥遮罩「接管」按钮；浏览器端走
+ * controller.takeover 协议消息，不经此 command） */
+export const controllerTakeover = async (): Promise<void> => {
+  if (isTauriEnv) {
+    await invoke<void>('controller_takeover');
+  } else {
+    transport.sendClient({ type: 'controller.takeover' });
+  }
+};
+
+/** 当前全局控制权持有者（''=无人；'desktop'=桌面；数字串=远程连接 id）。
+ * 桌面 UI 启动/重载时错过历史 controller-changed 事件，挂载时查询补初始快照 */
+export const controllerStatus = (): Promise<string> => invoke<string>('controller_status');
+
 // ============================================
 // Event Listeners (Tauri events)
 // ============================================
@@ -136,9 +151,33 @@ export const onSessionReclaimed = (callback: (payload: { id: string }) => void):
 export const onRemoteSessionCreated = (callback: (payload: { id: string; data: string }) => void): Promise<Unlisten> =>
   listen<{ id: string; data: string }>('remote-session-created', callback);
 
+/** 远程（手机）关闭会话事件（payload 为 { id: ptyId }），桌面关闭对应 Tab（用户显式关闭语义） */
+export const onRemoteSessionClosed = (callback: (payload: { id: string }) => void): Promise<Unlisten> =>
+  listen<{ id: string }>('remote-session-closed', callback);
+
+/** 会话重命名双端同步（广播中转 command；两端收 session-renamed 应用同一结果） */
+export const renameSession = (ptyId: string, name: string): Promise<void> =>
+  invoke<void>('rename_session', { ptyId, name });
+
+/** 会话重命名同步事件（payload 为 { id: ptyId, data: 新名字 }），按 ptyId 应用 updateTabName */
+export const onSessionRenamed = (callback: (payload: { id: string; data: string }) => void): Promise<Unlisten> =>
+  listen<{ id: string; data: string }>('session-renamed', callback);
+
+/**
+ * 写命令统一状态广播（payload 为 { id: section, data: revision }）。
+ * 任意端写操作（开关/Provider/配置）落盘后全端收到，按 section 权威刷新；
+ * revision 单调递增，旧事件（≤ 已应用版本）应被丢弃。
+ */
+export const onStateChanged = (callback: (payload: { id: string; data: string }) => void): Promise<Unlisten> =>
+  listen<{ id: string; data: string }>('state-changed', callback);
+
 // Hook 监控事件
 export const onHookEvent = (callback: (payload: HookEventPayload) => void): Promise<Unlisten> =>
   listen<HookEventPayload>('hook-event', callback);
+
+/** hook 状态事件（Rust 状态机单点计算的 working/pending，前端唯一状态来源） */
+export const onHookStatus = (callback: (payload: HookStatusPayload) => void): Promise<Unlisten> =>
+  listen<HookStatusPayload>('hook-status', callback);
 
 // Menu events
 export const onMenuSettings = (callback: () => void): Promise<Unlisten> =>

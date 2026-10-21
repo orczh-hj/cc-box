@@ -769,6 +769,38 @@ fn SetSkillEnabled_Disable_NotFound_001() {
     assert!(r.is_err());
 }
 
+// 目录被占用判定：Windows ACCESS_DENIED(5)/SHARING_VIOLATION(32) 为占用，
+// 其余（跨卷 17/18、不存在等）不算（决定 disable 失败时的提示文案）
+#[test]
+fn SetSkillEnabled_BusyErrorClass_001() {
+    let busy5 = std::io::Error::from_raw_os_error(5);
+    let busy32 = std::io::Error::from_raw_os_error(32);
+    let crossvol = std::io::Error::from_raw_os_error(17);
+    let notfound = std::io::Error::from_raw_os_error(2);
+    assert!(crate::store::is_dir_busy_error(&busy5));
+    assert!(crate::store::is_dir_busy_error(&busy32));
+    assert!(!crate::store::is_dir_busy_error(&crossvol));
+    assert!(!crate::store::is_dir_busy_error(&notfound));
+}
+
+// rename 失败的错误消息必须带底层 os 原因（disabled 父路径被文件占据 →
+// 路径非法）——不带原因时远程端只见 "Failed to disable skill 'x'" 无法排查
+#[test]
+fn SetSkillEnabled_Disable_ErrorIncludesCause_001() {
+    let active = tempfile::tempdir().unwrap();
+    // disabled 基路径是一个文件：dst = <file>/deploy 非法 → rename 失败
+    let disabled_file = active.path().join("not-a-dir");
+    std::fs::write(&disabled_file, "x").unwrap();
+    let skill_dir = active.path().join("deploy");
+    std::fs::create_dir(&skill_dir).unwrap();
+
+    let err = set_skill_enabled_in(active.path(), &disabled_file, "deploy", false)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("deploy"), "消息应含 skill 名: {}", err);
+    assert!(err.contains("os error"), "消息应含底层原因: {}", err);
+}
+
 // 重复禁用（disabled 已存在）→ Err
 #[test]
 fn SetSkillEnabled_Disable_AlreadyDisabled_001() {

@@ -39,11 +39,27 @@ export default {
   remoteRelayNotConfigured: '中继未连接，正在自动重试…',
   remoteHostedElsewhere: '远程服务由本机另一 CC-Box 实例提供，扫码连接的是该实例',
 
+  // 全局控制权遮罩（设备互斥：其他设备操作中）
+  controllerMaskTitle: '被其他设备控制中',
+  controllerMaskHint: '同一时间仅一个设备可操作，接管后继续',
+  controllerTakeover: '接管',
+
   // 快捷键工具条（手机断点）
   quickKeyEsc: '取消/Esc',
   quickKeyMode: '切换工作模式 (Shift+Tab)',
   quickKeyNewline: '插入换行不提交 (Ctrl+J)',
-  quickKeyInterrupt: '中断 (Ctrl+C)',
+  quickKeyClearLine: '清空当前输入行 (Ctrl+U)',
+  quickKeySelectCopy: '选择复制',
+
+  // 终端复制阅读器（手机端复制部分内容：快照 + 系统原生长按选择手柄）
+  selectModeHint: '长按选择文本，用系统手柄调整范围',
+  selectModeCopy: '复制选中',
+  selectModeCopied: '已复制',
+  selectModeExit: '退出',
+  copyReaderSmart: '智能',
+  copyReaderRaw: '原始',
+  copyReaderCopyAll: '复制全部',
+  copyReaderTruncated: '内容过长，仅显示最近部分',
 
   // 目录选择器（浏览器远程端添加项目）
   dirPickerTitle: '选择电脑上的项目文件夹',

@@ -102,11 +102,13 @@ async fn handle_hook(
         .to_string();
     log::info!("[hook-server] received: {} pty={}", event_name, pty_id.as_deref().unwrap_or("?"));
 
-    // 建立 session_id ↔ pty_id 映射
+    // 建立 session_id ↔ pty_id 映射；同步记入远程会话表（手机端
+    // sessions.list 下发，防止从历史恢复时二次 spawn 同一对话）
     if let Some(ref sid) = event.get("session_id").and_then(|v| v.as_str()).map(|s| s.to_string()) {
         if let Some(ref pty) = pty_id {
             let mut sessions = SESSIONS.lock().await;
             sessions.insert(sid.to_string(), pty.clone());
+            crate::remote_state::REMOTE_STATE.set_session_id(pty, sid);
         }
     }
 
@@ -124,8 +126,21 @@ async fn handle_hook(
         crate::events::emit_all(&app_handle, crate::events::names::HOOK_EVENT, payload_json);
     }
 
-    // 远程侧状态机消费（working/pending 推送）
-    crate::remote_state::REMOTE_STATE.on_hook_payload(&payload);
+    // 状态机单点消费（Rust 唯一实现）：计算 working/pending 并以 hook-status
+    // 事件双端下发（桌面/手机前端的 Tab 状态唯一来源，不再各自复刻状态机；
+    // SessionStatus 手机列表页广播由 on_hook_payload 内部按状态变化触发）
+    if let Some(status) = crate::remote_state::REMOTE_STATE.on_hook_payload(&payload) {
+        let trigger = serde_json::to_value(&payload.detail).unwrap_or(serde_json::Value::Null);
+        let status_json = serde_json::json!({
+            "ptyId": status.pty_id,
+            "working": status.working,
+            "pending": status.pending,
+            "sessionId": payload.session_id,
+            // trigger 供前端做 UI 决策（userPromptSubmit 自动命名 / sessionStart 分配 sessionId）
+            "trigger": trigger,
+        });
+        crate::events::emit_all(&app_handle, crate::events::names::HOOK_STATUS, status_json);
+    }
 
     Json(json!({}))
 }

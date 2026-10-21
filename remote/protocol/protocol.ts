@@ -13,7 +13,7 @@ export type ClientMessage =
   | { type: 'hello'; ver: number; client: string; token: string }
   | { type: 'sessions.list' }
   | { type: 'projects.list' }
-  | { type: 'session.create'; path: string; sessionId?: string; skipPermissions?: boolean; customArgs?: string }
+  | { type: 'session.create'; path: string; sessionId?: string; skipPermissions?: boolean; customArgs?: string; sessionName?: string }
   | { type: 'session.kill'; id: string }
   | { type: 'sessions.history'; path: string }
   | { type: 'session.subscribe'; id: string }
@@ -24,6 +24,8 @@ export type ClientMessage =
   | { type: 'pty.resize'; id: string; cols: number; rows: number }
   | { type: 'ping' }
   | { type: 'rpc.call'; id: number; cmd: string; args: Record<string, unknown> }
+  /** 抢占全局控制权（设备互斥：他端持有时唯一获取方式；attach 不能抢占） */
+  | { type: 'controller.takeover' }
 
 /** 远程可见的会话信息 */
 export interface RemoteSession {
@@ -33,6 +35,8 @@ export interface RemoteSession {
   cwd: string
   working: boolean
   pending: boolean
+  /** Claude 会话 id（hook SessionStart 建立；shell 会话与旧版桌面端缺失） */
+  sessionId?: string
 }
 
 /** 远程可见的项目（新建会话用） */
@@ -50,9 +54,19 @@ export interface RemoteHistorySession {
 
 /** 桌面 → 手机消息 */
 export type ServerMessage =
-  | { type: 'hello.ok'; ver: number; deviceName: string }
+  | {
+      type: 'hello.ok'
+      ver: number
+      deviceName: string
+      /** 本连接唯一标识（前端自判"当前控制者是不是自己"）；旧桌面端缺省 0 */
+      connId: number
+      /** 当前全局控制者（null=无人持有；0=桌面持有——conn_id 从 1 起，0 保留）；旧桌面端缺省 null */
+      controller: number | null
+      /** 服务端状态版本基线；旧桌面端缺省 0 */
+      revision: number
+    }
   | { type: 'hello.error'; error: string }
-  | { type: 'sessions'; list: RemoteSession[] }
+  | { type: 'sessions'; list: RemoteSession[]; revision: number }
   | { type: 'projects'; list: RemoteProject[] }
   | { type: 'session.created'; id: string; path: string }
   | { type: 'session.create.failed'; error: string }
@@ -60,6 +74,8 @@ export type ServerMessage =
   | { type: 'session.subscribed'; id: string; tail: string }
   | { type: 'session.unsubscribed'; id: string }
   | { type: 'session.attached'; id: string; cols: number; rows: number; tail: string }
+  /** attach 被拒：全局控制权被其他设备持有（先 controller.takeover 接管） */
+  | { type: 'session.attach.denied'; id: string; reason: string }
   | { type: 'session.detached'; id: string; reason: string }
   | { type: 'session.status'; id: string; working: boolean; pending: boolean }
   | { type: 'session.exit'; id: string }
@@ -102,12 +118,14 @@ export function parseClientMessage(raw: unknown): ClientMessage | null {
         const sessionId = raw.sessionId
         const skipPermissions = raw.skipPermissions
         const customArgs = raw.customArgs
+        const sessionName = raw.sessionName
         return {
           type: 'session.create',
           path: raw.path,
           ...(str(sessionId) ? { sessionId } : {}),
           ...(typeof skipPermissions === 'boolean' ? { skipPermissions } : {}),
           ...(str(customArgs) ? { customArgs } : {}),
+          ...(str(sessionName) ? { sessionName } : {}),
         }
       }
       return null
@@ -151,6 +169,8 @@ export function parseClientMessage(raw: unknown): ClientMessage | null {
         }
       }
       return null
+    case 'controller.takeover':
+      return { type: 'controller.takeover' }
     default:
       return null
   }
@@ -162,7 +182,14 @@ export function parseServerMessage(raw: unknown): ServerMessage | null {
   switch (raw.type) {
     case 'hello.ok':
       if (num(raw.ver) && str(raw.deviceName)) {
-        return { type: 'hello.ok', ver: raw.ver, deviceName: raw.deviceName }
+        return {
+          type: 'hello.ok',
+          ver: raw.ver,
+          deviceName: raw.deviceName,
+          connId: num(raw.connId) ? raw.connId : 0,
+          controller: num(raw.controller) ? raw.controller : null,
+          revision: num(raw.revision) ? raw.revision : 0,
+        }
       }
       return null
     case 'hello.error':
@@ -174,7 +201,8 @@ export function parseServerMessage(raw: unknown): ServerMessage | null {
         for (const item of raw.list) {
           if (
             isObject(item) && str(item.id) && str(item.type) &&
-            str(item.cwd) && bool(item.working) && bool(item.pending)
+            str(item.cwd) && bool(item.working) && bool(item.pending) &&
+            (item.sessionId === undefined || str(item.sessionId))
           ) {
             list.push({
               id: item.id,
@@ -182,12 +210,13 @@ export function parseServerMessage(raw: unknown): ServerMessage | null {
               cwd: item.cwd,
               working: item.working,
               pending: item.pending,
+              ...(item.sessionId !== undefined ? { sessionId: item.sessionId } : {}),
             })
           } else {
             return null
           }
         }
-        return { type: 'sessions', list }
+        return { type: 'sessions', list, revision: num(raw.revision) ? raw.revision : 0 }
       }
       return null
     case 'projects':
@@ -234,6 +263,11 @@ export function parseServerMessage(raw: unknown): ServerMessage | null {
     case 'session.attached':
       if (str(raw.id) && num(raw.cols) && num(raw.rows) && str(raw.tail)) {
         return { type: 'session.attached', id: raw.id, cols: raw.cols, rows: raw.rows, tail: raw.tail }
+      }
+      return null
+    case 'session.attach.denied':
+      if (str(raw.id) && str(raw.reason)) {
+        return { type: 'session.attach.denied', id: raw.id, reason: raw.reason }
       }
       return null
     case 'session.detached':

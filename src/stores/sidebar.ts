@@ -181,34 +181,12 @@ export const useSidebarStore = defineStore('sidebar', () => {
     if (idx >= 0) plugins.value[idx] = { ...plugins.value[idx], enabled }
     try {
       await setPluginEnabled(pluginId, enabled)
-      // 禁用/启用 plugin 影响其 skills/agents/mcp 是否展示，后端已按 plugin.enabled 过滤。
-      // 这里乐观更新只动了 plugins，需 reload 子项让侧边栏立即同步（不阻塞 toggle 主流程）。
-      if (loadedCwd.value) {
-        await Promise.all([
-          loadSkills(loadedCwd.value),
-          loadAgents(loadedCwd.value),
-          loadMcpServers(loadedCwd.value),
-        ])
-      }
+      // plugin 开关影响其 skills/agents/mcp 是否展示——子项刷新统一由
+      // state-changed 回环事件驱动（App.vue 订阅 → 状态中心 sections.ts），不再手动 reload
     } catch (err) {
       if (idx >= 0 && old) plugins.value[idx] = old
       throw err
     }
-  }
-
-  // 强制重新加载所有 sidebar 数据（多窗口同步：他窗口修改后，本窗口聚焦时调用）
-  // 带 2 秒节流，避免焦点抖动导致频繁刷新
-  async function reloadAll(cwd: string, force = false) {
-    const now = Date.now()
-    if (!force && now - lastReloadAt.value < 2000) return
-    lastReloadAt.value = now
-
-    await Promise.all([
-      loadSkills(cwd),
-      loadAgents(cwd),
-      loadMcpServers(cwd),
-      loadPlugins(cwd),
-    ])
   }
 
   // 切换面板

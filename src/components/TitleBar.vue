@@ -88,6 +88,10 @@ onUnmounted(() => {
   background: var(--bg-secondary);
   user-select: none;
   -webkit-user-select: none;
+  /* 高于全局控制权遮罩（ControllerMask z-index 2000）：被接管期间窗口
+     拖动/最小化/关闭仍须可操作（窗口控制不属于远程互斥范围） */
+  position: relative;
+  z-index: 2100;
 }
 
 .win-title-left {

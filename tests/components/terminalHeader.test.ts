@@ -24,7 +24,7 @@ import TerminalHeader from '@/components/TerminalHeader.vue'
 import { useSessionStore } from '@/stores/session'
 
 function mountHeader() {
-  return mount(TerminalHeader, { props: { projectName: 'demo-proj' } })
+  return mount(TerminalHeader)
 }
 
 /** 活跃 Tab 名为「会话A」的公共前置 */
@@ -33,7 +33,7 @@ function seedActiveTab() {
   sessionStore.tabs.set('t1', {
     tabId: 't1', projectPath: 'D:/demo', ptyId: null, sessionId: null,
     name: '会话A', status: 'running', createdAt: 0, lastActiveAt: 0,
-    working: false, pending: false, isResume: false,
+    working: false, pending: false, isResume: false, sessionIds: [],
   })
   sessionStore.activeTabId = 't1'
 }
@@ -52,11 +52,11 @@ describe('TerminalHeader（项目名显示 + 浏览器模式窗口按钮隐藏�
     expect(wrapper.find('.header-title').text()).toBe('会话A')
   })
 
-  // 浏览器远程端：项目名与会话名同屏（无原生标题栏，header 是唯一展示位）
+  // 浏览器远程端：统一只显示会话名（项目名由 document.title 承载，header 不再拼接）
   it('Header_BrowserShowsProject_004', () => {
     mockEnv.isTauri = false
     const wrapper = mountHeader()
-    expect(wrapper.find('.header-project').text()).toBe('demo-proj')
+    expect(wrapper.find('.header-project').exists()).toBe(false)
     expect(wrapper.find('.header-title').text()).toBe('会话A')
   })
 

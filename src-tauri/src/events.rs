@@ -15,10 +15,21 @@
 /// 事件名常量（前端 listen 字符串与此处必须一致）
 pub mod names {
     pub const HOOK_EVENT: &str = "hook-event";
+    /// hook 状态机单点计算的 working/pending（Rust apply_hook_event 唯一实现，
+    /// 桌面/手机前端仅消费此事件应用状态，不再各自复刻状态机）
+    pub const HOOK_STATUS: &str = "hook-status";
     pub const SESSION_TAKEN_OVER: &str = "session-taken-over";
     pub const SESSION_RECLAIMED: &str = "session-reclaimed";
     pub const REMOTE_SESSION_CREATED: &str = "remote-session-created";
+    /// 用户显式关闭会话（桌面 pty_kill / 远程 session.kill 双路径统一广播）：
+    /// 各端联动删 Tab。与自然退出（pty-exit 只置 stopped 保留 Tab）相区分
+    pub const REMOTE_SESSION_CLOSED: &str = "remote-session-closed";
+    pub const SESSION_RENAMED: &str = "session-renamed";
     pub const DOWNLOAD_PROGRESS: &str = "download-progress";
+    /// 写命令统一状态广播（payload {id: section, data: revision}；全端按 section 刷新）
+    pub const STATE_CHANGED: &str = "state-changed";
+    /// 全局控制权变更（payload {id: connId 或空串, data: revision}；远程端显示/解除全局遮罩）
+    pub const CONTROLLER_CHANGED: &str = "controller-changed";
 }
 
 /// 控制类事件统一出口：Tauri emit + 远程 rpc.event 广播

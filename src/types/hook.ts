@@ -121,6 +121,16 @@ export interface HookEventPayload {
   detail: HookEventDetail
 }
 
+/** hook-status 事件 payload（Rust 状态机单点计算，前端 Tab working/pending 唯一来源） */
+export interface HookStatusPayload {
+  ptyId: string
+  working: boolean
+  pending: boolean
+  sessionId: string | null
+  /** 触发本次计算的事件（供前端 UI 决策：自动命名 / sessionId 分配） */
+  trigger: HookEventDetail
+}
+
 // ---- 前端聚合状态 ----
 
 /** 每个会话的聚合 hook 状态 */

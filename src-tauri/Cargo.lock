@@ -404,12 +404,14 @@ dependencies = [
 
 [[package]]
 name = "cc-box"
-version = "0.13.10"
+version = "0.14.0"
 dependencies = [
  "anyhow",
  "arc-swap",
  "axum",
+ "cc-box-macros",
  "cc-box-remote-protocol",
+ "cc-box-web-assets",
  "chrono",
  "dirs 5.0.1",
  "encoding_rs",
@@ -421,7 +423,6 @@ dependencies = [
  "portable-pty",
  "reqwest 0.11.27",
  "rusqlite",
- "rust-embed",
  "serde",
  "serde_json",
  "sys-locale",
@@ -442,11 +443,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "cc-box-macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
+]
+
+[[package]]
 name = "cc-box-remote-protocol"
 version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "cc-box-web-assets"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "rust-embed",
+ "tower",
+ "tower-http 0.5.2",
 ]
 
 [[package]]
@@ -1774,6 +1794,12 @@ dependencies = [
  "http-body 1.0.1",
  "pin-project-lite",
 ]
+
+[[package]]
+name = "http-range-header"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9171a2ea8a68358193d15dd5d70c1c10a2afc3e7e4c5bc92bc9f025cebd7359c"
 
 [[package]]
 name = "httparse"
@@ -3600,7 +3626,7 @@ dependencies = [
  "tokio-rustls",
  "tokio-util",
  "tower",
- "tower-http",
+ "tower-http 0.6.8",
  "tower-service",
  "url",
  "wasm-bindgen",
@@ -5307,6 +5333,31 @@ dependencies = [
  "pin-project-lite",
  "sync_wrapper 1.0.2",
  "tokio",
+ "tower-layer",
+ "tower-service",
+ "tracing",
+]
+
+[[package]]
+name = "tower-http"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1e9cd434a998747dd2c4276bc96ee2e0c7a2eadf3cae88e52be55a05fa9053f5"
+dependencies = [
+ "bitflags 2.11.1",
+ "bytes",
+ "futures-util",
+ "http 1.4.0",
+ "http-body 1.0.1",
+ "http-body-util",
+ "http-range-header",
+ "httpdate",
+ "mime",
+ "mime_guess",
+ "percent-encoding",
+ "pin-project-lite",
+ "tokio",
+ "tokio-util",
  "tower-layer",
  "tower-service",
  "tracing",

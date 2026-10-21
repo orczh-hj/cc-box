@@ -1,6 +1,6 @@
 [package]
 name = "cc-box"
-version = "0.14.0"
+version = "0.15.0"
 description = "Claude Code Desktop GUI (Tauri) - Multi-terminal manager for Claude Code power users"
 authors = ["orczh <orczh_hj@163.com>"]
 license = "MIT"
@@ -37,8 +37,9 @@ sys-locale = "0.3"
 hostname = "0.3"
 axum = { version = "0.7", features = ["ws"] }
 tower = "0.5"
-rust-embed = "8"
 cc-box-remote-protocol = { path = "../remote/protocol" }
+cc-box-web-assets = { path = "../remote/web-assets" }
+cc-box-macros = { path = "macros" }
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots", "connect"] }
 rusqlite = { version = "0.31", features = ["bundled"], optional = true }
 

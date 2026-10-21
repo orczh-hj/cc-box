@@ -1,9 +1,8 @@
 <template>
   <header class="terminal-header">
     <div class="title-area">
-      <!-- 项目名仅浏览器远程端显示（无原生标题栏，header 是唯一展示位）；
-           软件端（Tauri）只显示会话名 -->
-      <span v-if="!isTauriEnv && projectName" class="header-project">{{ projectName }}</span>
+      <!-- 统一只显示会话名：项目名由 document.title 承载（浏览器端标题跟随
+           项目，桌面端 Tauri 窗口标题自管），header 不再重复拼接 -->
       <span v-if="sessionName" class="header-title">{{ sessionName }}</span>
     </div>
     <div class="header-right">
@@ -38,10 +37,6 @@ import { isTauriEnv } from '@/api/platform'
 
 const { t } = useI18n()
 
-defineProps<{
-  projectName: string
-}>()
-
 defineEmits<{
   back: []
   sidebar: []
@@ -72,17 +67,6 @@ const sessionName = computed(() => sessionStore.activeTab?.name || '')
   align-items: baseline;
   justify-content: center;
   gap: 8px;
-}
-
-/* 项目名：次要样式，与会话名区分层级 */
-.header-project {
-  font-size: 12px;
-  color: var(--text-tertiary);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  flex-shrink: 1;
-  min-width: 0;
 }
 
 .header-title {

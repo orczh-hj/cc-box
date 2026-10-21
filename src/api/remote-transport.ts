@@ -45,6 +45,13 @@ class RemoteTransportImpl implements Transport {
   private nextRpcId = 1
   private pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>()
 
+  /** 本连接标识与当前控制者标签（hello.ok 下发；设备互斥遮罩判定依据） */
+  private _connId: number | null = null
+  /** 控制者标签：''=无人持有、'desktop'=桌面、数字串=远程连接 id */
+  private _controllerLabel = ''
+  /** 已应用的状态版本（事件单调过滤：旧事件不覆盖新状态） */
+  private appliedRevision = 0
+
   private eventHandlers = new Map<string, Set<EventHandler>>()
   private serverMessageHandlers = new Set<(msg: ServerMessage) => void>()
 
@@ -63,6 +70,45 @@ class RemoteTransportImpl implements Transport {
     return this._connState
   }
   private _connState: RemoteConnState = 'closed'
+
+  /** 本连接唯一标识（hello.ok 下发；null = 旧桌面端未下发） */
+  get connId(): number | null {
+    return this._connId
+  }
+
+  /** 当前控制者标签（''=无人持有、'desktop'=桌面、数字串=远程连接 id） */
+  get controllerLabel(): string {
+    return this._controllerLabel
+  }
+
+  /** 状态版本过滤：state-changed/controller-changed 携带 revision，
+   * 不大于已应用版本的事件（旧事件/回环重复）直接丢弃，防止覆盖新状态。
+   * 版本跳变（> 已应用+1，中间事件可能丢失——如全量应答基线先于在途事件
+   * 入队）时不丢弃，并广播 state-resync-needed 让上层权威重拉全量兜底 */
+  private filterStaleEvent(name: string, payload: unknown): boolean {
+    if (name !== 'state-changed' && name !== 'controller-changed') return true
+    const rev = Number((payload as { data?: string })?.data ?? 0)
+    if (!Number.isFinite(rev) || rev === 0) return true // 旧桌面端无版本：不过滤
+    if (rev <= this.appliedRevision) return false
+    const gap = rev > this.appliedRevision + 1
+    this.appliedRevision = rev
+    if (gap) {
+      this.dispatchEvent('state-resync-needed', {})
+    }
+    return true
+  }
+
+  /** 应用控制者变更：更新内部状态并分发；接管确认（变为自己）时按
+   * "重连"语义触发全量重同步（App 重拉 sessions.list、终端重 attach） */
+  private applyControllerChanged(payload: unknown): void {
+    const id = String((payload as { id?: string })?.id ?? '')
+    this._controllerLabel = id
+    this.dispatchEvent('controller-changed', { id })
+    if (this._connId != null && id === String(this._connId)) {
+      // 接管确认 = 以服务端状态为准的全量刷新（与重连完全同构）
+      this.dispatchEvent('remote-connected', {})
+    }
+  }
 
   /** 入口：解析 URL（#token= / #pair=）或 localStorage，发起连接 */
   async boot(): Promise<void> {
@@ -172,9 +218,16 @@ class RemoteTransportImpl implements Transport {
         this.retry = 0
         this.setConnState('connected')
         this.startPing()
+        this._connId = msg.connId
+        // controller 语义：null=无人持有；0=桌面持有；>0=远程连接 id
+        this._controllerLabel =
+          msg.controller == null ? '' : msg.controller === 0 ? 'desktop' : String(msg.controller)
+        this.appliedRevision = msg.revision
         // 连接/重连成功：服务端订阅集按连接划分，重连 = 全部 attach 失效，
         // 广播本地事件让会话层重拉列表并重新 attach 当前 Tab
         this.dispatchEvent('remote-connected', {})
+        // 控制权初始快照（其他设备持有时本端直接进入全局遮罩）
+        this.dispatchEvent('controller-changed', { id: this._controllerLabel })
         return
       }
       if (msg.type === 'hello.error') {
@@ -197,11 +250,20 @@ class RemoteTransportImpl implements Transport {
         return
       }
       if (msg.type === 'rpc.event') {
-        this.dispatchEvent(msg.name, msg.payload)
+        if (msg.name === 'controller-changed') {
+          if (this.filterStaleEvent(msg.name, msg.payload)) {
+            this.applyControllerChanged(msg.payload)
+          }
+          return
+        }
+        if (this.filterStaleEvent(msg.name, msg.payload)) {
+          this.dispatchEvent(msg.name, msg.payload)
+        }
         return
       }
       // 运行中会话列表 → 本地事件（App.vue 消费：刷新/新设备后的 Tabs 恢复入口）
       if (msg.type === 'sessions') {
+        this.appliedRevision = Math.max(this.appliedRevision, msg.revision)
         this.dispatchEvent('remote-sessions', msg.list)
         return
       }
@@ -358,6 +420,7 @@ class RemoteTransportImpl implements Transport {
           type: 'session.create',
           path: opts.cwd,
           ...(opts.resume ? { sessionId: opts.resume } : {}),
+          ...(opts.resumeName ? { sessionName: opts.resumeName } : {}),
           ...(opts.skipPermissions ? { skipPermissions: true } : {}),
           ...(opts.customArgs?.trim() ? { customArgs: opts.customArgs.trim() } : {}),
         })

@@ -89,13 +89,16 @@ export const useAppStore = defineStore('app', () => {
       language.value = config.language || (await detectSystemLocale())
       i18n.global.locale.value = language.value
 
-      // 加载环境变量（首次使用默认值）
-      claudeEnvVars.value = Object.keys(config.claudeEnvVars ?? {}).length > 0
-        ? config.claudeEnvVars!
-        : { ...DEFAULT_CLAUDE_ENV_VARS }
-
-      // 启动时持久化到 cc-box config
-      await doSyncEnv()
+      // 加载环境变量：非首次纯读；仅配置为空（首次使用）时持久化默认值。
+      // 不能每次加载都写回（doSyncEnv）——写命令会广播 state-changed(config)，
+      // 各端事件驱动刷新又调 loadAppConfig，形成 写→广播→读→写 死循环
+      // （风暴塞满通道后 RpcResult 丢失、且页面加载即抢全局控制权）
+      if (Object.keys(config.claudeEnvVars ?? {}).length > 0) {
+        claudeEnvVars.value = config.claudeEnvVars!
+      } else {
+        claudeEnvVars.value = { ...DEFAULT_CLAUDE_ENV_VARS }
+        await doSyncEnv()
+      }
 
       defaultClaudeOptions.value = {
         skipPermissions: config.defaultSkipPermissions ?? false,

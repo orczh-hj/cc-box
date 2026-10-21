@@ -406,4 +406,23 @@ function handleReset() {
   opacity: 0.4;
   cursor: not-allowed;
 }
+
+/* 手机（≤768px）：env-key 固定 200px 与 flag-badge 长参数不换行都会撑破
+   视口横向溢出——key 改比例宽度、badge 允许断行 */
+@media (max-width: 768px) {
+  .env-key {
+    width: 38%;
+    flex-shrink: 0;
+  }
+
+  .flag-badge {
+    white-space: normal;
+    word-break: break-all;
+  }
+
+  .env-header {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+}
 </style>

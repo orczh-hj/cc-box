@@ -45,19 +45,19 @@ Hook 系统只采集**对 GUI 有意义**的信息：
 │  ├─ 从 body 读 session_id                                     │
 │  ├─ 建立 session_id ↔ pty_id 映射                             │
 │  ├─ hook_events.rs：推导状态 + 提取模型                        │
-│  └─ emit "hook-event" → 前端                                  │
+│  ├─ emit "hook-event" → 前端（原始事件，诊断用）              │
+│  └─ remote_state.on_hook_payload → apply_hook_event           │
+│       ├─ SessionStatus 广播（手机列表页圆点）                  │
+│       └─ emit "hook-status" {ptyId, working, pending,         │
+│            sessionId, trigger} → 桌面/手机前端                 │
 └──────────────────────────────────────────────────────────────┘
 
-┌─ Vue 前端 ───────────────────────────────────────────────────┐
-│  stores/hook.ts — 事件总线（pub/sub）                          │
-│  ├─ init(): 监听 "hook-event"，按事件类型 dispatch            │
-│  └─ subscribe(eventTypes[], handler): 模块注册，返回 unsubscribe│
-│                                                               │
-│  composables/useStatusMonitor.ts — 状态监控模块                │
-│  ├─ 订阅 sessionStart → 分配 session_id                      │
-│  ├─ 订阅 userPromptSubmit → tab.working = true                │
-│  ├─ 订阅 stop/stopFailure/notification → working=false        │
-│  │   └─ 根据窗口聚焦/Tab 激活决定 pending 和任务栏跳动         │
+┌─ Vue 前端（桌面/手机同一份代码） ─────────────────────────────┐
+│  composables/useStatusMonitor.ts — hook-status 消费者         │
+│  ├─ 应用 Rust 状态机算好的 working/pending（不复制状态逻辑）  │
+│  ├─ 新 pending 的 UI 决策：正看清除 / 失焦任务栏跳动          │
+│  ├─ trigger=sessionStart → 分配 session_id                   │
+│  ├─ trigger=userPromptSubmit → 首条 prompt 自动命名           │
 │  └─ watch 聚焦+Tab 切换 → 清除 active tab 的 pending          │
 │                                                               │
 │  SessionItem.vue ← tab.working → 指示灯样式                   │
@@ -238,33 +238,38 @@ interface TerminalTab {
 | **PTY** | `--plugin-dir` 路径不存在时 Claude 忽略正常启动 |
 | **前端** | 无 hook 事件时 `working = false`，指示灯降级为默认样式 |
 
-## 前端 Hook 事件总线
+## 前端状态消费（hook-status）
 
-`stores/hook.ts` 作为纯事件总线，不包含业务逻辑：
+状态机语义**单点在 Rust** `remote_state.rs apply_hook_event`（回合保护、recap 防护、
+permission 恢复等，见其测试），前端不再复刻（原 `stores/hook.ts` 事件总线已删除——
+唯一消费者 useStatusMonitor 改为直连事件后无存在必要）。
+
+`hook-status` 事件由 `hook_server.rs` 在每个 hook 事件处理后 emit_all 双端下发：
 
 ```typescript
-// 初始化：监听 Rust 后端 emit 的 hook-event
-hookStore.init()
-
-// 模块注册：订阅指定事件类型，返回 unsubscribe 函数
-const unsubscribe = hookStore.subscribe(
-  ['sessionStart', 'userPromptSubmit', 'stop'],
-  (payload) => { /* 处理逻辑 */ }
-)
+// useStatusMonitor.ts —— 桌面/手机同一份代码，消费同一事件
+onHookStatus((status) => {
+  // status: { ptyId, working, pending, sessionId, trigger }
+  // working/pending 直接应用（Rust 已算好）；trigger 供 UI 决策
+})
 ```
 
 ### 状态监控模块 (useStatusMonitor)
 
-挂载在 `TerminalView.vue`，负责将 hook 事件转化为 Tab 状态：
+挂载在 `TerminalView.vue`，消费 `hook-status` 事件维护 Tab 状态：
 
-#### working 状态
+#### working/pending 状态
 
-| 事件 | 操作 |
+直接应用 Rust 状态机算好的最终值（`tab.working = status.working` 等）。
+状态语义参考 Rust 侧 `apply_hook_event`：
+
+| 事件（trigger） | Rust 状态机操作 |
 |------|------|
-| `userPromptSubmit` | `tab.working = true` |
-| `stop` / `stopFailure` / `notification` | `tab.working = false`（仅在 working=true 时处理） |
-| `sessionEnd` | `tab.working = false`（不触发 pending） |
-| PTY 退出 | `tab.working = false` |
+| `userPromptSubmit` | `working = true`，开启新回合 |
+| `stop` / `stopFailure` / `notification(idle_prompt)` | `working = false` + `pending = true`，回合结束 |
+| `notification(permission_prompt)` | `working = false` + `pending = true`，回合不结束 |
+| activity（tool/subagent/compact） | 回合内恢复 `working`；回合结束后忽略（recap 防护） |
+| `sessionEnd` | `working = false`，不设 pending、不结束回合 |
 
 #### pending 状态（用户注意力管理）
 
@@ -304,10 +309,9 @@ watch([isFocused, isTerminalVisible, activeTabId])
 | `src-tauri/src/hook_server.rs` | HTTP 服务器：接收事件、路由、emit |
 | `src-tauri/src/hook_config.rs` | Plugin 文件管理 |
 | `src-tauri/plugin/` | Plugin 源文件（plugin.json + hooks.json + report-hook.sh） |
-| `src/types/hook.ts` | 前端类型定义 |
+| `src/types/hook.ts` | 前端类型定义（含 HookStatusPayload） |
 | `src/types/session.ts` | SessionInfo 类型（含 working/pending 字段） |
-| `src/stores/hook.ts` | 事件总线：subscribe / dispatch |
-| `src/composables/useStatusMonitor.ts` | 状态监控：hook 事件 → working/pending |
+| `src/composables/useStatusMonitor.ts` | 状态消费：hook-status 事件 → Tab working/pending + UI 决策 |
 | `src/composables/useWindowAttention.ts` | 窗口聚焦状态 + 取消任务栏跳动 |
 | `src/components/sessions/SessionItem.vue` | Tab 状态指示灯 UI |
 | `src/components/ProjectSelectView.vue` | 首页 Recent Sessions 状态展示 |

@@ -51,6 +51,8 @@ export interface SpawnSessionOptions {
   args?: string[]
   /** 浏览器：结构化启动选项（Rust 侧 build_claude_args 按同一规则拼接） */
   resume?: string
+  /** 浏览器：恢复会话的显示名（桌面建 Tab 用，防 sessionId 编码名） */
+  resumeName?: string
   skipPermissions?: boolean
   customArgs?: string
 }

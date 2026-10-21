@@ -2,17 +2,17 @@
 
 ## 远程组件发布（每次版本发布的附加动作）
 
-一套 UI 三端运行（桌面 Tauri / 宽屏浏览器 / 手机浏览器），除桌面版本外多出两条发布线：**手机/浏览器 UI = 主应用 dist，编译时嵌入 relay**（orczh.top:8800，详见 remote/docs/deploy.md）；**relay 二进制独立部署**（重启 = 内存态清空，所有手机配对失效）。
+一套 UI 三端运行（桌面 Tauri / 宽屏浏览器 / 手机浏览器），除桌面版本外多出两条发布线：**手机/浏览器 UI = 主应用 dist**（由 `remote/web-assets` 共享 crate 供给：服务器配置 `CC_BOX_RELAY_WEB_DIR` 指向磁盘目录时优先读盘、miss 回退编译期内嵌）；**relay 二进制独立部署**（重启 = 内存态清空，所有手机配对失效）。
 
 ### 改动类型 → 发布动作
 
 | 本次改动 | 桌面版本发布 | relay 部署 | 说明 |
 |---|---|---|---|
 | 仅桌面功能（无前端、无远程改动） | 需要 | 不需要 | 标准流程 |
-| 前端（src/ 任意改动） | 需要 | **必须** | relay 是编译时嵌入 dist，不重编手机永远拿旧 UI |
+| 前端（src/ 任意改动） | 需要 | **按通道** | 服务器已配 `CC_BOX_RELAY_WEB_DIR`：scp dist 即生效免重编（deploy.md §3.5「仅前端更新」）；未配置（默认内嵌）：必须重编 relay |
 | 桌面 Rust（src-tauri/） | 需要 | 不需要 | relay 透传原则，不解析应用层 payload |
-| relay（remote/relay/） | 不需要 | **必须** | 独立部署 |
-| 协议（remote/protocol/） | 需要 | **必须** | 三端同步（桌面 + relay + 内嵌 UI） |
+| relay / web-assets（remote/） | 不需要 | **必须** | 独立部署 |
+| 协议（remote/protocol/） | 需要 | **必须** | 三端同步（桌面 + relay + Web UI） |
 
 ### 每次版本发布的完整清单
 

@@ -1339,3 +1339,19 @@
 - 步骤 3：输入框仍显示 `--model sonnet`（不被清空）
 - 步骤 5：第二个 session 同样使用该参数（参数是持续意图，直到用户手动清除）
 
+
+## Skill 开关失败提示
+
+### SkillToggle_BusyHint_001 — 被占用 skill 关闭失败显示原因
+
+**目标**：验证 skill 开关失败时 UI 显示错误原因（不再"无反应"）
+
+**前置条件**：存在一个已被运行中 Claude Code 会话加载的用户级 skill（如当前开发会话正在用的）
+
+**操作步骤**：
+1. 打开 Skills 面板，关闭一个正在被 Claude Code 会话使用的 skill 开关
+2. 观察开关下方提示与开关状态
+
+**预期结果**：
+- 开关下方出现一行红色提示（约 5 秒后消失）："Skill 'xxx' is in use (directory locked, likely by a running Claude Code session); close the session and retry"
+- 开关保持原状态（乐观更新已回滚）；关闭占用它的会话后重试成功

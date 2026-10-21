@@ -4,31 +4,46 @@
       v-for="k in keys"
       :key="k.label"
       class="qk-btn"
+      :class="{ 'qk-action': !!k.action }"
       :title="k.hint"
-      @click="$emit('send', k.bytes)"
+      @click="k.action === 'select' ? $emit('select') : $emit('send', k.bytes!)"
     >{{ k.label }}</button>
   </div>
 </template>
 
 <script setup lang="ts">
 /**
- * 快捷键工具条（手机断点）：软键盘按不出控制键，用按钮直发终端转义序列。
- * Shift+Tab = Claude CLI 工作模式切换，Ctrl+J = 换行不提交。
+ * 快捷键工具条（手机断点）：软键盘按不出的控制键，用按钮直发终端转义序列。
+ * 软键盘由点击终端区域唤出；「选择复制」进入终端原生选择模式（拖选 + 复制走
+ * xterm selection）；Shift+Tab 模式切换，Ctrl+J 换行，Ctrl+U 清行，
+ * Home/End 行首/行尾。action 按钮不发字节，经 TerminalView 转发。
  */
 import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 
-defineEmits<{ send: [bytes: string] }>()
+defineEmits<{ send: [bytes: string]; select: [] }>()
 
 const { t } = useI18n()
 
-const keys = computed(() => [
+interface QuickKey {
+  label: string
+  bytes?: string
+  hint?: string
+  action?: 'select'
+}
+
+const keys = computed<QuickKey[]>(() => [
+  { label: t('quickKeySelectCopy'), action: 'select' },
   { label: 'Esc', bytes: '\x1b', hint: t('quickKeyEsc') },
   { label: '⇧Tab', bytes: '\x1b[Z', hint: t('quickKeyMode') },
   { label: 'Ctrl+J', bytes: '\x0a', hint: t('quickKeyNewline') },
-  { label: '^C', bytes: '\x03', hint: t('quickKeyInterrupt') },
+  { label: 'Ctrl+U', bytes: '\x15', hint: t('quickKeyClearLine') },
   { label: '↑', bytes: '\x1b[A', hint: '' },
   { label: '↓', bytes: '\x1b[B', hint: '' },
+  { label: '←', bytes: '\x1b[D', hint: '' },
+  { label: '→', bytes: '\x1b[C', hint: '' },
+  { label: 'Home', bytes: '\x1b[H', hint: '' },
+  { label: 'End', bytes: '\x1b[F', hint: '' },
 ])
 </script>
 
@@ -69,5 +84,16 @@ const keys = computed(() => [
 .qk-btn:active {
   background: var(--selected-bg);
   color: var(--accent-gold);
+}
+
+/* 动作按钮（键盘/选择复制）与字节键区分 */
+.qk-btn.qk-action {
+  color: var(--text-primary);
+  border-color: var(--accent-color);
+  white-space: nowrap;
+}
+
+.qk-btn.qk-action:active {
+  color: var(--accent-color);
 }
 </style>

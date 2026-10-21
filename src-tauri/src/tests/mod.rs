@@ -24,6 +24,15 @@ mod remote_state;
 mod remote_host;
 #[cfg(test)]
 mod dir_listing;
+#[cfg(test)]
+mod state_broadcast;
+
+/// EVENT_HOOK 全局单例的测试互斥锁：整体 set/clear hook 的测试（remote_state
+/// 的 rename 半链、state_broadcast 的宏出口锚定）必须串行执行——并行时互相
+/// 覆盖/清除对方的 hook 会导致断言偶发失败（hook 是 remote_state 全局态）
+#[cfg(test)]
+pub(crate) static HOOK_TEST_LOCK: std::sync::LazyLock<parking_lot::Mutex<()>> =
+    std::sync::LazyLock::new(|| parking_lot::Mutex::new(()));
 
 #[cfg(test)]
 mod build_claude_args_tests {

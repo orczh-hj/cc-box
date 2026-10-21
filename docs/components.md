@@ -16,12 +16,14 @@ App.vue
 │   │   ├── AgentsPanel.vue         # Agents 面板
 │   │   ├── McpPanel.vue            # MCP Servers 面板
 │   │   └── PluginsPanel.vue        # Plugins 面板
-│   ├── TerminalHeader.vue          # 终端标题栏（项目名 + 返回按钮）
+│   ├── TerminalHeader.vue          # 终端标题栏（会话名 + 返回按钮；项目名由标签页 title 承载）
 │   └── XTermTerminal.vue           # xterm.js 终端核心
 │
 ├── WelcomeView.vue                 # 欢迎引导页（覆盖层，无收藏项目时）
 └── ProjectSelectView.vue           # 项目选择页（覆盖层，有收藏项目时）
 ```
+
+状态同步中心（非组件，App.vue 消费）：`src/state/sections.ts` — state-changed section → loader 注册表。登记项：skills/agents/mcp/plugins（sidebar loader，plugins 级联子项）、providers/config（对应 store loader，设置面板打开期间 defer 暂存关闭补刷）。API：`registerSectionLoader` / `applyStateSection` / `flushPendingSections` / `registeredSections`（state-resync-needed 全量重拉遍历用）。
 
 ## 组件详情
 
@@ -32,6 +34,8 @@ App.vue
 - WelcomeView/ProjectSelectView 使用 `v-if` 覆盖层叠加在终端之上
 - 环境检查失败时显示全屏遮罩
 - 初始化：hook store、快捷键监听、自动更新检查
+- state-changed 订阅只转发到状态同步中心（`src/state/sections.ts` 查表分发：section → loader、级联、暂存——新功能在注册表加一行，不改本组件）
+- 浏览器模式 document.title 跟随当前项目（多标签页区分；桌面窗口标题由 Tauri 管理）
 
 ### XTermTerminal.vue — 终端核心
 
@@ -84,6 +88,18 @@ Events：
 
 Windows 平台去除原生装饰后自定义的拖拽区域 + 窗口控制按钮。
 
+### ControllerMask.vue — 全局控制权遮罩（桌面/浏览器同构挂载）
+
+设备互斥（同一时间只有一个设备操作——桌面与远程对等参与）的展示层：
+- 挂载于 App.vue（双模式）：桌面经 Tauri 事件 `controller-changed` 驱动；浏览器经 rpc.event 驱动（payload `{id: "desktop"|连接id|空串}`）
+- 显示条件：控制者标签非空且不等于本端标签（桌面 = 'desktop'，浏览器 = 连接 id）
+- 本端标签（selfLabel）**响应式维护**：浏览器端每次重连服务端重新分配连接 id（旧 id 永不复用），`remote-connected` 回调同步刷新 selfLabel 与 controllerLabel——setup 一次性快照会在重连后过期，导致自己持有/接管确认时新 id ≠ 旧快照 → 自己遮自己且接管解不开
+- 桌面端初始快照：`controller-changed` 只在变化时广播，桌面 UI 启动/重载会错过历史事件，挂载时经 `controller_status` command 主动查询补快照
+- 「接管」按钮：桌面调 `controller_takeover` command；浏览器发 `controller.takeover` 协议消息（服务端剥离旧持有者终端并广播）
+- 控制权由 Rust 后端裁决（attach 不能抢占、远程写操作被服务端拦截、桌面普通操作不自动持有），本组件只做展示
+- 接管确认（controller-changed 变为自己）由 remote-transport 按"重连"语义触发全量重同步（sessions.list 重拉 + 终端重 attach）
+- 层级高于终端级 taken-over 遮罩（两层并存）
+
 ## Store 结构
 
 ### app.ts — 应用状态
@@ -125,7 +141,7 @@ activeTabId: string | null            // 当前活跃 Tab
 historySessions: HistorySession[]     // 未被 Tab 占用的历史会话
 ```
 
-方法：createTab、setTabPty、handlePtyExit、closeTab、assignSessionIdByPtyId
+方法：createTab、setTabPty、handlePtyExit、closeTab、assignSessionIdByPtyId、adoptRemoteSessions（远程会话采纳：Tab 名优先取历史会话名，未加载时回退项目名）、backfillTabNamesFromHistory（历史加载后回填采纳 Tab 的会话名，已改名的不覆盖）
 
 ### sidebar.ts — 侧边栏状态
 
@@ -150,17 +166,6 @@ projectConfig: ProjectConfigResult | null  // 当前项目 Claude 配置（只�
 ```
 
 方法：loadProjectConfig（带缓存）
-
-### hook.ts — Hook 事件总线
-
-纯事件总线，不包含业务逻辑。模块通过 `subscribe(eventTypes[], handler)` 注册，`init()` 时开始监听 Rust 后端 emit 的 hook-event 并 dispatch。
-
-```typescript
-subscribe(eventTypes: string[], handler: (payload) => void): () => void
-dispatch(payload: HookEventPayload): void
-init(): void
-clearSession(key: string): void
-```
 
 ## 色彩系统
 

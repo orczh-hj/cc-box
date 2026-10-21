@@ -4,7 +4,8 @@
 //! - `/ws/device` 桌面端注册（device_key 认证，出站长连接穿透 NAT）
 //! - `/ws` 手机端连接（access_token 认证，绑定桌面）
 //! - `POST /api/pair` 配对码换 access_token（一次性，TTL 5 分钟）
-//! - `GET /` 手机 Web UI（rust-embed，与桌面直连同版本）
+//! - `GET /` 手机 Web UI（cc-box-web-assets：CC_BOX_RELAY_WEB_DIR 磁盘目录
+//!   优先，内嵌 dist 兜底——前端可独立 scp 更新免重编，见 deploy.md）
 //!
 //! 路由原则：**不解析、不存储、不改写应用层 payload**（透传），为 E2E 加密留路。
 //! 全内存态（重启即清），无数据库。
@@ -16,25 +17,21 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use axum::body::Body;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{ConnectInfo, State};
-use axum::http::{header, StatusCode, Uri};
 use axum::response::Response;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures_util::sink::SinkExt;
 use futures_util::StreamExt;
 use parking_lot::Mutex;
-use rust_embed::RustEmbed;
 use serde::Deserialize;
 use serde::Serialize;
 use tokio::sync::mpsc;
 
-/// 远程 Web UI：主应用构建产物（与桌面直连嵌入同一份 dist）
-#[derive(RustEmbed)]
-#[folder = "../../dist"]
-struct WebAssets;
+/// Web UI 磁盘目录环境变量（优先于内嵌；前端独立更新通道——目录内容
+/// scp 即时生效，环境变量增删需重启 relay）
+const WEB_DIR_ENV: &str = "CC_BOX_RELAY_WEB_DIR";
 
 /// 配对码有效期
 pub const PAIR_TTL: Duration = Duration::from_secs(5 * 60);
@@ -85,38 +82,9 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/ws/device", get(ws_device))
         .route("/ws", get(ws_client))
         .route("/api/pair", post(api_pair))
-        .fallback(serve_static)
+        // Web UI 静态资源：磁盘目录（CC_BOX_RELAY_WEB_DIR）优先、内嵌兜底
+        .fallback(|uri| cc_box_web_assets::serve_static(WEB_DIR_ENV, uri))
         .with_state(state)
-}
-
-// ==================== 静态资源 ====================
-
-async fn serve_static(uri: Uri) -> Response {
-    let path = uri.path().trim_start_matches('/');
-    let path = if path.is_empty() { "index.html" } else { path };
-    match WebAssets::get(path) {
-        Some(file) => Response::builder()
-            .header(header::CONTENT_TYPE, mime_for(path))
-            .body(Body::from(file.data))
-            .unwrap(),
-        None => Response::builder()
-            .status(StatusCode::NOT_FOUND)
-            .body(Body::from("not found"))
-            .unwrap(),
-    }
-}
-
-fn mime_for(path: &str) -> &'static str {
-    match path.rsplit('.').next() {
-        Some("html") => "text/html; charset=utf-8",
-        Some("js") => "application/javascript; charset=utf-8",
-        Some("css") => "text/css; charset=utf-8",
-        Some("json") => "application/json; charset=utf-8",
-        Some("svg") => "image/svg+xml",
-        Some("png") => "image/png",
-        Some("webmanifest") => "application/manifest+json",
-        _ => "application/octet-stream",
-    }
 }
 
 // ==================== 配对 API ====================

@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { setActivePinia, createPinia } from 'pinia'
 import { useSessionStore } from '@/stores/session'
+import { getSessions } from '@/api/tauri'
 import { randomUUID } from 'crypto'
 
 // crypto.randomUUID polyfill for jsdom
@@ -193,6 +194,107 @@ describe('session store', () => {
     })
   })
 
+  // ==================== sessionId 演变历史（CLI fork 场景） ====================
+
+  describe('sessionId 演变历史', () => {
+    // 复现 bug：resume 传入旧 sessionId X 被 CLI fork 成新 sessionId Y 后，
+    // claimedSessionIds 只认当前值 Y，旧 id X 变幽灵历史条目重复显示
+    it('SessionIdHistory_ClaimedKeepsOldId_001', () => {
+      const store = useSessionStore()
+      const tabId = store.createTab('/project', { sessionId: 'sess-old' })
+      store.setTabPty(tabId, 'pty-fork')
+      store.assignSessionIdByPtyId('pty-fork', 'sess-new')
+      expect(store.claimedSessionIds.has('sess-new')).toBe(true)
+      expect(store.claimedSessionIds.has('sess-old')).toBe(true)
+    })
+
+    // 覆写后按旧 id 仍能找到运行中 tab（恢复入口前置匹配，防二次 spawn）
+    it('SessionIdHistory_FindByOldId_001', () => {
+      const store = useSessionStore()
+      const tabId = store.createTab('/project', { sessionId: 'sess-old' })
+      store.setTabPty(tabId, 'pty-fork')
+      store.assignSessionIdByPtyId('pty-fork', 'sess-new')
+      const tab = store.getTabBySessionId('sess-old')
+      expect(tab?.tabId).toBe(tabId)
+      expect(tab?.status).toBe('running')
+    })
+
+    // setTabSessionId 更新同样记录演变历史
+    it('SessionIdHistory_SetTabSessionId_001', () => {
+      const store = useSessionStore()
+      const tabId = store.createTab('/project', { sessionId: 'sess-a' })
+      store.setTabSessionId(tabId, 'sess-b')
+      expect(store.tabs.get(tabId)!.sessionIds).toEqual(['sess-a', 'sess-b'])
+    })
+
+    // 重复赋相同值不产生重复记录
+    it('SessionIdHistory_NoDuplicate_001', () => {
+      const store = useSessionStore()
+      const tabId = store.createTab('/project', { sessionId: 'sess-a' })
+      store.setTabSessionId(tabId, 'sess-a')
+      expect(store.tabs.get(tabId)!.sessionIds).toEqual(['sess-a'])
+    })
+
+    // createTab 初始化 sessionIds 数组
+    it('SessionIdHistory_InitOnCreate_001', () => {
+      const store = useSessionStore()
+      const tabId = store.createTab('/project', { sessionId: 'sess-init' })
+      expect(store.tabs.get(tabId)!.sessionIds).toEqual(['sess-init'])
+      const tabId2 = store.createTab('/project')
+      expect(store.tabs.get(tabId2)!.sessionIds).toEqual([])
+    })
+  })
+
+  // ==================== resumeSessionTab（恢复入口统一决策：复用优先） ====================
+
+  describe('resumeSessionTab', () => {
+    // 复现 bug：恢复已有 Tab 的会话（running 或 stopped）时无条件新建 Tab，
+    // 造成同一会话出现两份（一份原名 + 一份 sessionId 编码名）
+    it('ResumeSessionTab_ReuseRunning_001', () => {
+      const store = useSessionStore()
+      const tabId = store.createTab('/project', { sessionId: 'sess-r', name: '原名' })
+      store.setTabPty(tabId, 'pty-r')
+      const r = store.resumeSessionTab('/project', 'sess-r')
+      expect(r.reused).toBe(true)
+      expect(r.tabId).toBe(tabId)
+      expect(store.tabs.size).toBe(1)
+      expect(store.tabs.get(tabId)!.name).toBe('原名')
+    })
+
+    // stopped Tab 同样复用（由 startTab 走 --resume 重启），名字保留
+    it('ResumeSessionTab_ReuseStopped_001', () => {
+      const store = useSessionStore()
+      const tabId = store.createTab('/project', { sessionId: 'sess-s', name: '停用会话' })
+      store.setTabPty(tabId, 'pty-s')
+      store.handlePtyExit('pty-s')
+      const r = store.resumeSessionTab('/project', 'sess-s')
+      expect(r.reused).toBe(true)
+      expect(r.tabId).toBe(tabId)
+      expect(store.tabs.get(tabId)!.status).toBe('stopped')
+    })
+
+    // 覆写后的历史 id（CLI fork 前）同样命中复用
+    it('ResumeSessionTab_MatchForkedHistoryId_001', () => {
+      const store = useSessionStore()
+      const tabId = store.createTab('/project', { sessionId: 'sess-old' })
+      store.setTabPty(tabId, 'pty-f')
+      store.assignSessionIdByPtyId('pty-f', 'sess-new')
+      const r = store.resumeSessionTab('/project', 'sess-old')
+      expect(r.reused).toBe(true)
+      expect(r.tabId).toBe(tabId)
+    })
+
+    // 无已有 Tab 时新建（带名字），标记 reused=false
+    it('ResumeSessionTab_CreateNew_001', () => {
+      const store = useSessionStore()
+      const r = store.resumeSessionTab('/project', 'sess-new-1', '会话名')
+      expect(r.reused).toBe(false)
+      const tab = store.tabs.get(r.tabId)!
+      expect(tab.sessionId).toBe('sess-new-1')
+      expect(tab.name).toBe('会话名')
+    })
+  })
+
   // ==================== isResume ====================
 
   describe('isResume', () => {
@@ -259,6 +361,61 @@ describe('session store', () => {
       expect(tab.working).toBe(true)
     })
 
+    // 采纳时历史已加载：sessionId 命中历史记录 → Tab 名取会话名（非项目名）
+    it('AdoptRemoteSessions_UsesHistoryName_001', async () => {
+      const mockGetSessions = vi.mocked(getSessions)
+      mockGetSessions.mockResolvedValue([
+        { sessionId: 'sess-a', name: '修复登录 bug', projectPath: '/p', lastActiveAt: 1 } as never,
+      ])
+      const store = useSessionStore()
+      await store.loadHistorySessions('/p')
+
+      store.adoptRemoteSessions([
+        { id: 'pty-h1', type: 'claude', cwd: '/p', working: true, pending: false, sessionId: 'sess-a' },
+      ])
+      expect(store.getTabByPtyId('pty-h1')?.name).toBe('修复登录 bug')
+      mockGetSessions.mockReset()
+    })
+
+    // 采纳时历史未加载（浏览器直接打开时序）：回退项目名，历史加载完成后
+    // backfillTabNamesFromHistory 按 sessionId 修正为会话名
+    it('AdoptRemoteSessions_BackfillAfterHistoryLoad_001', async () => {
+      const store = useSessionStore()
+      store.adoptRemoteSessions([
+        { id: 'pty-h2', type: 'claude', cwd: '/p', working: false, pending: false, sessionId: 'sess-b' },
+      ])
+      expect(store.getTabByPtyId('pty-h2')?.name).toBe('p')
+
+      const mockGetSessions = vi.mocked(getSessions)
+      mockGetSessions.mockResolvedValue([
+        { sessionId: 'sess-b', name: '重构远程连接', projectPath: '/p', lastActiveAt: 2 } as never,
+      ])
+      await store.loadHistorySessions('/p')
+      store.backfillTabNamesFromHistory()
+
+      expect(store.getTabByPtyId('pty-h2')?.name).toBe('重构远程连接')
+      mockGetSessions.mockReset()
+    })
+
+    // 名字已被改过（≠ 项目名：重命名/自动命名）的 Tab，回填不覆盖
+    it('AdoptRemoteSessions_BackfillKeepsRenamed_001', async () => {
+      const store = useSessionStore()
+      store.adoptRemoteSessions([
+        { id: 'pty-h3', type: 'claude', cwd: '/p', working: false, pending: false, sessionId: 'sess-c' },
+      ])
+      store.getTabByPtyId('pty-h3')!.name = '我的会话'
+
+      const mockGetSessions = vi.mocked(getSessions)
+      mockGetSessions.mockResolvedValue([
+        { sessionId: 'sess-c', name: '历史名', projectPath: '/p', lastActiveAt: 3 } as never,
+      ])
+      await store.loadHistorySessions('/p')
+      store.backfillTabNamesFromHistory()
+
+      expect(store.getTabByPtyId('pty-h3')?.name).toBe('我的会话')
+      mockGetSessions.mockReset()
+    })
+
     // 已退出的会话不在列表中返回时，已有 Tab 不受影响（等待 pty-exit 事件清理）
     it('AdoptRemoteSessions_KeepExistingTabs_001', () => {
       const store = useSessionStore()
@@ -268,5 +425,94 @@ describe('session store', () => {
       store.adoptRemoteSessions([])
       expect(store.tabs.size).toBe(1)
     })
+
+    // 服务端下发 sessionId 时建 Tab 绑定该 id（重连后从历史恢复不再二次 spawn 的前提）
+    it('AdoptRemoteSessions_WithSessionId_001', () => {
+      const store = useSessionStore()
+      store.adoptRemoteSessions([
+        { id: 'pty-1', type: 'claude', cwd: '/proj', working: false, pending: false, sessionId: 'sess-x' },
+      ])
+      const tab = store.getTabByPtyId('pty-1')!
+      expect(tab.sessionId).toBe('sess-x')
+      expect(store.claimedSessionIds.has('sess-x')).toBe(true)
+    })
+
+    // 已有同 ptyId Tab 时，服务端 sessionId 补写到该 Tab（演变历史）
+    it('AdoptRemoteSessions_BackfillSessionId_001', () => {
+      const store = useSessionStore()
+      store.adoptRemoteSessions([
+        { id: 'pty-1', type: 'claude', cwd: '/proj', working: false, pending: false },
+      ])
+      store.adoptRemoteSessions([
+        { id: 'pty-1', type: 'claude', cwd: '/proj', working: false, pending: false, sessionId: 'sess-y' },
+      ])
+      const tab = store.getTabByPtyId('pty-1')!
+      expect(tab.sessionId).toBe('sess-y')
+      expect(store.claimedSessionIds.has('sess-y')).toBe(true)
+    })
+  })
+
+  describe('重命名双端同步（renameKeyForTab / applyRemoteRename）', () => {
+  // 复现 bug：stopped Tab 的 ptyId 被 handlePtyExit 置空后重命名不广播，
+  // 另一端名字不同步——修复后 stopped Tab 以 sessionId 为广播 key
+  it('RenameKey_StoppedTab用sessionId做广播key_001', () => {
+    const store = useSessionStore()
+    const tabId = store.createTab('/proj', { sessionId: 'sess-abc-111', name: '旧名' })
+    // 模拟启动后退出：ptyId 置空、status=stopped（handlePtyExit 语义）
+    store.setTabPty(tabId, 'pty-1')
+    store.handlePtyExit('pty-1')
+    const tab = store.tabs.get(tabId)!
+    expect(tab.ptyId).toBeNull()
+
+    // 广播 key 回退到 sessionId
+    expect(store.renameKeyForTab(tabId)).toBe('sess-abc-111')
+  })
+
+  it('RenameKey_RunningTab用ptyId_002', () => {
+    const store = useSessionStore()
+    const tabId = store.createTab('/proj')
+    store.setTabPty(tabId, 'pty-2')
+    store.setTabSessionId(tabId, 'sess-2')
+
+    expect(store.renameKeyForTab(tabId)).toBe('pty-2')
+  })
+
+  // 从未启动的 New Session：无 ptyId 无 sessionId，不广播（null）
+  it('RenameKey_无标识返回null_003', () => {
+    const store = useSessionStore()
+    const tabId = store.createTab('/proj')
+
+    expect(store.renameKeyForTab(tabId)).toBeNull()
+  })
+
+  // 接收端：stopped Tab 按 sessionId（含演变历史）匹配广播并改名
+  it('ApplyRemoteRename_按sessionId匹配stoppedTab_004', () => {
+    const store = useSessionStore()
+    const tabId = store.createTab('/proj', { sessionId: 'old-id', name: '旧名' })
+    // resume fork：sessionId 演变，旧 id 保留在 sessionIds
+    store.setTabSessionId(tabId, 'new-id')
+
+    expect(store.applyRemoteRename('new-id', '新名')).toBe(true)
+    expect(store.tabs.get(tabId)!.name).toBe('新名')
+    // 旧 id 也命中同一 Tab（演变历史匹配）
+    expect(store.applyRemoteRename('old-id', '旧id命中')).toBe(true)
+    expect(store.tabs.get(tabId)!.name).toBe('旧id命中')
+  })
+
+  // 接收端：running Tab 按 ptyId 匹配（原有行为不回归）
+  it('ApplyRemoteRename_按ptyId匹配runningTab_005', () => {
+    const store = useSessionStore()
+    const tabId = store.createTab('/proj')
+    store.setTabPty(tabId, 'pty-3')
+
+    expect(store.applyRemoteRename('pty-3', '运行中新名')).toBe(true)
+    expect(store.tabs.get(tabId)!.name).toBe('运行中新名')
+  })
+
+  // 无匹配（如另一端已关闭该 Tab）返回 false，静默丢弃
+  it('ApplyRemoteRename_无匹配返回false_006', () => {
+    const store = useSessionStore()
+    expect(store.applyRemoteRename('ghost', '名字')).toBe(false)
+  })
   })
 })

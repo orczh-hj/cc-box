@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.15.0] - 2026-10-21
+
+### Features
+- Add global controller mutex across desktop and remote devices (takeover, revision-filtered events, full resync)
+- Add terminal copy reader with logical-paragraph reflow for partial selection on touch devices
+- Add single command registry (registry! macro) unifying RPC whitelist, write gating and broadcast section
+- Add automatic state broadcast via #[cc_command] attribute macro at command exit
+- Add frontend state sync center (section loader registry) replacing hardcoded dispatch in App.vue
+- Add web-assets shared crate: relay and desktop serve Web UI from disk dir (CC_BOX_RELAY_WEB_DIR / CC_BOX_WEB_DIR) with embedded fallback, enabling frontend-only scp updates
+- Set browser tab title to current project name
+
+### Fixed
+- Fix remote skill toggle showing no feedback on failure (now shows cause, e.g. directory locked by a running Claude session)
+- Fix remote open-tabs residue after desktop closes a session (broadcast remote-session-closed on both explicit-close paths)
+- Fix takeover mask blocking desktop title bar (window drag and controls stay available)
+- Fix settings startup section overflowing on mobile widths
+- Fix remote-adopted tab names falling back to project name (backfill from history by sessionId)
+- Fix terminal header showing project prefix (session name only)
+
+Note: phone clients need to re-pair after updating the relay; refresh browser to get the new bundle.
+
 ## [0.14.0] - 2026-10-19
 
 ### Features

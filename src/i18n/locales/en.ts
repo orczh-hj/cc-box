@@ -39,11 +39,27 @@ export default {
   remoteRelayNotConfigured: 'Relay not connected, retrying automatically…',
   remoteHostedElsewhere: 'Remote is hosted by another CC-Box instance on this machine; scanning connects to that instance',
 
+  // Global controller mask (device mutual exclusion: another device is operating)
+  controllerMaskTitle: 'Controlled by another device',
+  controllerMaskHint: 'Only one device can operate at a time; take over to continue',
+  controllerTakeover: 'Take Over',
+
   // Quick key bar (mobile breakpoint)
   quickKeyEsc: 'Cancel / Esc',
   quickKeyMode: 'Switch work mode (Shift+Tab)',
   quickKeyNewline: 'Insert line break (Ctrl+J)',
-  quickKeyInterrupt: 'Interrupt (Ctrl+C)',
+  quickKeyClearLine: 'Clear current input line (Ctrl+U)',
+  quickKeySelectCopy: 'Select & Copy',
+
+  // Terminal copy reader (mobile partial copy: snapshot + system selection handles)
+  selectModeHint: 'Long-press to select; drag system handles to adjust',
+  selectModeCopy: 'Copy Selected',
+  selectModeCopied: 'Copied',
+  selectModeExit: 'Exit',
+  copyReaderSmart: 'Smart',
+  copyReaderRaw: 'Raw',
+  copyReaderCopyAll: 'Copy All',
+  copyReaderTruncated: 'Content too long; showing the most recent part',
 
   // Directory picker (add project from browser)
   dirPickerTitle: 'Choose a project folder on this computer',

@@ -116,19 +116,22 @@
     @close="showDirPicker = false"
     @select="handleDirPicked"
   />
+
+  <!-- 全局控制权遮罩（设备互斥：桌面与远程设备对等，其他设备操作中时显示） -->
+  <ControllerMask />
 </div>
 </template>
 
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, defineAsyncComponent, nextTick, reactive, watch } from 'vue'
 import { useAppStore } from '@/stores/app'
-import { useHookStore } from '@/stores/hook'
 import { useSessionStore } from '@/stores/session'
 import { useSidebarStore } from '@/stores/sidebar'
 import { useUpdateStore } from '@/stores/update'
 import { useI18n } from 'vue-i18n'
 import { openExternal, isTauriEnv } from '@/api/platform'
 import { transport } from '@/api/transport'
+import { applyStateSection, flushPendingSections, registeredSections } from '@/state/sections'
 import {
   selectDirectory,
   onMenuSettings,
@@ -142,7 +145,8 @@ import {
   cancelAutoInstall,
   updateAppConfig,
   onInstallProgress,
-  onOpenDirectory
+  onOpenDirectory,
+  onStateChanged
 } from '@/api/tauri'
 import { useAppShortcuts } from '@/composables/useAppShortcuts'
 import TokenGate from '@/components/TokenGate.vue'
@@ -150,6 +154,7 @@ import DirectoryPicker from '@/components/DirectoryPicker.vue'
 import WelcomeView from '@/components/WelcomeView.vue'
 import ProjectSelectView from '@/components/ProjectSelectView.vue'
 import TitleBar from '@/components/TitleBar.vue'
+import ControllerMask from '@/components/ControllerMask.vue'
 
 const TerminalView = defineAsyncComponent(() => import('@/components/TerminalView.vue'))
 const SettingsOverlay = defineAsyncComponent(() => import('@/components/settings/SettingsOverlay.vue'))
@@ -292,14 +297,42 @@ watch(remoteReady, async (v) => {
 let unlistenRemoteSessions: (() => void) | null = null
 let unlistenRemoteConn: (() => void) | null = null
 function setupRemoteSessionSync() {
-  void transport.listen<Array<{ id: string; type: string; cwd: string; working: boolean; pending: boolean }>>('remote-sessions', (list) => {
+  void transport.listen<Array<{ id: string; type: string; cwd: string; working: boolean; pending: boolean; sessionId?: string }>>('remote-sessions', (list) => {
     sessionStore.adoptRemoteSessions(list)
+    // 历史已加载的场景立即回填会话名（未加载时由 TerminalView 加载完成后回填）
+    sessionStore.backfillTabNamesFromHistory()
   })
   void transport.listen('remote-connected', () => {
     transport.sendClient({ type: 'sessions.list' })
   })
   transport.sendClient({ type: 'sessions.list' })
 }
+
+// state-changed 统一状态刷新（桌面/浏览器双模式同构订阅）：任意端写操作
+// （开关/Provider/配置）落盘后按 section 权威刷新本端。section → loader 的
+// 分发/暂存/级联收敛在状态中心（src/state/sections.ts），本组件只订阅转发
+let unlistenStateChanged: (() => void) | null = null
+async function setupStateSync() {
+  // 设置面板关闭：补刷打开期间被暂存的 section（defer 逻辑在状态中心）
+  watch(() => sidebarStore.showSettings, (open, wasOpen) => {
+    if (wasOpen && !open) flushPendingSections()
+  })
+  unlistenStateChanged = await onStateChanged(({ id }) => applyStateSection(id))
+  // 版本跳变（中间事件可能丢失）：全 section 权威重拉兜底（remote-only，
+  // 桌面经 Tauri emit 直达无过滤，不触发）
+  void transport.listen('state-resync-needed', () => {
+    for (const s of registeredSections()) {
+      applyStateSection(s)
+    }
+  })
+}
+
+// 浏览器模式：标签页标题跟随当前项目（多标签页/多设备打开不同项目时区分；
+// 桌面窗口标题由 Tauri 管理，不经此处）
+watch(() => appStore.currentProject, (project) => {
+  if (isTauriEnv) return
+  document.title = project || 'CC-Box'
+}, { immediate: true })
 
 async function startApp() {
   await appStore.runChecks()
@@ -308,6 +341,7 @@ async function startApp() {
   }
 
   if (!isTauriEnv) setupRemoteSessionSync()
+  void setupStateSync()
   setupVisualViewportSync()
   initAfterChecks()
 }
@@ -316,6 +350,7 @@ onUnmounted(() => {
   unlistenVvResize?.()
   unlistenRemoteSessions?.()
   unlistenRemoteConn?.()
+  unlistenStateChanged?.()
   unlistenSettings?.()
   unlistenShortcuts?.()
   unlistenFontSize?.()
@@ -380,19 +415,11 @@ async function handleOpenProject(path: string) {
 async function handleResumeSession(projectPath: string, sessionId: string, sessionName?: string) {
   appStore.setCwd(projectPath)
 
-  // 如果该 session 已在运行，直接切换到对应 tab
-  const existingTab = sessionStore.getTabBySessionId(sessionId)
-  if (existingTab && existingTab.status === 'running') {
-    sessionStore.setActiveTab(existingTab.tabId)
-    currentView.value = 'terminal'
-    sidebarStore.loadAllSidebarData(projectPath)
-    return
-  }
-
   currentView.value = 'terminal'
   sidebarStore.loadAllSidebarData(projectPath)
 
-  // 直接调用 TerminalView 方法恢复会话（不再依赖 watch）
+  // 复用优先（resumeSessionTab）：已有该对话的 Tab 切换/重启，未命中才新建
+  // ——统一经 startResumeSession，防同一对话二次 spawn/重复 Tab
   await nextTick()
   if (terminalViewRef.value?.startResumeSession) {
     terminalViewRef.value.startResumeSession(projectPath, sessionId, sessionName)
@@ -440,7 +467,6 @@ function initAfterChecks() {
     }
   })
   appStore.loadAppConfig()
-  useHookStore().init()
 
   shortcutUnlisteners.push(...setupShortcutListeners())
 

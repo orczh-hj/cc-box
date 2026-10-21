@@ -51,15 +51,16 @@ cc-box/
 │   │   ├── hook_events.rs      # Hook 事件数据结构与提取
 │   │   ├── hook_server.rs      # Hook HTTP 服务器（接收 Claude 运行时事件）
 │   │   ├── hook_config.rs      # Hook Plugin 文件管理
-│   │   ├── remote_server.rs    # **远程访问服务器**（局域网直连：axum WS + Web UI 嵌入 + token 认证）
-│   │   ├── remote_state.rs     # **远程状态与消息处理**（会话聚合、输出 tee、working/pending 状态机、attach 独占、新建/关闭；局域网/中继共用唯一 handler）
+│   │   ├── remote_server.rs    # **远程访问服务器**（局域网直连：axum WS + Web UI（web-assets：磁盘优先/内嵌兜底）+ token 认证）
+│   │   ├── remote_state.rs     # **远程状态与消息处理**（会话聚合、256KB TailBuffer 输出回放、working/pending 状态机唯一实现、**全局控制权 controller**（设备互斥：写操作无人时自动持有/attach 不能抢占/takeover 转移+剥离终端/断连释放）、**revision 版本号**（前端旧事件过滤）、state-changed 统一广播；局域网/中继共用唯一 handler）
 │   │   ├── remote_client.rs    # **中继出站客户端**（连接 cc-box-relay、手机连接桥接、断线重连）
-│   │   ├── rpc_dispatch.rs     # **RPC 命令分发器**（rpc_table! 宏表：一行一命令；浏览器经 WS 调用 Tauri command 的唯一入口；差集守卫测试）
+│   │   ├── rpc_dispatch.rs     # **RPC 命令单一注册表**（registry! 宏表：一行一命令（read()/write(Sect)/write(None)）同时生成白名单、分发、广播 section、写权限标记；浏览器经 WS 调用 Tauri command 的唯一入口；差集守卫测试解析 lib.rs 注册表；StateSection 枚举 + 控制权写操作拦截）
 │   │   ├── events.rs           # **事件单一出口**（事件名常量 + emit_all：Tauri emit 与远程广播二合一）
 │   │   ├── checks.rs           # 环境检查
 │   │   ├── logger.rs           # 日志系统（FileLogger、文件轮转）
 │   │   └── updater.rs          # 自动更新（GitHub Releases）
 │   ├── plugin/                 # Claude Code Plugin 文件（编译时嵌入）
+│   ├── macros/                 # **cc-box-macros**（proc-macro：`#[cc_command(write = "sect")]` 写命令出口自动广播 state-changed，桌面 invoke 与远程 rpc 同一出口）
 │   ├── capabilities/           # Tauri 权限配置
 │   ├── Cargo.toml
 │   └── tauri.conf.json
@@ -94,13 +95,15 @@ cc-box/
 │   │       └── providers/      # **Provider 组件**（ProviderList > ProviderCard、EditPanel、PresetPanel、CommonConfigPanel）
 │   ├── config/
 │   │   └── providerPresets.ts  # **Provider 预设模板**（50+ 厂商）
-│   ├── stores/                 # Pinia：app、session、sidebar、config、hook、providers
+│   ├── stores/                 # Pinia：app、session、sidebar、config、providers
+│   ├── state/
+│   │   └── sections.ts         # **状态同步中心**（state-changed section → loader 注册表：查表分发/暂存防覆盖/级联刷新；App.vue 只订阅转发，新功能加一行登记）
 │   ├── types/                  # TypeScript 类型定义（pty、session、project、config、app、hook、provider）
 │   ├── composables/            # useAppShortcuts、useTerminalCommand、useStatusMonitor、useWindowAttention、useMediaQuery
 │   ├── utils/                  # platform 工具
 │   └── styles/global.css       # CSS 变量与全局样式
 │
-├── remote/                     # **远程连接**（协议正本 protocol/、中继服务器 relay/、专属文档 docs/；Web UI = 主应用 dist，无独立子应用）
+├── remote/                     # **远程连接**（协议正本 protocol/、中继服务器 relay/、静态资源 crate web-assets/、专属文档 docs/；Web UI = 主应用 dist，无独立子应用）
 │
 ├── docs/                       # 详细文档
 ├── package.json
@@ -121,13 +124,17 @@ cc-box/
 ### Hook 监控数据流
 
 ```
-Claude CLI hook 触发 → report-hook.sh → curl POST → hook_server.rs (axum) → emit('hook-event') → stores/hook.ts (事件总线) → useStatusMonitor (状态监控)
+Claude CLI hook 触发 → report-hook.sh → curl POST → hook_server.rs (axum)
+  ├─ emit('hook-event')（原始事件，诊断用）
+  └─ remote_state.on_hook_payload → apply_hook_event（working/pending 状态机唯一实现）
+       ├─ SessionStatus 广播（手机列表页圆点）
+       └─ emit('hook-status', {ptyId, working, pending, sessionId, trigger}) → useStatusMonitor（前端仅应用结果）
 ```
 
 - Plugin 通过 `--plugin-dir` 按 session 加载，注入 11 个 hook 事件
 - 每个 PTY 注入 `CC_BOX_HOOK_PORT`（服务器端口）和 `CC_BOX_SESSION_ID`（终端标识）
-- `stores/hook.ts`：纯事件总线，模块通过 `subscribe(eventTypes[], handler)` 注册消费
-- `useStatusMonitor`：hook 事件 → Tab 的 `working`/`pending` 状态 + 任务栏跳动
+- 状态语义（回合保护、recap 防护、permission 恢复）单点在 Rust `apply_hook_event`，桌面/手机同一份前端消费 hook-status，不再复刻状态机（原 stores/hook.ts 事件总线已删除）
+- `useStatusMonitor`：应用 Rust 算好的状态 + UI 决策（新 pending 的正看清除/任务栏跳动、userPromptSubmit 自动命名、sessionStart 分配 sessionId）
 - 详细架构 → [docs/hook-monitor.md](docs/hook-monitor.md)
 
 详细架构 → [docs/terminal-integration.md](docs/terminal-integration.md)
@@ -139,6 +146,20 @@ npm install                # 安装依赖
 npm run tauri:dev          # 开发模式（前端 :1420 + Rust 热重载）
 npm run tauri:build        # 生产构建
 ```
+
+### 远程功能本地全链路测试（改远程相关代码后的标准动作）
+
+改 `remote/`（协议/relay）或远程相关前端/ Rust 后，**在本地把中继链路完整跑一遍再部署**（relay debug 实时读 dist，两端都是新代码；比只测 8747 直连多覆盖 relay 透传与嵌入 UI）：
+
+```bash
+# 终端 1：本地 relay（绑所有网卡，手机可达）
+cd remote/relay && CC_BOX_RELAY_BIND=0.0.0.0 cargo run
+
+# 终端 2：桌面端连本地 relay（IP 用本机局域 IP，勿用 127.0.0.1——手机打不开配对 URL）
+CC_BOX_RELAY_URL=192.168.5.105:8800 npm run tauri:dev
+```
+
+手机扫桌面面板出的中继配对码（走本地 relay）或局域码（8747 直连）均可验证。详细环境变量与注意事项 → [remote/docs/deploy.md](remote/docs/deploy.md)「本地测试（开发环境）」。
 
 ### Windows 环境配置
 - **Rust 工具链**：使用 MSVC 工具链（`rustup default stable-x86_64-pc-windows-msvc`）
@@ -240,6 +261,9 @@ npm run release -- --oss-only v0.5.1
 
 ## 约定
 
+- **远程操作一致性**：远程（手机）操作与桌面直接操作效果一致——桌面端原生实现单点执行，远程只是触发器 + 事件同步的镜像，不另写一份执行逻辑
+- **避免重复实现**：同一逻辑只留一份（如 `spawn_pty_core`、`apply_hook_event`）；两端各自需要的状态靠事件同步（`session-renamed`、`hook-status`），不靠复制代码
+- **离散操作必广播**：用户离散操作（建/关/重命名会话）经 Rust 广播事件让对端走同一个原生函数；远程安全守卫（白名单/并发上限/独占）作为前置检查包住共用核心，不因统一而放宽
 - 每次修改后，核心更新同步到 CLAUDE.md，细节更新同步到 docs/*.md
 - Rust 结构体返回前端时统一使用 `#[serde(rename_all = "camelCase")]`
 - 添加新 Tauri Command：commands.rs 定义 → lib.rs 注册 → api/tauri.ts 封装
@@ -249,11 +273,24 @@ npm run release -- --oss-only v0.5.1
 
 UI 已浏览器化（一套 UI 走桌面 Tauri / 宽屏浏览器 / 手机浏览器），新功能必须登记到对应单一注册链，防两端漂移：
 
-- **新 Tauri command** → `rpc_dispatch.rs` 的 `rpc_table!` 宏表登记（一行一命令）或 `EXCLUDED` 显式排除（系统级）。差集守卫测试断言 `lib.rs invoke_handler 注册表 == RPC_WHITELIST + EXCLUDED`，漏登记时测试失败强制评估
+- **新 Tauri command** → `rpc_dispatch.rs` 的 `registry!` 宏表登记（一行一命令：`"cmd" => read()/write(Sect)/write(None) => |参数| handler`）或 `EXCLUDED` 显式排除（系统级）。差集守卫测试直接解析 `lib.rs` 的 invoke_handler 注册表断言注册项 ⊆ RPC_WHITELIST + EXCLUDED，漏登记时测试失败强制评估
+- **新写命令**（修改任何跨端可见状态：开关/Provider/配置）→ registry! 登记 `write(Sect)`，commands.rs 函数标 `#[cc_command(write = "sect")]`（置于 `#[tauri::command]` 之上，出口 Ok 自动 `emit_state_changed`——桌面 invoke 与远程 rpc 同一广播出口，无手动 emit）；写但不广播（专用事件）标 `#[cc_command(write)]`。守卫测试（`tests/state_broadcast.rs`）强制：写前缀命令必须登记、registry 与宏属性双向对拍、宏出口语义锚定（成功才广播）——漏接时"远程操作后其他端 UI 不刷新"由测试拦截，不再靠人肉记忆
 - **新事件** → `events.rs` 常量 + `emit_all`；远程会话类事件用 `remote_state::emit_event`（桌面+广播）/`emit_event_ex`（排除接管者）/`emit_desktop_only`（仅桌面）
 - **新协议消息** → `remote/protocol/` 四处同步：crate 定义 → protocol.ts → samples/ JSON 样例 → remote/docs/protocol.md（Rust 与 Vitest 契约测试共跑样例）
 - **CLI 启动参数拼接** → 只改 `pty::build_claude_args`（Rust 单一核心，session.create 与桌面 spawn 共用），勿在前端另写一份
 - **前端 invoke/listen** → 一律经 `src/api/transport.ts`（组件禁止直接 import @tauri-apps/api；桌面专属 API 用 `transport.env.isTauri` 守卫）
+
+### 全局控制权（设备互斥）与状态同步
+
+> **行为规则正本见 [remote/docs/protocol.md](remote/docs/protocol.md)「全局控制权」**（唯一权威；此处为摘要，attach 不能抢占/接管入口/revision 过滤与跳变重同步细节以正本为准）
+
+同一时间只有一个设备可操作——**桌面与所有远程设备对等参与互斥**。控制权由 Rust `remote_state.rs` `StateInner.controller`（`ControllerHolder::Desktop | Remote(connId)`）单点裁决，前端只展示（`ControllerMask.vue` 全局遮罩+接管按钮，桌面/浏览器同构挂载）：
+
+- **远程写操作即持有**：rpc 写命令/session.create/kill/attach 在无人持有时自动持有并广播 `controller-changed`（payload id：`"desktop"`/连接 id/空串；桌面同时经 Tauri emit 下发）；**桌面普通操作不自动持有**（不抢占远程）；他人（含桌面）持有时远程写被服务端拒绝（attach 回 `session.attach.denied`、写命令回错误）
+- **显式接管是唯一转移方式**：远程 `controller.takeover` 消息；桌面 `controller_takeover` command（遮罩「接管」按钮）与 `pty_claim`（终端接管回来顺带获得）。转移 + 剥离旧持有者全部终端归属归还桌面；接管确认按"重连"语义全量重同步（sessions.list 重拉 + 终端重 attach，见 remote-transport `applyControllerChanged`）
+- **断连自动释放**；持有期间其他设备（含桌面）整界面遮罩（ControllerMask `selfLabel` 响应式维护——重连换连接 id 后旧快照会自己遮自己；桌面 UI 启动/重载经 `controller_status` command 补初始快照）
+- **revision 版本号**：每次状态变化 +1，附在 `state-changed`/`controller-changed` payload 与 hello.ok（controller：null=无人/0=桌面/连接 id）/sessions；前端（remote-transport `filterStaleEvent`）单调过滤旧事件防乱序覆盖，**版本跳变触发 `state-resync-needed` 全 section 权威重拉**（兜底乱序漏刷）；**服务端保序**：`emit_state_changed`/`broadcast_controller_changed` 取号与入队同一锁窗口（到达序=取号序，并发回归测试守卫），否则低版本事件后到被前端丢弃、状态永久丢失
+- **state-changed 统一广播**：写命令落盘后（`#[cc_command]` 宏出口自动 emit）全端按 section 权威刷新（前端状态中心 `src/state/sections.ts` 查表分发：section → loader 注册表，plugins 级联子项、providers/config 设置面板打开时暂存防覆盖编辑中表单、关闭补刷；App.vue 只订阅转发，新功能在注册表加一行）。**注意**：刷新回调链不得包含写操作（曾因 loadAppConfig 内无条件 doSyncEnv 写回 + 事件刷新形成 写→广播→读→写 死循环，风暴塞满通道致 RpcResult 丢失、config.json 原子写窗口被击穿丢失 remote 配置）
 
 ### 响应式适配约定（手机断点 ≤768px）
 
@@ -264,9 +301,11 @@ UI 已浏览器化（一套 UI 走桌面 Tauri / 宽屏浏览器 / 手机浏览�
 - **终端字号**：手机 = 桌面设置 × 0.75（`XTermTerminal` 的 `effectiveFontSize`），断点跨越自动重算
 - **软键盘**：App.vue 同步 `visualViewport.height` 到 app-root 高度，驱动终端 fit
 - **safe-area**：底部栏用 `--safe-area-bottom`（env(safe-area-inset-bottom)），视口 meta 带 viewport-fit=cover
-- **触屏适配**：所有"hover 才显示"的操作按钮必须包 `@media (hover: hover)`（触屏设备 hover:none 无悬停，按钮常显——SessionItem/ProviderCard 已改）；快捷键工具条（QuickKeyBar）补软键盘按不出的控制键
+- **触屏适配**：所有"hover 才显示"的操作按钮必须包 `@media (hover: hover)`（触屏设备 hover:none 无悬停，按钮常显——SessionItem/ProviderCard 已改）；快捷键工具条（QuickKeyBar）补软键盘按不出的控制键（Esc/⇧Tab/Ctrl+J/Ctrl+U/↑↓←→）+「选择复制」action 按钮（软键盘由点击终端区域唤出，「键盘」按钮已按用户决策移除）
+- **触摸手势隔离**（XTermTerminal.vue 内联手势处理，阈值 10px）：终端 tap 无自定义行为（点击/光标跳转由 xterm 自然处理）；拖动滚动＝capture 阶段接管触摸、按行累积派发**合成 WheelEvent** 给 xterm（CLI 开 mouse reporting 时编码滚轮序列走 TUI 内部滚动，未开时滚 scrollback，坐标可控无 NaN）且 blur 收起已弹出的键盘（高度回升只 fit 不滚底）。**软键盘由点击终端区域唤出**（xterm 自然聚焦；「键盘」按钮已移除）。**复制部分内容**＝「选择复制」按钮打开复制阅读器（TerminalCopyReader）：`captureSnapshot` 抓 buffer 全量快照 → `reflowSnapshot`（`src/utils/terminal-reflow.ts`）反渲染还原逻辑段落（isWrapped 拼接/围栏原样/满宽启发式 CJK 显示宽度/表格 diff 保护）→ 全屏 pre 展示，**系统原生长按选择手柄**选择 → getSelection → `copyText`（http 非安全上下文 execCommand 降级）；`@contextmenu.stop` 放行 Android 长按菜单（main.ts 拦截仅 PROD，须生产构建验证）；智能/原始双模式，误拼兜底
+- **会话身份链**：CLI `--resume` 会 fork 新 sessionId，`TerminalTab.sessionIds` 记录演变历史（旧 id 保留认领）；**所有恢复入口（App/TerminalView 历史、remote-session-created）统一走 `sessionStore.resumeSessionTab`**（复用优先：命中切 Tab/重启，未命中才新建），防二次 spawn、重复 Tab 与名字变 sessionId 编码；**用户显式关闭双路径对称广播 `remote-session-closed`**（桌面 pty_kill / 远程 session.kill，先广播后 kill）→ 各端联动删 Tab，自然退出（pty-exit）只置 stopped 保留 Tab；remote 会话列表经 `RemoteSession.sessionId` 下发（hook 建立 ptyId→sessionId 映射），浏览器端采纳 Tab 名优先取历史会话名（未加载时回退项目名，加载后 backfillTabNamesFromHistory 回填）
 - **触屏已知限制**：Provider 列表拖拽排序（HTML5 drag）移动端不可用，待需要时补上/下移按钮
-- 构建产物由 remote_server/relay 的 rust-embed 嵌入：改前端后 `npm run build` 在 8747 即时生效（debug 实时读 dist）；**中继端（orczh.top:8800）是 release 编译时嵌入，必须重编 relay 并重部署**——完整流程见 remote/docs/deploy.md「日常更新部署（复用手册）」
+- 构建产物由 remote/web-assets 共享 crate 供给（两端同一实现）：默认 rust-embed 内嵌（debug 实时读 dist，改前端后 `npm run build` 在 8747 即时生效）；配置 `CC_BOX_RELAY_WEB_DIR` / `CC_BOX_WEB_DIR` 指向磁盘目录后优先读盘（miss 回退内嵌）——**中继端配置后仅前端更新 scp dist 即生效免重编**，未配置时 release 仍是编译期嵌入、须重编 relay 并重部署——完整流程见 remote/docs/deploy.md「日常更新部署（复用手册）」
 
 ### 测试要求
 

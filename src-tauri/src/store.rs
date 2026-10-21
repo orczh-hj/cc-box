@@ -1008,10 +1008,17 @@ pub fn update_app_config(updates: serde_json::Value) -> Result<()> {
     let content = serde_json::to_string_pretty(&merged)?;
     let tmp_path = config_path.with_extension("json.tmp");
     fs::write(&tmp_path, &content)?;
-    // Windows: rename 到已存在目标需先移除；失败时回退直接写（保底不丢数据）
+    // Windows: rename 到已存在目标偶发失败（目标被读方短暂打开等）；先重试
+    // 一次，仍失败才走 remove+rename。remove 与 rename 之间被杀会丢整个文件
+    // （曾因前端写风暴高频触发此窗口，remote 配置整体丢失），remove 前先把
+    // 现文件挪到 .bak 保底可恢复
     if fs::rename(&tmp_path, &config_path).is_err() {
-        let _ = fs::remove_file(&config_path);
-        fs::rename(&tmp_path, &config_path)?;
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        if fs::rename(&tmp_path, &config_path).is_err() {
+            let _ = fs::rename(&config_path, config_path.with_extension("json.bak"));
+            let _ = fs::remove_file(&config_path);
+            fs::rename(&tmp_path, &config_path)?;
+        }
     }
 
     Ok(())
@@ -2819,6 +2826,15 @@ pub(crate) fn set_skill_enabled_in(
     };
 
     if let Err(e) = fs::rename(&from, &to) {
+        // Windows：skill 目录被运行中的进程占用（典型：Claude Code 会话已加载
+        // 该 skill，目录句柄未共享删除）→ 给出可行动的提示而非裸 os error
+        if is_dir_busy_error(&e) {
+            bail!(
+                "Skill '{}' is in use (directory locked, likely by a running Claude \
+                 Code session); close the session and retry",
+                name
+            );
+        }
         // 跨卷时 rename 可能失败，回退到 copy + remove
         if e.raw_os_error() == Some(17) || e.raw_os_error() == Some(18) {
             copy_dir_recursive(&from, &to)
@@ -2831,10 +2847,20 @@ pub(crate) fn set_skill_enabled_in(
                     .with_context(|| format!("Failed to {} skill '{}'", op, name))?;
             }
         } else {
-            return Err(e).with_context(|| format!("Failed to {} skill '{}'", op, name));
+            // 消息带上底层原因：错误经 anyhow to_string 只显最外层 context，
+            // 不带 (e) 时 os error（如拒绝访问的具体码）在链路中丢失
+            let cause = e.to_string();
+            return Err(e).with_context(move || {
+                format!("Failed to {} skill '{}' ({})", op, name, cause)
+            });
         }
     }
     Ok(())
+}
+
+/// 目录被占用判定（Windows：ERROR_ACCESS_DENIED=5 / ERROR_SHARING_VIOLATION=32）
+pub(crate) fn is_dir_busy_error(e: &std::io::Error) -> bool {
+    matches!(e.raw_os_error(), Some(5) | Some(32))
 }
 
 /// 递归复制目录（用于跨卷 fallback）

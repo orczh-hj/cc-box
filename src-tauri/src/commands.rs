@@ -2,6 +2,7 @@
 //! 定义所有 IPC 命令
 
 use anyhow::Result;
+use cc_box_macros::cc_command;
 use serde::{Deserialize, Serialize};
 use tauri::AppHandle;
 
@@ -19,28 +20,25 @@ use crate::providers::{
 
 #[derive(Debug, Deserialize)]
 pub struct PtySpawnOptions {
-    cwd: String,
+    pub(crate) cwd: String,
     #[serde(rename = "type")]
-    pty_type: String, // "claude" | "shell"
-    cols: Option<u16>,
-    rows: Option<u16>,
-    args: Option<Vec<String>>,
+    pub(crate) pty_type: String, // "claude" | "shell"
+    pub(crate) cols: Option<u16>,
+    pub(crate) rows: Option<u16>,
+    pub(crate) args: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct PtySpawnResult {
-    id: String,
+    pub(crate) id: String,
     #[serde(rename = "type")]
-    pty_type: String,
-    cwd: String,
+    pub(crate) pty_type: String,
+    pub(crate) cwd: String,
 }
 
-/// 启动 PTY
-#[tauri::command]
-pub async fn pty_spawn(
-    options: PtySpawnOptions,
-    _app_handle: AppHandle,
-) -> Result<Option<PtySpawnResult>, String> {
+/// spawn 核心：桌面 pty_spawn command 与远程 session.create 的单一实现
+/// （同步阻塞——spawn_claude 含子进程启动等待，调用方自行放线程）
+pub(crate) fn spawn_pty_core(options: PtySpawnOptions) -> Result<PtySpawnResult, String> {
     let cols = options.cols.unwrap_or(80);
     let rows = options.rows.unwrap_or(24);
 
@@ -53,13 +51,22 @@ pub async fn pty_spawn(
     };
 
     match result {
-        Ok(info) => Ok(Some(PtySpawnResult {
+        Ok(info) => Ok(PtySpawnResult {
             id: info.id,
             pty_type: info.pty_type,
             cwd: info.cwd,
-        })),
+        }),
         Err(e) => Err(e.to_string()),
     }
+}
+
+/// 启动 PTY
+#[tauri::command]
+pub async fn pty_spawn(
+    options: PtySpawnOptions,
+    _app_handle: AppHandle,
+) -> Result<Option<PtySpawnResult>, String> {
+    spawn_pty_core(options).map(Some)
 }
 
 /// 写入 PTY 输入
@@ -98,17 +105,52 @@ pub async fn pty_resize(id: String, cols: u16, rows: u16) -> Result<bool, String
         .map_err(|e| e.to_string())
 }
 
-/// 桌面端接管被远程持有的会话（解除遮罩 + 收回控制权）
+/// 桌面端接管被远程持有的会话（解除遮罩 + 收回控制权 + 获得全局控制权）
 #[tauri::command]
 pub async fn pty_claim(id: String) -> Result<(), String> {
     crate::remote_state::REMOTE_STATE.claim(&id);
     Ok(())
 }
 
-/// 杀掉 PTY
+/// 桌面端显式接管全局控制权（设备互斥：ControllerMask「接管」按钮调用；
+/// 剥离远程持有者全部终端归属并广播，桌面普通操作不触发）
+#[tauri::command]
+pub async fn controller_takeover() -> Result<(), String> {
+    crate::remote_state::REMOTE_STATE.desktop_takeover();
+    Ok(())
+}
+
+/// 当前全局控制权持有者（''=无人；'desktop'=桌面；数字串=远程连接 id）。
+/// 桌面 UI 启动/重载时错过历史 controller-changed 事件，挂载时查询补初始快照
+/// （远程端 hello.ok 自带快照，此命令作统一校准入口）
+#[tauri::command]
+pub async fn controller_status() -> Result<String, String> {
+    Ok(crate::remote_state::REMOTE_STATE
+        .controller()
+        .map(|c| c.id_label())
+        .unwrap_or_default())
+}
+
+/// 会话重命名双端同步（广播中转：Rust 不存 Tab 元数据，桌面/手机两端各自
+/// 应用同一个 updateTabName；发起端也收回环，同名幂等无副作用）。
+/// 写但不广播 state-changed（走 SESSION_RENAMED 专用事件），registry! 登记 write(None)
+#[cc_command(write)]
+#[tauri::command]
+pub async fn rename_session(pty_id: String, name: String) -> Result<(), String> {
+    crate::remote_state::emit_event(crate::events::names::SESSION_RENAMED, &pty_id, &name);
+    Ok(())
+}
+
+/// 杀掉 PTY（用户显式关闭：桌面 closeTab/closeAllTabs 唯一后端路径）
 #[tauri::command]
 pub async fn pty_kill(id: String) -> Result<bool, String> {
     let manager = get_pty_manager().ok_or_else(|| "PTY manager not initialized".to_string())?;
+
+    // 先广播 remote-session-closed 再 kill（与远程 session.kill 同一语义与
+    // 顺序）：各端（含其他浏览器端）联动删 Tab，"打开的标签页"不残留 stopped
+    // 条目；自然退出（pty-exit 只置 stopped 保留 Tab）与此相区分。先发保证
+    // closed 先于 exit 到达（同连接保序），晚到会因 ptyId 已清而匹配不到 Tab
+    crate::remote_state::emit_event(crate::events::names::REMOTE_SESSION_CLOSED, &id, "");
 
     manager.kill(&id).map(|_| true).map_err(|e| e.to_string())
 }
@@ -276,7 +318,9 @@ pub async fn get_app_config() -> Result<AppConfig, String> {
     crate::store::get_app_config().map_err(|e| e.to_string())
 }
 
-/// 更新应用配置
+/// 更新应用配置（state-changed 广播：config section，全端权威刷新——由
+/// #[cc_command] 在函数出口自动广播）
+#[cc_command(write = "config")]
 #[tauri::command]
 pub async fn update_app_config(updates: serde_json::Value) -> Result<(), String> {
     crate::store::update_app_config(updates).map_err(|e| e.to_string())
@@ -360,7 +404,9 @@ pub async fn get_remote_status() -> Result<RemoteStatus, String> {
 static REMOTE_OP_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
     std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
 
-/// 开/关远程访问（动态启停服务器），返回最新状态
+/// 开/关远程访问（动态启停服务器），返回最新状态。
+/// 写但不广播 state-changed（开关结果由返回值/连接状态自身体现），registry! 登记 write(None)
+#[cc_command(write)]
 #[tauri::command]
 pub async fn set_remote_enabled(enabled: bool) -> Result<RemoteStatus, String> {
     let _op_guard = REMOTE_OP_LOCK.lock().await;
@@ -420,7 +466,8 @@ pub async fn get_default_claude_options() -> Result<crate::store::DefaultClaudeO
     crate::store::get_default_claude_options().map_err(|e| e.to_string())
 }
 
-/// 保存默认 Claude 选项
+/// 保存默认 Claude 选项（state-changed 广播：config section，#[cc_command] 自动）
+#[cc_command(write = "config")]
 #[tauri::command]
 pub async fn save_default_claude_options(
     options: crate::store::DefaultClaudeOptions,
@@ -476,25 +523,34 @@ pub async fn get_all_plugins(project_path: String) -> Result<Vec<PluginInfo>, St
     crate::store::get_all_plugins(&project_path).map_err(|e| e.to_string())
 }
 
-/// 切换用户级 Skill 启用状态（移动目录到 ~/.cc-box/disabled/skills/）
+/// 切换用户级 Skill 启用状态（移动目录到 ~/.cc-box/disabled/skills/；
+/// state-changed 广播：skills section，全端权威刷新——#[cc_command] 自动）
+#[cc_command(write = "skills")]
 #[tauri::command]
 pub async fn set_skill_enabled(name: String, enabled: bool) -> Result<(), String> {
     crate::store::set_skill_enabled(&name, enabled).map_err(|e| e.to_string())
 }
 
-/// 切换用户级 Agent 启用状态（移动文件到 ~/.cc-box/disabled/agents/）
+/// 切换用户级 Agent 启用状态（移动文件到 ~/.cc-box/disabled/agents/；
+/// state-changed 广播：agents section，#[cc_command] 自动）
+#[cc_command(write = "agents")]
 #[tauri::command]
 pub async fn set_agent_enabled(name: String, enabled: bool) -> Result<(), String> {
     crate::store::set_agent_enabled(&name, enabled).map_err(|e| e.to_string())
 }
 
-/// 切换用户级 MCP Server 启用状态（剪切 ~/.claude.json::mcpServers.<name> 条目）
+/// 切换用户级 MCP Server 启用状态（剪切 ~/.claude.json::mcpServers.<name> 条目；
+/// state-changed 广播：mcp section，#[cc_command] 自动）
+#[cc_command(write = "mcp")]
 #[tauri::command]
 pub async fn set_mcp_server_enabled(name: String, enabled: bool) -> Result<(), String> {
     crate::store::set_mcp_server_enabled(&name, enabled).map_err(|e| e.to_string())
 }
 
-/// 切换 Plugin 启用状态（调用 claude plugin enable/disable）
+/// 切换 Plugin 启用状态（调用 claude plugin enable/disable；
+/// state-changed 广播：plugins section（其 skills/agents/mcp 子项由前端统一刷新），
+/// #[cc_command] 自动）
+#[cc_command(write = "plugins")]
 #[tauri::command]
 pub async fn set_plugin_enabled(plugin_id: String, enabled: bool) -> Result<(), String> {
     crate::store::set_plugin_enabled(&plugin_id, enabled).map_err(|e| e.to_string())
@@ -601,19 +657,22 @@ pub async fn get_providers_config() -> Result<ProvidersConfig, String> {
     crate::providers::get_providers_config().map_err(|e| e.to_string())
 }
 
-/// 保存 Provider 配置
+/// 保存 Provider 配置（state-changed 广播：providers section，#[cc_command] 自动）
+#[cc_command(write = "providers")]
 #[tauri::command]
 pub async fn save_providers_config(config: ProvidersConfig) -> Result<(), String> {
     crate::providers::save_providers_config(&config).map_err(|e| e.to_string())
 }
 
-/// 激活 Provider
+/// 激活 Provider（state-changed 广播：providers section，#[cc_command] 自动）
+#[cc_command(write = "providers")]
 #[tauri::command]
 pub async fn activate_provider(provider_id: String) -> Result<(), String> {
     crate::providers::activate_provider(&provider_id).map_err(|e| e.to_string())
 }
 
-/// 创建 Provider
+/// 创建 Provider（state-changed 广播：providers section，#[cc_command] 自动）
+#[cc_command(write = "providers")]
 #[tauri::command]
 pub async fn create_provider(
     name: String,
@@ -628,7 +687,8 @@ pub async fn create_provider(
         .map_err(|e| e.to_string())
 }
 
-/// 更新 Provider
+/// 更新 Provider（state-changed 广播：providers section，#[cc_command] 自动）
+#[cc_command(write = "providers")]
 #[tauri::command]
 pub async fn update_provider(
     id: String,
@@ -641,19 +701,22 @@ pub async fn update_provider(
         .map_err(|e| e.to_string())
 }
 
-/// 删除 Provider
+/// 删除 Provider（state-changed 广播：providers section，#[cc_command] 自动）
+#[cc_command(write = "providers")]
 #[tauri::command]
 pub async fn delete_provider(id: String) -> Result<(), String> {
     crate::providers::delete_provider(&id).map_err(|e| e.to_string())
 }
 
-/// 更新 Provider 排序
+/// 更新 Provider 排序（state-changed 广播：providers section，#[cc_command] 自动）
+#[cc_command(write = "providers")]
 #[tauri::command]
 pub async fn update_provider_sort_order(provider_ids: Vec<String>) -> Result<(), String> {
     crate::providers::update_provider_sort_order(provider_ids).map_err(|e| e.to_string())
 }
 
-/// 更新通用配置
+/// 更新通用配置（state-changed 广播：providers section，#[cc_command] 自动）
+#[cc_command(write = "providers")]
 #[tauri::command]
 pub async fn update_common_config(enabled: bool, settings: serde_json::Value) -> Result<(), String> {
     crate::providers::update_common_config(enabled, settings).map_err(|e| e.to_string())
@@ -665,7 +728,9 @@ pub async fn check_cc_switch_db_exists() -> Result<bool, String> {
     Ok(crate::providers::check_cc_switch_db_exists())
 }
 
-/// 从 cc-switch 数据库导入 Provider
+/// 从 cc-switch 数据库导入 Provider（state-changed 广播：providers section，
+/// #[cc_command] 自动）
+#[cc_command(write = "providers")]
 #[tauri::command]
 pub async fn import_from_cc_switch() -> Result<ImportResult, String> {
     crate::providers::import_from_cc_switch().map_err(|e| e.to_string())

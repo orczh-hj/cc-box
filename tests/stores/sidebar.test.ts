@@ -176,21 +176,17 @@ describe('sidebar store', () => {
       store.plugins = [
         { id: 'paper-tool@orczh', name: 'paper-tool', version: '1.0', scope: 'user', enabled: true, installPath: '/x' },
       ]
-      // 已加载过 cwd，触发子项 reload 时会用它
       ;(store as unknown as { loadedCwd: string }).loadedCwd = '/proj'
       mockSetPluginEnabled.mockResolvedValue(undefined)
-      mockGetAllSkills.mockResolvedValue([])
-      mockGetAllAgents.mockResolvedValue([])
-      mockGetAllMcpServers.mockResolvedValue([])
 
       await store.togglePluginEnabled('paper-tool@orczh', false)
 
-      // plugin 自身的列表不重拉（避免覆盖乐观更新）
+      // toggle 本身不重拉任何列表：plugin 乐观更新保留，子项（skills/agents/mcp）
+      // 刷新统一由 state-changed 回环事件驱动（Rust 写命令广播 → App.vue 订阅 → 状态中心 sections.ts）
       expect(mockGetAllPlugins).not.toHaveBeenCalled()
-      // skills/agents/mcp 子项需要 reload（后端按 plugin.enabled 过滤）
-      expect(mockGetAllSkills).toHaveBeenCalledWith('/proj')
-      expect(mockGetAllAgents).toHaveBeenCalledWith('/proj')
-      expect(mockGetAllMcpServers).toHaveBeenCalledWith('/proj')
+      expect(mockGetAllSkills).not.toHaveBeenCalled()
+      expect(mockGetAllAgents).not.toHaveBeenCalled()
+      expect(mockGetAllMcpServers).not.toHaveBeenCalled()
       expect(store.plugins[0].enabled).toBe(false)
     })
 
@@ -251,4 +247,7 @@ describe('sidebar store', () => {
       expect(mockGetAllMcpServers).not.toHaveBeenCalled()
     })
   })
+
+  // state-changed 权威刷新的 section 分发/级联/暂存逻辑已迁移到状态中心，
+  // 对应测试见 tests/state/sections.test.ts
 })

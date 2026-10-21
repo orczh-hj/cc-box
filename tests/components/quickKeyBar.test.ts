@@ -8,14 +8,18 @@ vi.mock('vue-i18n', () => ({
 
 import QuickKeyBar from '@/components/QuickKeyBar.vue'
 
-/** label → 期望发送的终端转义序列 */
+/** label → 期望发送的终端转义序列（action 按钮 select 不在此列） */
 const EXPECT: Record<string, string> = {
   'Esc': '\x1b',
   '⇧Tab': '\x1b[Z',   // Shift+Tab：Claude CLI 工作模式切换
   'Ctrl+J': '\x0a',    // 换行不提交
-  '^C': '\x03',
+  'Ctrl+U': '\x15',    // 清空当前输入行
   '↑': '\x1b[A',
   '↓': '\x1b[B',
+  '←': '\x1b[D',
+  '→': '\x1b[C',
+  'Home': '\x1b[H',
+  'End': '\x1b[F',
 }
 
 describe('QuickKeyBar（手机快捷键工具条）', () => {
@@ -23,24 +27,37 @@ describe('QuickKeyBar（手机快捷键工具条）', () => {
     mockT.mockClear()
   })
 
-  // 六个控制键齐全（软键盘按不出的键全由按钮补齐）
+  // 键序：选择复制 action 按钮（第一位）+ 十个字节键；
+  // ^C 与「键盘」按钮（点击终端已可唤起软键盘）已按用户决策移除
   it('QuickKeyBar_RendersAllKeys_001', () => {
     const wrapper = mount(QuickKeyBar)
     const labels = wrapper.findAll('button').map(b => b.text())
-    expect(labels).toEqual(Object.keys(EXPECT))
+    expect(labels).toEqual(['quickKeySelectCopy', ...Object.keys(EXPECT)])
+    expect(labels).not.toContain('^C')
+    expect(labels).not.toContain('quickKeyKeyboard')
   })
 
-  // 点击发射对应转义序列（重点：模式切换与换行）
+  // 点击字节键发射对应转义序列（重点：模式切换、换行与清行）
   it('QuickKeyBar_EmitsEscapeSequences_002', async () => {
     const wrapper = mount(QuickKeyBar)
-    for (const btn of wrapper.findAll('button')) {
+    const byteBtns = wrapper.findAll('button').filter(b => !b.classes().includes('qk-action'))
+    for (const btn of byteBtns) {
       await btn.trigger('click')
     }
     const emitted = wrapper.emitted('send')!
-    expect(emitted).toHaveLength(6)
-    const labels = wrapper.findAll('button').map(b => b.text())
-    labels.forEach((label, i) => {
-      expect(emitted[i]).toEqual([EXPECT[label]])
+    expect(emitted).toHaveLength(Object.keys(EXPECT).length)
+    byteBtns.forEach((btn, i) => {
+      expect(emitted[i]).toEqual([EXPECT[btn.text()]])
     })
+  })
+
+  // 「选择复制」action 按钮：不发字节，emit select（进入终端选择模式）
+  it('QuickKeyBar_SelectAction_003', async () => {
+    const wrapper = mount(QuickKeyBar)
+    const selectBtn = wrapper.findAll('button').find(b => b.text() === 'quickKeySelectCopy')
+    expect(selectBtn!.classes()).toContain('qk-action')
+    await selectBtn!.trigger('click')
+    expect(wrapper.emitted('select')).toHaveLength(1)
+    expect(wrapper.emitted('send')).toBeUndefined()
   })
 })

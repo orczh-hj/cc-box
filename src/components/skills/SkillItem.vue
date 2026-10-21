@@ -23,6 +23,9 @@
       </button>
     </div>
 
+    <!-- 开关失败反馈（乐观更新已回滚，一行截断小字；完整原因悬停 title） -->
+    <div v-if="toggleError" class="skill-toggle-error" :title="toggleError">{{ toggleError }}</div>
+
     <!-- Skill Details (expanded) -->
     <div v-if="isExpanded" class="skill-details">
       <div v-if="skill.description" class="skill-description-full">
@@ -40,7 +43,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, onUnmounted } from 'vue'
 import { useI18n } from 'vue-i18n'
 import type { SkillInfo } from '@/types'
 import { sendTerminalCommand } from '@/composables/useTerminalCommand'
@@ -66,13 +69,24 @@ function emitUseSkill() {
   sendTerminalCommand(props.skill.invokeFormat)
 }
 
+/** 开关失败提示（5s 自动消失）：后端错误原文展示（如 skill 目录被运行中的
+ * Claude Code 会话锁定时提示关闭会话后重试），桌面/远程同一组件同一反馈 */
+const toggleError = ref('')
+let errorTimer: ReturnType<typeof setTimeout> | undefined
+
 async function onToggle(newValue: boolean) {
   try {
     await sidebarStore.toggleSkillEnabled(props.skill.name, newValue)
+    toggleError.value = ''
   } catch (err) {
     console.error('[SkillItem] toggle failed:', err)
+    toggleError.value = String(err)
+    clearTimeout(errorTimer)
+    errorTimer = setTimeout(() => { toggleError.value = '' }, 5000)
   }
 }
+
+onUnmounted(() => clearTimeout(errorTimer))
 </script>
 
 <style scoped>
@@ -107,6 +121,15 @@ async function onToggle(newValue: boolean) {
   gap: 8px;
   cursor: pointer;
   user-select: none;
+}
+
+.skill-toggle-error {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--danger-color, #e5484d);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .expand-icon {

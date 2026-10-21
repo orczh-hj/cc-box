@@ -28,7 +28,8 @@ pub enum ClientMessage {
     #[serde(rename = "projects.list")]
     ProjectsList,
     /// 在指定项目新建 Claude 会话；带 sessionId 时为恢复历史会话（--resume）；
-    /// skipPermissions/customArgs 与桌面新建选项一致（拼 CLI 参数）
+    /// skipPermissions/customArgs 与桌面新建选项一致（拼 CLI 参数）；
+    /// sessionName 为恢复会话的显示名（历史列表提供，桌面建 Tab 用，防编码名）
     #[serde(rename = "session.create")]
     SessionCreate {
         path: String,
@@ -38,6 +39,8 @@ pub enum ClientMessage {
         skip_permissions: Option<bool>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         custom_args: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_name: Option<String>,
     },
     /// 关闭（杀掉）指定会话
     #[serde(rename = "session.kill")]
@@ -72,6 +75,10 @@ pub enum ClientMessage {
         cmd: String,
         args: serde_json::Value,
     },
+    /// 抢占全局控制权（设备互斥：他端持有时唯一获取方式；attach 不能抢占，
+    /// 断连自动释放。接管成功以 controller-changed 广播确认）
+    #[serde(rename = "controller.takeover")]
+    ControllerTakeover,
 }
 
 /// 桌面 → 手机消息
@@ -82,11 +89,26 @@ pub enum ServerMessage {
     HelloOk {
         ver: u32,
         device_name: String,
+        /// 本连接唯一标识（前端自判"当前控制者是不是自己"的遮罩依据）
+        #[serde(default)]
+        conn_id: u64,
+        /// 当前全局控制者连接 id（None=无人持有，桌面不受限）；serde default
+        /// 兼容旧桌面端不下发该字段的场景
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        controller: Option<u64>,
+        /// 服务端状态版本基线（接管/重连后全量刷新对齐；防旧事件覆盖）
+        #[serde(default)]
+        revision: u64,
     },
     #[serde(rename = "hello.error")]
     HelloError { error: String },
     #[serde(rename = "sessions")]
-    Sessions { list: Vec<RemoteSession> },
+    Sessions {
+        list: Vec<RemoteSession>,
+        /// 状态版本快照（全量刷新基线；旧桌面端缺省 0）
+        #[serde(default)]
+        revision: u64,
+    },
     #[serde(rename = "projects")]
     Projects { list: Vec<RemoteProject> },
     /// 新会话创建成功
@@ -106,6 +128,9 @@ pub enum ServerMessage {
     /// 接管成功，附快照 tail
     #[serde(rename = "session.attached")]
     SessionAttached { id: String, cols: u16, rows: u16, tail: String },
+    /// attach 被拒：全局控制权被其他设备持有（先 controller.takeover 接管）
+    #[serde(rename = "session.attach.denied")]
+    SessionAttachDenied { id: String, reason: String },
     /// 会话被收回（桌面接管 / 连接断开自动归还）
     #[serde(rename = "session.detached")]
     SessionDetached { id: String, reason: String },
@@ -148,6 +173,9 @@ pub struct RemoteSession {
     pub cwd: String,
     pub working: bool,
     pub pending: bool,
+    /// Claude 会话 id（hook SessionStart 建立；shell 会话与旧版桌面端缺失）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
 }
 
 /// 远程可见的项目（新建会话用）
@@ -267,6 +295,43 @@ mod tests {
     #[test]
     fn contract_client_rpc_call() {
         round_trip_client(include_str!("../samples/client-rpc-call.json"));
+    }
+
+    #[test]
+    fn contract_client_controller_takeover() {
+        round_trip_client(include_str!("../samples/client-controller-takeover.json"));
+    }
+
+    #[test]
+    fn contract_server_session_attach_denied() {
+        round_trip_server(include_str!("../samples/server-session-attach-denied.json"));
+    }
+
+    /// 向后兼容：旧桌面端 hello.ok 不带 connId/controller/revision（serde default）
+    #[test]
+    fn hello_ok_旧字段缺失可反序列化() {
+        let msg: ServerMessage =
+            serde_json::from_str(r#"{"type":"hello.ok","ver":1,"deviceName":"CC-Box"}"#).unwrap();
+        match msg {
+            ServerMessage::HelloOk { conn_id, controller, revision, .. } => {
+                assert_eq!(conn_id, 0);
+                assert_eq!(controller, None);
+                assert_eq!(revision, 0);
+            }
+            other => panic!("expected HelloOk, got {:?}", other),
+        }
+        // 旧 sessions 消息缺 revision
+        let msg: ServerMessage = serde_json::from_str(
+            r#"{"type":"sessions","list":[]}"#,
+        )
+        .unwrap();
+        match msg {
+            ServerMessage::Sessions { list, revision } => {
+                assert!(list.is_empty());
+                assert_eq!(revision, 0);
+            }
+            other => panic!("expected Sessions, got {:?}", other),
+        }
     }
 
     #[test]

@@ -30,7 +30,6 @@
     <!-- 主内容区 -->
     <div class="main-content">
       <TerminalHeader
-        :project-name="appStore.currentProject || t('claudeCode')"
         @back="handleBack"
       />
       <div class="terminal-container">
@@ -49,8 +48,17 @@
           :font-size="appStore.fontSize"
           @pty-started="handlePtyStarted"
         />
-        <!-- 快捷键工具条（手机断点）：软键盘按不出的控制键（模式切换/换行等） -->
-        <QuickKeyBar v-if="isMobile" @send="handleQuickKey" />
+        <!-- 快捷键工具条（手机断点）：键盘唤出/选择复制 + 软键盘按不出的控制键 -->
+        <QuickKeyBar v-if="isMobile" @send="handleQuickKey" @select="handleSelectCopy" />
+        <!-- 复制阅读器（手机复制部分内容）：buffer 快照 + 反渲染，系统原生长按选择 -->
+        <TerminalCopyReader
+          v-if="copyReaderData"
+          :visible="true"
+          :smart="copyReaderData.smart"
+          :raw="copyReaderData.raw"
+          :truncated="copyReaderData.truncated"
+          @close="copyReaderData = null"
+        />
       </div>
     </div>
   </div>
@@ -63,7 +71,7 @@ import { useAppStore } from '@/stores/app'
 import { useSessionStore } from '@/stores/session'
 import { useSidebarStore, type SidebarPanelType } from '@/stores/sidebar'
 import { useConfigStore } from '@/stores/config'
-import { openInFileManager, logMessage, onRemoteSessionCreated } from '@/api/tauri'
+import { openInFileManager, logMessage, onRemoteSessionCreated, onRemoteSessionClosed, onSessionRenamed, renameSession } from '@/api/tauri'
 import { sendTerminalCommand } from '@/composables/useTerminalCommand'
 import { useWindowAttention } from '@/composables/useWindowAttention'
 import { useStatusMonitor } from '@/composables/useStatusMonitor'
@@ -73,6 +81,8 @@ import TerminalHeader from './TerminalHeader.vue'
 import XTermTerminal from './XTermTerminal.vue'
 import IconBar from './IconBar.vue'
 import QuickKeyBar from './QuickKeyBar.vue'
+import TerminalCopyReader from './TerminalCopyReader.vue'
+import { reflowSnapshot } from '@/utils/terminal-reflow'
 import RemoteModal from './RemoteModal.vue'
 import SidebarPanel from './sidebar/SidebarPanel.vue'
 import { useIsMobile } from '@/composables/useMediaQuery'
@@ -91,6 +101,10 @@ const appStore = useAppStore()
 const showRemoteModal = ref(false)
 // 远程新建会话监听清理函数
 let unlistenRemoteCreated: (() => void) | null = null
+// 远程关闭会话监听清理函数
+let unlistenRemoteClosed: (() => void) | null = null
+// 会话重命名同步监听清理函数
+let unlistenSessionRenamed: (() => void) | null = null
 const sessionStore = useSessionStore()
 const sidebarStore = useSidebarStore()
 const configStore = useConfigStore()
@@ -98,9 +112,19 @@ const terminalRef = ref()
 
 const isMobile = useIsMobile()
 
+// 复制阅读器数据（null = 关闭；v-if 挂载即新快照，不常驻 DOM）
+const copyReaderData = ref<{ smart: string; raw: string; truncated: boolean } | null>(null)
+
 /** 快捷键工具条：直发控制序列到当前显示终端（sendText 含重新聚焦） */
 function handleQuickKey(bytes: string) {
   terminalRef.value?.sendText(bytes)
+}
+
+/** 「选择复制」按钮：抓 buffer 快照 → 反渲染 → 打开复制阅读器（系统原生长按选择） */
+function handleSelectCopy() {
+  const snap = terminalRef.value?.captureSnapshot?.()
+  if (!snap || snap.lines.length === 0) return
+  copyReaderData.value = reflowSnapshot(snap)
 }
 
 const { t } = useI18n()
@@ -131,7 +155,8 @@ function updateWindowTitle(cwd: string) {
 }
 
 async function startResumeSession(projectPath: string, sessionId: string, sessionName?: string) {
-  const tabId = sessionStore.createTab(projectPath, { sessionId, name: sessionName })
+  // 复用优先（resumeSessionTab）：已有该对话的 Tab 切换/重启，未命中才新建
+  const { tabId } = sessionStore.resumeSessionTab(projectPath, sessionId, sessionName)
   sessionStore.setActiveTab(tabId)
   await nextTick()
   if (terminalRef.value?.startTab) {
@@ -150,23 +175,43 @@ onMounted(async () => {
   window.addEventListener('terminal:restartSession', handleRestartSession)
 
   // 远程（手机）新建/恢复会话：建 tab 绑定 Rust 侧已 spawn 的 PTY
-  // data 为 JSON：{cwd, resume}（resume 为空串表示新建；JSON 避免 cwd 含 \t 时截断）
+  // data 为 JSON：{cwd, resume, name}（resume 为空串表示新建；JSON 避免 cwd 含 \t 时截断；
+  // name 为恢复会话的显示名——历史列表提供，防 Tab 名变 sessionId 编码）
   unlistenRemoteCreated = await onRemoteSessionCreated(({ id, data }) => {
     if (!data) return
     let cwd = ''
     let resume = ''
+    let name = ''
     try {
       const parsed = JSON.parse(data)
       cwd = parsed.cwd ?? ''
       resume = parsed.resume ?? ''
+      name = parsed.name ?? ''
     } catch {
       return
     }
     if (!cwd) return
-    const tabId = sessionStore.createTab(cwd, resume ? { sessionId: resume } : undefined)
+    // 复用优先：resume 命中已有 Tab（手机从历史恢复、桌面已开着该对话）→
+    // 重绑新 ptyId、保留原名，不新建（防重复 Tab 与 sessionId 编码名）
+    const tabId = resume
+      ? sessionStore.resumeSessionTab(cwd, resume, name || undefined).tabId
+      : sessionStore.createTab(cwd)
     sessionStore.setTabPty(tabId, id)
     sessionStore.setActiveTab(tabId)
     void nextTick(() => terminalRef.value?.startTab(tabId))
+  })
+
+  // 远程（手机）显式关闭会话：桌面同步关闭对应 Tab（pty-exit 只置 stopped
+  // 保留 Tab，远程关闭场景用户预期是关闭——与桌面 closeTab 语义对称）
+  unlistenRemoteClosed = await onRemoteSessionClosed(({ id }) => {
+    const tab = sessionStore.getTabByPtyId(id)
+    if (tab) void sessionStore.closeTab(tab.tabId)
+  })
+
+  // 会话重命名双端同步：另一端（或本端回环，同名幂等）发起的重命名按
+  // key（running=ptyId / stopped=sessionId 演变历史）应用到本地 Tab
+  unlistenSessionRenamed = await onSessionRenamed(({ id, data }) => {
+    sessionStore.applyRemoteRename(id, data)
   })
 
   const cwd = appStore.cwd
@@ -176,6 +221,8 @@ onMounted(async () => {
 
   try {
     await sessionStore.loadHistorySessions(cwd)
+    // 历史加载完成：回填远程采纳 Tab 的会话名（采纳时历史未到只能用项目名）
+    sessionStore.backfillTabNamesFromHistory()
     configStore.loadProjectConfig(cwd)
 
     // 检查是否已有该项目的运行中 Tab
@@ -197,6 +244,8 @@ onUnmounted(() => {
   window.removeEventListener('terminal:newSession', handleNewSession)
   window.removeEventListener('terminal:restartSession', handleRestartSession)
   unlistenRemoteCreated?.()
+  unlistenRemoteClosed?.()
+  unlistenSessionRenamed?.()
 })
 
 // KeepAlive 激活 → 改为 visible watcher（v-show 常驻 DOM）
@@ -243,13 +292,22 @@ function handleSwitchSession(tabId: string) {
   sessionStore.setActiveTab(tabId)
 }
 
-// 重命名会话
+// 重命名会话（本地应用 + 广播双端同步）
 function handleRenameSession(tabId: string, name: string) {
   const tab = sessionStore.tabs.get(tabId)
   if (tab?.status === 'running' && tab.ptyId) {
     sendTerminalCommand(`/rename ${name}\r`)
   }
   sessionStore.updateTabName(tabId, name)
+  // 双端同步：广播 key = ptyId（running）或 sessionId（stopped，ptyId 已空——
+  // 修复：stopped Tab 此前不广播导致另一端名字不同步）。回环幂等。
+  // 手机端同一份代码走 rpc.call → rename_session → 同一广播
+  const key = sessionStore.renameKeyForTab(tabId)
+  if (key) {
+    void renameSession(key, name).catch((e) => {
+      logMessage('warn', `rename broadcast failed: ${e}`)
+    })
+  }
 }
 
 // 新建会话
@@ -273,7 +331,7 @@ function handleRestartSession() {
   }
 }
 
-// 恢复历史会话（在新 Tab 中 --resume）
+// 恢复历史会话（复用优先：已有 Tab 切换/重启，未命中才新建 Tab --resume）
 function handleResumeSession(sessionId: string) {
   const cwd = appStore.cwd
   if (!cwd || !terminalRef.value) return
@@ -282,7 +340,7 @@ function handleResumeSession(sessionId: string) {
   const historySession = sessionStore.historySessions.find(s => s.sessionId === sessionId)
   const name = historySession?.name
 
-  const tabId = sessionStore.createTab(cwd, { sessionId, name })
+  const { tabId } = sessionStore.resumeSessionTab(cwd, sessionId, name)
   sessionStore.setActiveTab(tabId)
 
   terminalRef.value.startTab(tabId)
