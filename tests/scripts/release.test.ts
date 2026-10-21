@@ -2,10 +2,11 @@ import { describe, it, expect } from 'vitest'
 // release.js 是 CJS,module.exports 经 Vitest 互操作为默认导出
 import releaseModule from '../../scripts/release.js'
 
-const { generateLatestJson, changelogHasEntry, bumpVersion } = releaseModule as {
+const { generateLatestJson, changelogHasEntry, bumpVersion, changelogTopVersion } = releaseModule as {
   generateLatestJson: (p: Record<string, unknown>) => Record<string, any>
   changelogHasEntry: (content: string, version: string) => boolean
   bumpVersion: (v: string, t: string) => string
+  changelogTopVersion: (content: string) => string | null
 }
 
 describe('changelogHasEntry（CHANGELOG 幂等查重,格式无 v 前缀）', () => {
@@ -28,6 +29,20 @@ describe('bumpVersion', () => {
     expect(bumpVersion('0.15.9', 'patch')).toBe('0.15.10')
     expect(bumpVersion('0.15.9', 'minor')).toBe('0.16.0')
     expect(bumpVersion('0.15.9', 'major')).toBe('1.0.0')
+  })
+})
+
+describe('changelogTopVersion（断点锁定:--bump 重跑不得二次 bump 的依据）', () => {
+  // 取顶部第一个版本段——中断重跑时锁定该版本
+  it('ReleaseScript_ChangelogTopVersion_001', () => {
+    const content = '# Changelog\n\n## [0.16.0] - 2026-10-21\n\n### Features\n- X\n\n## [0.15.1] - 2026-10-20\n'
+    expect(changelogTopVersion(content)).toBe('0.16.0')
+  })
+
+  // 无版本段 → null;格式带 v 前缀不识别（写入格式无 v）
+  it('ReleaseScript_ChangelogTopVersion_002', () => {
+    expect(changelogTopVersion('# Changelog\n')).toBeNull()
+    expect(changelogTopVersion('# Changelog\n\n## [v0.16.0] - 2026-10-21\n')).toBeNull()
   })
 })
 

@@ -203,7 +203,7 @@ CC_BOX_RELAY_URL=192.168.5.105:8800 npm run tauri:dev
 npm run release -- --bump patch --notes "### Features\n- Add feature"
 ```
 
-脚本自动完成：更新版本号 → 更新 CHANGELOG → 提交推送 → 创建标签 → 监控 CI → 发布 Release → 上传 OSS。2026-10 起为**两阶段 + 断点续跑**版（网络域路由：GitHub 走代理、Gitee/OSS 强制直连，开着代理一次跑完；每阶段幂等，失败后**重跑同一命令自动续跑**，详见 docs/release-process.md）。远程组件需部署时：`npm run deploy:relay`（构建 → musl 编译 → scp 切换 → 三查，重启会使手机重新配对）。
+脚本自动完成：更新版本号 → 更新 CHANGELOG → 提交推送 → 创建标签 → 监控 CI → 发布 Release → 上传 OSS。2026-10 起为**两阶段 + 断点续跑**版（网络域路由：GitHub 走代理、Gitee/OSS 强制直连，开着代理一次跑完；每阶段幂等，失败后**重跑同一完整命令（含 --bump/--notes）自动续跑**——断点锁定自动识别在途版本，不会二次 bump；详见 docs/release-process.md）。远程组件需部署时：`npm run deploy:relay`（构建 → musl 编译 → scp 切换 → 三查，重启会使手机重新配对）。
 
 **参数说明**：
 | 参数 | 说明 |

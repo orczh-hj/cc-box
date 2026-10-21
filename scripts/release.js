@@ -101,13 +101,22 @@ function run(cmd, domain = 'direct', options = {}) {
   try {
     return attempt(makeEnv(domain === 'github'))
   } catch (e1) {
-    // auto:直连失败后换代理再试一次
+    // auto:直连失败后换代理重试(带退避,最多 3 次)——gh api 经代理存在
+    // 间歇 EOF 抖动(实测约半数请求失败),单次重试不够
     if (domain === 'auto') {
-      try {
-        return attempt(makeEnv(true))
-      } catch {}
+      for (let i = 0; i < 3; i++) {
+        try {
+          if (i > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1000)
+          return attempt(makeEnv(true))
+        } catch {}
+      }
     }
-    if (options.allowFail) return null
+    if (options.allowFail) {
+      // 失败原因留痕(silent 模式默认吞掉 stderr,排障时无据可查)
+      logInfo(`[allowFail] 命令失败(${domain}): ${cmd}`)
+      if (String(e1.stderr || '').trim()) logInfo(String(e1.stderr).trim().split('\n').slice(-2).join('\n'))
+      return null
+    }
     logError(`命令执行失败(${domain}): ${cmd}`)
     if (String(e1.stderr || '').trim()) logInfo(String(e1.stderr).trim().split('\n').slice(-3).join('\n'))
     printResumeHint()
@@ -369,7 +378,10 @@ function publishRelease(version, releaseNotes) {
  * 固定,size 相同内容已换)。gh 无 digest 字段时退化为仅 size。
  */
 function expectedAssets(version) {
-  const json = execQuiet(`gh release view v${version} --json assets`, 'auto')
+  // version 约定带 v 前缀（两条调用路径 downloadGitHubRelease 均传 v<tag>）——
+  // 历史教训：这里曾拼 `v${version}` 得 "vv0.16.2"，release not found 被误判为
+  // 网络失败（重构后 OSS 链路从未跑通过）
+  const json = execQuiet(`gh release view ${version} --json assets`, 'auto')
   if (!json) return null
   const table = {}
   for (const a of JSON.parse(json).assets || []) {
@@ -564,13 +576,15 @@ function generateLatestJson({ version, releaseNotes, files, bucketName, endpoint
   }
 }
 
-module.exports = { generateLatestJson, changelogHasEntry, bumpVersion }
+module.exports = { generateLatestJson, changelogHasEntry, bumpVersion, changelogTopVersion }
 
 // ============================================
 // 独立 OSS 上传命令(断点续跑友好:产物完整时全程免代理)
 // ============================================
 
 function ossUploadOnly(version) {
+  // 兼容 --oss-only v0.16.2 与 --oss-only 0.16.2 两种传参，统一为带 v 的 tag 名
+  version = version.startsWith('v') ? version : `v${version}`
   const result = downloadGitHubRelease(version)
   if (!result) {
     logError('产物下载失败,无法上传 OSS')
@@ -594,6 +608,49 @@ function reportProxyStatus() {
   } else {
     logInfo(`\x1b[33m⚠ 代理(${PROXY})当前不可用:GitHub 推送与产物下载将会失败。\n  失败后开启代理并重跑同一命令即可从断点继续。\x1b[0m`)
   }
+}
+
+// ============================================
+// 目标版本解析(断点锁定:--bump 重跑不再二次 bump)
+// ============================================
+
+/** 解析 CHANGELOG 顶部版本段(updateChangelog 写入格式 `## [x.y.z] - 日期`) */
+function changelogTopVersion(content) {
+  const m = content.match(/\n## \[(\d+\.\d+\.\d+)\] - /)
+  return m ? m[1] : null
+}
+
+/**
+ * 该版本是否已完整发布:tag 存在 + Release 非 draft + OSS 已是该版本。
+ * gh 查询失败按未完整处理——锁定续跑后各阶段幂等跳过,无破坏性动作。
+ */
+function releaseFullyDone(version) {
+  if (!execQuiet(`git tag -l v${version}`)) return false
+  const rel = releaseState(version)
+  if (!rel || rel.isDraft) return false
+  const cfg = loadOssConfig()
+  if (cfg && !ossAlreadyDone(`v${version}`, cfg)) return false
+  return true
+}
+
+/**
+ * 解析本次发布的目标版本:
+ * - --exact:当前版本
+ * - --bump 且存在"在途发布"(版本文件已 bump、CHANGELOG 顶部 == 当前版本,
+ *   但该版本未完整发布)→ **锁定该版本续跑**——否则重跑会把已 bump 过的
+ *   currentVersion 再 bump 一次(0.16.0 中断后重跑 --bump minor 会跳到 0.17.0)
+ * - --bump 且上个版本已完整发布 → 正常计算新版本
+ */
+function resolveTargetVersion(args) {
+  const current = getCurrentVersion()
+  if (args.exact) return current
+
+  const top = changelogTopVersion(fs.readFileSync(VERSION_FILES.changelog, 'utf-8'))
+  if (top && top === current && !releaseFullyDone(top)) {
+    logInfo(`\x1b[33m检测到未完成的发布 v${top}(版本文件与 CHANGELOG 已就绪)——锁定为续跑目标,不再二次 bump\x1b[0m`)
+    return top
+  }
+  return bumpVersion(current, args.bumpType)
 }
 
 // ============================================
@@ -693,8 +750,12 @@ async function main() {
   console.log('======================================\x1b[0m')
 
   const currentVersion = getCurrentVersion()
-  const newVersion = args.exact ? currentVersion : bumpVersion(currentVersion, args.bumpType)
-  console.log(args.exact ? `\n\x1b[33m发布当前版本: v${newVersion}\x1b[0m` : `\n\x1b[33m版本更新: v${currentVersion} -> v${newVersion}(${args.bumpType})\x1b[0m`)
+  const newVersion = resolveTargetVersion(args)
+  console.log(
+    args.exact || newVersion === currentVersion
+      ? `\n\x1b[33m目标版本: v${newVersion}\x1b[0m`
+      : `\n\x1b[33m版本更新: v${currentVersion} -> v${newVersion}(${args.bumpType})\x1b[0m`,
+  )
 
   console.log('\nRelease Notes 预览:')
   console.log(args.releaseNotes)

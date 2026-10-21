@@ -51,6 +51,7 @@ node scripts/release.js --bump minor --notes "### Features\n- Add sidebar panel\
 
 - **网络域路由**：每条网络命令显式声明域——GitHub（推送/CI/产物下载,注入代理,默认 `127.0.0.1:33210`,`CC_BOX_PROXY` 可覆盖）/ Gitee·OSS·阿里云（强制直连,清空代理 env,不受外部污染）。**开着代理可一次跑完**,阶段二的 ossutil 永不走代理
 - **断点续跑**：每个阶段幂等（版本文件/CHANGELOG 段/Release commit/远端 ref/CI 结论/Release 状态/产物 digest/OSS HEAD 逐项检查）,任何一步失败后**重跑同一命令自动跳过已完成部分**——不再需要 `--exact/--skip-ci` 组合记忆
+- **断点锁定（防二次 bump）**：`--bump` 重跑时,若检测到在途发布（版本文件与 CHANGELOG 顶部已是某版本、但该版本 tag/Release/OSS 未完整）,自动**锁定该版本续跑**而不是基于已变的 currentVersion 再 bump 一次——0.16.1 中断后重跑 `--bump patch` 曾二次 bump 出孤儿版本 0.16.2,此逻辑为该教训的修复。判定依据 `releaseFullyDone`（tag + 非 draft Release + OSS 三项全过才算完整）;gh 查询失败按未完整处理,锁定续跑只会触发幂等跳过,无破坏性
 - **分仓库推送**：origin 配置了双 push URL,一条 `git push origin` 跨两域必挂一半——脚本改为单 URL 显式分推：GitHub（代理,失败阻断）+ Gitee（直连,失败仅告警可后补）。**注意：GitHub Actions 并不会自动同步 Gitee**（release.yml 注释声称同步但无此代码）,Gitee 同步只能靠脚本的手动推送
 - **CI 按 tag 匹配**：轮询等待该 tag 的 run 出现再 watch（避免错拿别的 run）;CI 失败立即中止（旧版继续走会在 Release 步骤卡死）
 - **产物完整性**：size + sha256 digest 双校验（防半截文件,也防 CI re-run 后同 size 不同内容的漂移）
@@ -83,6 +84,13 @@ node scripts/release.js --bump minor --notes "### Features\n- Add sidebar panel\
 ```
 
 失败时脚本会打印续跑指引——**开/关代理（如需）后重跑同一命令**即可。
+
+#### 重跑操作提示（重要）
+
+- **重跑请用与首次相同的完整命令**（含 `--bump` 与 `--notes`）,不要改成 `--exact`——脚本会自动锁定在途版本,`--notes` 用于补齐未完成阶段的 Release notes
+- 重跑输出 `检测到未完成的发布 vX.Y.Z——锁定为续跑目标` 即为锁定生效,属正常行为
+- 判断"在途"的三要素：版本文件已 bump + CHANGELOG 顶部段 = 该版本 + 该版本未完整发布（tag 未建 / Release 是 draft 或不存在 / OSS 未更新,任一即算未完成）
+- 上个版本已完整发布时重跑 `--bump`,正常计算新版本（不会误锁）
 
 ### Release Notes 格式
 

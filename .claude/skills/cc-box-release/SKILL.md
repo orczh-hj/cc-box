@@ -23,7 +23,8 @@ npm run release -- --bump <level> --notes "<notes>"
 **2026-10 重构后特性（两阶段 + 断点续跑）**：
 
 - **开着代理一条命令跑完**：脚本按命令分网络域——GitHub（推送/CI/产物下载）走代理（默认 127.0.0.1:33210，`CC_BOX_PROXY` 可覆盖），Gitee/OSS/阿里云强制直连（清空代理 env）。**不需要中途开关代理**
-- **断点续跑**：每阶段幂等（版本文件/CHANGELOG 段/commit/远端 ref/CI 结论/Release 状态/产物 digest/OSS HEAD 逐项检查）。**任何一步失败 → 重跑同一命令自动跳过已完成部分**，这是绝大多数故障的正确处理方式
+- **断点续跑**：每阶段幂等（版本文件/CHANGELOG 段/commit/远端 ref/CI 结论/Release 状态/产物 digest/OSS HEAD 逐项检查）。**任何一步失败 → 重跑与首次相同的完整命令（含 `--bump` 与 `--notes`）**，自动跳过已完成部分——这是绝大多数故障的正确处理方式。**不要改成 `--exact`**（没必要，且 `--notes` 用于补齐未完成阶段的 Release notes）
+- **断点锁定（防二次 bump）**：`--bump` 重跑时若检测到在途发布（版本文件与 CHANGELOG 已 bump、但 tag/Release/OSS 未完整），自动锁定该版本续跑（输出 `检测到未完成的发布 vX.Y.Z——锁定为续跑目标`），不会基于已变的版本号再 bump 一次；上个版本已完整发布时正常计算新版本
 - **分仓库推送**：GitHub（代理，失败阻断）+ Gitee（直连，失败仅告警——**GitHub Actions 并不会自动同步 Gitee**，告警时按提示手动补推）
 - 开头会打印代理预检结果；代理未开时 GitHub 阶段会失败，开代理重跑同一命令即续
 
