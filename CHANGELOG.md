@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.16.4] - 2026-10-22
+
+### Features
+- Add reusable global toast notifications (useToast + ToastHost) with an explicit close button
+- Replace blocking alert dialogs in Provider save/import flows with non-blocking toasts; add save-failure feedback
+- File transfer UI: download actions on their own row, copy-path and clear-path buttons, size pre-check, relative path display
+
+### Fixed
+- Apply hover styles on file transfer controls only on pointer devices
+- Document local relay testing startup commands
+
+Note: phone clients need to re-pair after the relay update; refresh the browser to load the new bundle.
+
 ## [0.16.3] - 2026-10-22
 
 ### Features

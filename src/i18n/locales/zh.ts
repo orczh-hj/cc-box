@@ -369,6 +369,8 @@ export default {
   filesPathNotInserted: '已上传（终端已切换，未自动插入，可复制路径）',
   filesCopy: '复制',
   filesCopied: '已复制',
+  filesCopyPath: '复制路径',
+  filesClearPath: '清空路径',
   filesUploadAnother: '继续上传',
   filesTakeover: '接管',
   filesRetry: '重试',
@@ -411,6 +413,8 @@ export default {
   activeProvider: '当前激活：{name}',
   noProvidersToImport: '未发现可导入的 Provider 配置',
   importFailed: '导入失败',
+  providerSaveFailed: '保存失败',
+  providerSavedNeedActivate: '保存成功，请点击激活使其生效。',
 
   // Provider edit panel
   editProviderTitle: '编辑 Provider: {name}',

@@ -255,6 +255,62 @@ describe('FilesPanel 下载', () => {
     expect(mockDownload).not.toHaveBeenCalled()
   })
 
+  it('FilesPanel_ClearPathButton_1', async () => {
+    seedTab('pty-1')
+    const wrapper = mount(FilesPanel)
+    await flushPromises()
+
+    // 空输入时无清空按钮
+    expect(wrapper.find('.clear-btn').exists()).toBe(false)
+    await wrapper.find('.dl-input').setValue('.cc-box-files/a.jpg')
+    expect(wrapper.find('.clear-btn').exists()).toBe(true)
+
+    // 点击 × 清空输入并隐藏按钮
+    await wrapper.find('.clear-btn').trigger('click')
+    expect((wrapper.find('.dl-input').element as HTMLInputElement).value).toBe('')
+    expect(wrapper.find('.clear-btn').exists()).toBe(false)
+  })
+
+  it('FilesPanel_CopyPathButton_1', async () => {
+    seedTab('pty-1')
+    const { copyText } = await import('@/api/platform')
+    const wrapper = mount(FilesPanel)
+    await flushPromises()
+
+    const copyBtn = () => wrapper.findAll('button').find(b => b.text() === 'filesCopy' || b.text() === 'filesCopied')!
+    // 空路径时禁用
+    expect(copyBtn().attributes('disabled')).toBeDefined()
+
+    await wrapper.find('.dl-input').setValue('.cc-box-files/a.jpg')
+    await copyBtn().trigger('click')
+    await flushPromises()
+
+    // 只复制路径，不发起下载
+    expect(copyText).toHaveBeenCalledWith('.cc-box-files/a.jpg')
+    expect(mockDownload).not.toHaveBeenCalled()
+    expect(copyBtn().text()).toBe('filesCopied')
+  })
+
+  it('FilesPanel_BrowserPickOversizePrecheck_1', async () => {
+    seedTab('pty-1')
+    mockRelay.viaRelay = true // 中继档 20MB
+    const { fileList } = await import('@/api/tauri')
+    vi.mocked(fileList).mockResolvedValueOnce([
+      { name: 'big.bin', path: 'D:/demo/big.bin', isDir: false, size: 30 * 1024 * 1024 },
+    ])
+    const wrapper = mount(FilesPanel)
+    await flushPromises()
+
+    await wrapper.findAll('button').find(b => b.text() === 'filesBrowse')!.trigger('click')
+    await flushPromises()
+    await wrapper.find('.browser-item').trigger('click')
+    await flushPromises()
+
+    // 点选已知超限文件：提前提示，不发起下载
+    expect(wrapper.text()).toContain('filesErrTooLarge')
+    expect(mockDownload).not.toHaveBeenCalled()
+  })
+
   it('FilesPanel_DownloadRelativeInputResolved_1', async () => {
     seedTab('pty-1')
     mockDownload.mockResolvedValue({ blob: new Blob(['x']), fileName: 'a.jpg' })

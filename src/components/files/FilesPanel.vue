@@ -62,7 +62,8 @@
       <section class="section">
         <h3 class="section-title">{{ t('filesDownload') }}</h3>
 
-        <div class="dl-row">
+        <!-- 输入框独占一行（手机窄屏）；操作按钮另起一行 -->
+        <div class="dl-input-wrap">
           <input
             v-model="dlPath"
             type="text"
@@ -72,7 +73,21 @@
             @keydown.enter="startDownload"
           />
           <button
-            class="primary-btn compact"
+            v-if="dlPath"
+            class="clear-btn"
+            :title="t('filesClearPath')"
+            @click="clearDownloadPath"
+          >
+            <!-- SVG 几何居中（× 字符受字体基线影响会偏下） -->
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none"
+                 stroke="currentColor" stroke-width="2" stroke-linecap="round">
+              <path d="M18 6 6 18M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
+        <div class="dl-actions">
+          <button
+            class="primary-btn compact dl-main-btn"
             :disabled="dlState === 'transferring' || !dlPath.trim()"
             @click="startDownload"
           >{{ t('filesDownloadBtn') }}</button>
@@ -82,6 +97,12 @@
             :disabled="dlState === 'transferring'"
             @click="toggleBrowser"
           >{{ t('filesBrowse') }}</button>
+          <button
+            class="secondary-btn compact"
+            :disabled="!dlPath.trim()"
+            :title="t('filesCopyPath')"
+            @click="copyDownloadPath"
+          >{{ dlCopied ? t('filesCopied') : t('filesCopy') }}</button>
         </div>
 
         <!-- 项目内简易文件浏览器 -->
@@ -308,11 +329,29 @@ const dlProgress = ref({ transferred: 0, total: 0 })
 const dlResult = ref('')
 const dlError = ref('')
 const dlCancelled = ref(false)
+const dlCopied = ref(false)
 
 const dlPercent = computed(() =>
   dlProgress.value.total > 0 ? Math.floor((dlProgress.value.transferred / dlProgress.value.total) * 100) : 0,
 )
 const dlErrorIsController = computed(() => dlError.value === t('filesErrController'))
+
+/** 清空输入框（并复位下载状态/复制反馈） */
+function clearDownloadPath() {
+  dlPath.value = ''
+  dlState.value = 'idle'
+  dlError.value = ''
+  dlCopied.value = false
+}
+
+/** 仅复制当前路径（用户只想取路径、不下载） */
+async function copyDownloadPath() {
+  const p = dlPath.value.trim()
+  if (!p) return
+  await copyText(p)
+  dlCopied.value = true
+  setTimeout(() => { dlCopied.value = false }, 2000)
+}
 
 async function startDownload() {
   // 输入框支持项目内相对路径或绝对路径（服务端要求绝对路径，相对路径在此解析）
@@ -391,6 +430,16 @@ function browserPick(e: FileEntryLite) {
     dlPath.value = toRelative(e.path)
     browserVisible.value = false
     dlState.value = 'idle'
+    // 已知大小超限时提前提示（服务端 download_begin 仍权威校验）
+    if (limits.value && e.size != null) {
+      if (effectiveLimit.value === 0) {
+        dlState.value = 'error'
+        dlError.value = t('filesLimitDisabled')
+      } else if (e.size > effectiveLimit.value) {
+        dlState.value = 'error'
+        dlError.value = t('filesErrTooLarge')
+      }
+    }
   }
 }
 
@@ -662,20 +711,60 @@ function fmtBytes(n: number): string {
   gap: 8px;
 }
 
-.dl-row {
-  display: flex;
-  gap: 6px;
+.dl-input-wrap {
+  position: relative;
 }
 
 .dl-input {
-  flex: 1;
-  min-width: 0;
-  padding: 6px 8px;
+  width: 100%;
+  box-sizing: border-box;
+  /* 右侧留出清空按钮位置 */
+  padding: 8px 32px 8px 8px;
   border: 1px solid var(--border-color);
   border-radius: 6px;
   background: var(--bg-primary);
   color: var(--text-primary);
   font-size: 12px;
+}
+
+.clear-btn {
+  position: absolute;
+  right: 5px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 22px;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-tertiary);
+  padding: 0;
+  cursor: pointer;
+}
+
+.clear-btn svg {
+  display: block;
+}
+
+/* hover 仅指针设备（触屏无 hover，避免点击后样式粘滞） */
+@media (hover: hover) {
+  .clear-btn:hover {
+    background: var(--bg-tertiary, rgba(127, 127, 127, 0.15));
+    color: var(--text-primary);
+  }
+}
+
+/* 窄屏：按钮独立一行，下载为主按钮占满剩余宽度 */
+.dl-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.dl-actions .dl-main-btn {
+  flex: 1;
 }
 
 .file-browser {
@@ -723,8 +812,10 @@ function fmtBytes(n: number): string {
   text-align: left;
 }
 
-.browser-item:hover {
-  background: var(--bg-tertiary, rgba(127, 127, 127, 0.1));
+@media (hover: hover) {
+  .browser-item:hover {
+    background: var(--bg-tertiary, rgba(127, 127, 127, 0.1));
+  }
 }
 
 .browser-item.selected {

@@ -108,6 +108,8 @@ npm run tauri:build        # 生产构建
 
 改 `remote/`（协议/relay）或远程相关前端/Rust 后，**先在本地跑通中继全链路再部署**。命令与注意事项 → [docs/development.md](docs/development.md)「远程功能本地全链路测试」、[remote/docs/deploy.md](remote/docs/deploy.md)「本地测试（开发环境）」。
 
+**本地中继测试标准启动（终端 1 `cd remote/relay && CC_BOX_RELAY_BIND=0.0.0.0 cargo run`，终端 2 `CC_BOX_RELAY_URL=<本机局域网IP>:8800 npm run tauri:dev`，手机访问 `http://<本机IP>:8800`）。**
+
 ## 环境与仓库（速查）
 
 - **Windows**：MSVC 工具链 + C++ Build Tools（link.exe 须为 MSVC 版本）；配置细节 → [docs/development.md](docs/development.md)「Windows 环境配置」

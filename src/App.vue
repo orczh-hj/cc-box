@@ -119,6 +119,8 @@
 
   <!-- 全局控制权遮罩（设备互斥：桌面与远程设备对等，其他设备操作中时显示） -->
   <ControllerMask />
+  <!-- 全局通知宿主（useToast 的唯一渲染点） -->
+  <ToastHost />
 </div>
 </template>
 
@@ -155,6 +157,7 @@ import WelcomeView from '@/components/WelcomeView.vue'
 import ProjectSelectView from '@/components/ProjectSelectView.vue'
 import TitleBar from '@/components/TitleBar.vue'
 import ControllerMask from '@/components/ControllerMask.vue'
+import ToastHost from '@/components/ToastHost.vue'
 
 const TerminalView = defineAsyncComponent(() => import('@/components/TerminalView.vue'))
 const SettingsOverlay = defineAsyncComponent(() => import('@/components/settings/SettingsOverlay.vue'))

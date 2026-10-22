@@ -53,7 +53,7 @@ Provider 保留当前配置（含之前已合并的通用配置字段）。只�
 | **勾选**"应用通用配置" | `deepMerge(provider, common)` → 写入 `jsonContent` | 否（本地） |
 | **取消勾选**"应用通用配置" | 无操作，仅标记 `meta.commonConfigEnabled = false` | 否（本地） |
 | 保存通用配置 | 合并到所有已勾选 Provider → 保存 `providers.json` → 重新激活 | **是** |
-| 保存 | Provider 配置写入 `providers.json` | 是 |
+| 保存 | Provider 配置写入 `providers.json`，提示"请点击激活使其生效" | 是（不写 `settings.json`） |
 | 保存并激活 | 写入 `providers.json` → 直接写入 `settings.json` | 是 |
 | 激活（卡片"使用"按钮） | 直接写入 `settings.json` | 是 |
 
@@ -321,6 +321,7 @@ Provider 保留当前配置（含之前已合并的通用配置字段）。只�
     → API updateProvider(id, ...)
       → Rust update_provider()
         → 更新 providers.json（不触发激活）
+    → 弹窗提示"保存成功，请点击激活使其生效"
 
   保存并激活 → providersStore.update + providersStore.activate
     → 更新 providers.json → 直接写入 settings.json

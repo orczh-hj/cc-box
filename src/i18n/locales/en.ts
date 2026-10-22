@@ -369,6 +369,8 @@ export default {
   filesPathNotInserted: 'Uploaded (terminal switched, path not inserted — copy below)',
   filesCopy: 'Copy',
   filesCopied: 'Copied',
+  filesCopyPath: 'Copy path',
+  filesClearPath: 'Clear path',
   filesUploadAnother: 'Upload Another',
   filesTakeover: 'Take Over',
   filesRetry: 'Retry',
@@ -411,6 +413,8 @@ export default {
   activeProvider: 'Currently active: {name}',
   noProvidersToImport: 'No Provider configurations found to import',
   importFailed: 'Import failed',
+  providerSaveFailed: 'Failed to save provider',
+  providerSavedNeedActivate: 'Saved. Click Activate to apply the changes.',
 
   // Provider edit panel
   editProviderTitle: 'Edit Provider: {name}',

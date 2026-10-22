@@ -111,6 +111,7 @@ import ProviderPresetPanel from '../providers/ProviderPresetPanel.vue'
 import CommonConfigPanel from '../providers/CommonConfigPanel.vue'
 import ProviderEditPanel from '../providers/ProviderEditPanel.vue'
 import type { Provider, ProviderPreset } from '@/types/provider'
+import { useToast } from '@/composables/useToast'
 
 const { t } = useI18n()
 const providersStore = useProvidersStore()
@@ -118,6 +119,9 @@ const providersStore = useProvidersStore()
 const showPresetPanel = ref(false)
 const showCommonPanel = ref(false)
 const editingProvider = ref<Provider | null>(null)
+
+// 全局通知（ToastHost 渲染，自动消失、可点击关闭）
+const toast = useToast()
 const isNewProvider = ref(false)
 const commonPanelInitialSettings = ref<Record<string, any> | null>(null)
 const providerSourceJson = ref<Record<string, any> | null>(null)
@@ -225,8 +229,11 @@ async function handleSaveProvider(provider: Provider) {
     }
     editingProvider.value = null
     isNewProvider.value = false
+    // 保存只写 providers.json；需用户显式激活才会写入 ~/.claude/settings.json
+    toast.success(t('providerSavedNeedActivate'), 5000)
   } catch (err) {
     console.error('Save provider failed:', err)
+    toast.error(t('providerSaveFailed'), 6000)
   }
 }
 
@@ -237,13 +244,13 @@ async function handleImportCcSwitch() {
       const parts = [t('importSuccess', { count: result.count })]
       if (result.importedCommonConfig) parts.push(t('commonConfigImported'))
       if (result.activeProviderName) parts.push(t('activeProvider', { name: result.activeProviderName }))
-      alert(parts.join('\n'))
+      toast.success(parts.join(' · '), 5000)
     } else {
-      alert(t('noProvidersToImport'))
+      toast.info(t('noProvidersToImport'))
     }
   } catch (err) {
     console.error('Import failed:', err)
-    alert(t('importFailed'))
+    toast.error(t('importFailed'), 6000)
   }
 }
 </script>
