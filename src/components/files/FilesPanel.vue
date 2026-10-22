@@ -59,7 +59,7 @@
       </section>
 
       <!-- ==================== 下载（桌面 → 手机） ==================== -->
-      <section class="section">
+      <section class="section download-section">
         <h3 class="section-title">{{ t('filesDownload') }}</h3>
 
         <!-- 输入框独占一行（手机窄屏）；操作按钮另起一行 -->
@@ -540,6 +540,7 @@ function fmtBytes(n: number): string {
 
 .panel-content {
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
   padding: 10px 12px;
   display: flex;
@@ -551,6 +552,11 @@ function fmtBytes(n: number): string {
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+
+/* 下载区占满剩余高度，让文件浏览器列表随面板伸缩 */
+.download-section {
+  flex: 1 1 auto;
 }
 
 .section-title {
@@ -768,6 +774,8 @@ function fmtBytes(n: number): string {
 }
 
 .file-browser {
+  flex: 1;
+  min-height: 120px;
   border: 1px solid var(--border-color);
   border-radius: 6px;
   display: flex;
@@ -790,7 +798,8 @@ function fmtBytes(n: number): string {
 }
 
 .browser-list {
-  max-height: 260px;
+  flex: 1;
+  min-height: 0;
   overflow-y: auto;
   padding: 4px;
   display: flex;
