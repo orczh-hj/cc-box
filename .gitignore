@@ -29,6 +29,8 @@ scripts/oss-config.json
 
 # OSS tool (downloaded on demand)
 ossutil64.exe
+ossutil64
+ossutilmac64
 
 # Logs
 *.log

@@ -493,13 +493,24 @@ function uploadToOSS(version, versionDir, releaseNotes) {
   const endpoint = `${region}.aliyuncs.com`
 
   // ossutil:首次使用时下载(阿里云 CDN 直连,无需代理;同步等待完成)
-  const ossUtilPath = path.join(PROJECT_ROOT, 'ossutil64.exe')
+  // 1.7.14 官方产物：Windows=ossutil64.exe / macOS=ossutilmac64 / Linux=ossutil64
+  // macOS arm64 无原生 1.7.x 二进制，ossutilmac64 经 Rosetta 运行
+  const ossUtilName =
+    process.platform === 'win32'
+      ? 'ossutil64.exe'
+      : process.platform === 'darwin'
+        ? 'ossutilmac64'
+        : 'ossutil64'
+  const ossUtilPath = path.join(PROJECT_ROOT, ossUtilName)
   if (!fs.existsSync(ossUtilPath)) {
-    logInfo('下载 ossutil...')
+    logInfo(`下载 ossutil (${ossUtilName})...`)
     run(
-      `node -e "const https=require('https'),fs=require('fs');const ws=fs.createWriteStream(process.argv[1]);https.get(process.argv[2],r=>r.pipe(ws));" "${ossUtilPath}" "https://gosspublic.alicdn.com/ossutil/1.7.14/ossutil64.exe"`,
+      `node -e "const https=require('https'),fs=require('fs');const ws=fs.createWriteStream(process.argv[1]);https.get(process.argv[2],r=>r.pipe(ws));" "${ossUtilPath}" "https://gosspublic.alicdn.com/ossutil/1.7.14/${ossUtilName}"`,
       'direct',
     )
+    if (process.platform !== 'win32') {
+      fs.chmodSync(ossUtilPath, 0o755)
+    }
   }
 
   // ossutil 全部 direct 域(阿里云不容代理污染)
