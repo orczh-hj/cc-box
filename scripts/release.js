@@ -51,6 +51,9 @@ const GITEE_URL = 'https://gitee.com/orczh/cc-box.git'
 const MAIN_BRANCH = 'main'
 const PROXY = process.env.CC_BOX_PROXY || 'http://127.0.0.1:33210'
 const PROXY_VARS = ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy']
+// execSync 在 Windows 经 cmd.exe 执行：`-o /dev/null` 是非法路径（curl 退出码
+// 23 写失败，即使状态码已输出）——所有丢弃输出的调用统一用平台空设备
+const NULL_DEVICE = process.platform === 'win32' ? 'NUL' : '/dev/null'
 
 // ============================================
 // 日志与断点提示
@@ -461,7 +464,7 @@ function loadOssConfig() {
 function ossAlreadyDone(version, config) {
   const v = version.replace(/^v/, '')
   const base = `https://${config.bucketName}.${config.region}.aliyuncs.com/cc-box`
-  const head = (url) => (execQuiet(`curl -s -o /dev/null -w "%{http_code}" --max-time 10 -I "${url}"`) || '').trim() === '200'
+  const head = (url) => (execQuiet(`curl -s -o ${NULL_DEVICE} -w "%{http_code}" --max-time 10 -I "${url}"`) || '').trim() === '200'
   const latest = execQuiet(`curl -s --max-time 10 "${base}/latest.json"`)
   if (!latest) return false
   try {
@@ -602,7 +605,7 @@ function ossUploadOnly(version) {
 // ============================================
 
 function reportProxyStatus() {
-  const code = execQuiet(`curl -s -o /dev/null -w "%{http_code}" --max-time 8 -x ${PROXY} https://api.github.com/zen`)
+  const code = execQuiet(`curl -s -o ${NULL_DEVICE} -w "%{http_code}" --max-time 8 -x ${PROXY} https://api.github.com/zen`)
   if ((code || '').trim() === '200') {
     logSuccess(`代理可用(${PROXY})——GitHub 阶段(推送/CI/下载)将走代理,OSS/Gitee 直连不受影响`)
   } else {

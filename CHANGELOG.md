@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.16.3] - 2026-10-22
+
+### Features
+- Add remote file transfer for browser mode: upload phone files into the session project's .cc-box-files and insert the relative path into the terminal; browse and download authorized project files with connection-aware size limits (direct 200MB, relay 20MB)
+
+### Fixed
+- Prevent silent upload corruption from partial writes and concurrent name commits
+- Normalize Windows verbatim paths in file listing and upload results
+- Wait for WebSocket reconnect instead of failing file transfer RPCs when the phone returns from background
+- Fix release script probes failing on Windows ( is not a valid cmd.exe path, causing false "OSS incomplete" locks)
+
+Note: phone clients should refresh the browser to load the new bundle; relay deployment is required for the updated web UI.
+
 ## [0.16.2] - 2026-10-21
 
 ### Fixed
