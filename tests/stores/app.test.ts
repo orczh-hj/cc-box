@@ -96,6 +96,59 @@ describe('resetClaudeOptions', () => {
   })
 })
 
+describe('cliHealth', () => {
+  // 检查通过（PATH 检测）→ ok + path + source
+  it('CliHealth_FromChecks_Path_001', async () => {
+    mockIPC((cmd) => {
+      if (cmd === 'run_checks') {
+        return [{
+          name: 'Claude CLI', passed: true, message: 'Found',
+          detectedPath: '/opt/homebrew/bin/claude', source: 'path'
+        }]
+      }
+      return null
+    })
+    const store = useAppStore()
+    await store.runChecks(true)
+    expect(store.cliHealth).toEqual({
+      status: 'ok', path: '/opt/homebrew/bin/claude', source: 'path'
+    })
+  })
+
+  // 检查失败 → missing + 原始提示（供状态条展示）
+  it('CliHealth_FromChecks_Missing_002', async () => {
+    mockIPC((cmd) => {
+      if (cmd === 'run_checks') {
+        return [{ name: 'Claude CLI', passed: false, message: 'not found' }]
+      }
+      return null
+    })
+    const store = useAppStore()
+    await store.runChecks(true)
+    expect(store.cliHealth).toEqual({ status: 'missing', message: 'not found' })
+  })
+
+  // 执行失败反哺 → failed；下次 spawn 成功清除
+  it('CliHealth_FailureAndClear_003', () => {
+    const store = useAppStore()
+    store.setCliFailure('EACCES: Permission denied', 'spawn')
+    expect(store.cliHealth).toEqual({
+      status: 'failed', message: 'EACCES: Permission denied', stage: 'spawn'
+    })
+
+    store.clearCliFailure()
+    expect(store.cliHealth).toBeNull()
+  })
+
+  // spawn 成功也能清除检查失败（missing）留下的提示
+  it('CliHealth_ClearMissingOnSpawnSuccess_004', () => {
+    const store = useAppStore()
+    store.cliHealth = { status: 'missing', message: 'not found' }
+    store.clearCliFailure()
+    expect(store.cliHealth).toBeNull()
+  })
+})
+
 describe('setFontSize', () => {
   // 设置 size=5 时钳位到 10
   it('FontSize_MinClamp_001', () => {

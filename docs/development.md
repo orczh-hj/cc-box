@@ -60,7 +60,7 @@ UI 已浏览器化（一套 UI 走桌面 Tauri / 宽屏浏览器 / 手机浏览�
 - **新事件** → `events.rs` 常量 + `emit_all`；远程会话类事件用 `remote_state::emit_event`（桌面+广播）/`emit_event_ex`（排除接管者）/`emit_desktop_only`（仅桌面）
 - **新协议消息** → `remote/protocol/` 四处同步：crate 定义 → protocol.ts → samples/ JSON 样例 → remote/docs/protocol.md（Rust 与 Vitest 契约测试共跑样例）
 - **CLI 启动参数拼接** → 只改 `pty::build_claude_args`（Rust 单一核心，session.create 与桌面 spawn 共用），勿在前端另写一份
-- **CLI 进程启动方式** → Windows 经 Git Bash `-c` 中转（npm .cmd 包装需要）；**Unix 直接 exec `get_claude_path()` 的完整路径 + 结构化参数**，勿改回 shell 中转（`bash -i -c` 的 job control 在 PTY 下会把 TUI 子进程停入后台致 Mac 白屏；裸命令名 PATH 二次查找在 GUI 应用下 command not found）。**spawn 契约 = 返回即存活**：`startup_check`（spawn_claude/spawn_shell 共用）在 50ms 启动期后 `try_wait()` 检测秒退，秒退转 Err 并携带 `StartupBuf` 缓存的 PTY 尾部输出（claude 自身报错不丢，前端红字显示）——否则事件落在前端终端实例建立之前全部丢失、表现为纯白屏
+- **CLI 进程启动方式** → 目标由 `platform::cli_target()` 唯一决定：配置路径通过 `is_runnable_cli` → 完整路径；否则 `PathLookup` → Unix 用 `find_executable` 解析出可运行路径再 exec / Windows 经 Git Bash `-c` 裸命令（bash 自己做 PATHEXT/shim 查找）。Unix 不经 shell 中转（`bash -i -c` 的 job control 在 PTY 下会把 TUI 子进程停入后台致 Mac 白屏）；PATH 由 `refresh_path` 从登录 shell 刷新，是裸命令可用的前提。**spawn 契约 = 返回即存活**：`startup_check`（spawn_claude/spawn_shell 共用）在 50ms 启动期后 `try_wait()` 检测秒退，秒退转 Err 并携带 `StartupBuf` 缓存的 PTY 尾部输出（claude 自身报错不丢，前端红字显示）——否则事件落在前端终端实例建立之前全部丢失、表现为纯白屏
 - **前端 invoke/listen** → 一律经 `src/api/transport.ts`（组件禁止直接 import @tauri-apps/api；桌面专属 API 用 `transport.env.isTauri` 守卫）
 
 ## 远程服务机制要点
@@ -95,6 +95,13 @@ UI 已浏览器化（一套 UI 走桌面 Tauri / 宽屏浏览器 / 手机浏览�
 - **会话身份链**：CLI `--resume` 会 fork 新 sessionId，`TerminalTab.sessionIds` 记录演变历史（旧 id 保留认领）；**所有恢复入口（App/TerminalView 历史、remote-session-created）统一走 `sessionStore.resumeSessionTab`**（复用优先：命中切 Tab/重启，未命中才新建），防二次 spawn、重复 Tab 与名字变 sessionId 编码
 - **用户显式关闭双路径对称广播 `remote-session-closed`**（桌面 pty_kill / 远程 session.kill，先广播后 kill）→ 各端联动删 Tab，自然退出（pty-exit）只置 stopped 保留 Tab
 - **重启（restartTab）清旧 PTY 走 quiet kill**（pty_kill/session.kill 带 `quiet=true`，不广播 closed——否则各端 closeTab 删 Tab，重启被误判为关闭；pty-exit 照常置 stopped 保留 Tab 等 respawn 绑回）
+- **CLI 路径解析单一实现（四条不变量）**：
+  1. **共享解析策略**：`platform::cli_target()` 是检查与 spawn 唯一入口——配置路径必须通过 `is_runnable_cli`（Unix 普通文件 + 执行位；Windows PATHEXT 扩展名），否则返回 `PathLookup`（Unix：`find_executable` 解析出可运行路径后 exec；Windows：裸名交给 Git Bash/PowerShell）。不要在两处各写一份判断。
+  2. **运行时只读配置**：spawn / `run_checks` 都不写 `config.json`；`claudePath` 只由用户设置或安装器写入。自动检测结果仅作为运行态（`CheckResult.source`）返回。
+  3. **显式标记来源**：`CheckResult.source = "configured" | "path"`，UI 可区分用户配置与 PATH 检测，不靠优先级隐式推断。
+  4. **统一状态反馈**：`appStore.cliHealth` 是唯一状态源（检查结果 / `pty-error` / spawn 成功三路更新），TerminalView 状态条消费它并提供重试入口。
+  - 反例（Mac 事故）：只判 `exists()` 会把目录或缺执行位路径直接拿去 exec，execve 报 EACCES，表象是「终端打不开、白屏」；裸命令 + PATH 查找则由平台自然跳过坏文件。
+- **spawn 失败必须可见**：`XTermTerminal` 的失败 Tab 也要登记占位实例（`ptyId: ''`）并把错误红字写进终端——wrapper 由 `terminalInstances` 驱动渲染，不登记则 `waitForElement` 永远等不到元素，错误只进 console，用户看到纯白屏。占位实例没有 PTY 事件，由 `tabs.size` 变化兜底回收。
 - remote 会话列表经 `RemoteSession.sessionId` 下发（hook 建立 ptyId→sessionId 映射），浏览器端采纳 Tab 名优先取历史会话名（未加载时回退项目名，加载后 backfillTabNamesFromHistory 回填）
 - **会话结束并入近期会话缓存（本地合并，零请求）**：`cachedRecentSessions` 启动时只加载一次，会话结束（closeTab/closeAllTabs/closeOtherTabs/handlePtyExit）时把 Tab 已知信息（sessionId/名称/项目路径）经 `mergeTabIntoRecentSessions` → `appStore.mergeRecentSession` 按 sessionId 去重就地并入缓存，首页「近期会话」即时可见——不重拉 getHomeData（低效且重置项目分页）；无 sessionId 的 Tab 不并入；缓存条目 working/pending 清 false（已结束）
 

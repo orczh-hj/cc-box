@@ -32,6 +32,11 @@
       <TerminalHeader
         @back="handleBack"
       />
+      <!-- CLI 不可用状态条：检查失败或 spawn 失败统一在此展示与重试 -->
+      <div v-if="cliHealthBar" class="cli-health-bar">
+        <span class="cli-health-text">{{ cliHealthText }}</span>
+        <button class="cli-health-btn" @click="handleRetryChecks">{{ t('retry') }}</button>
+      </div>
       <div class="terminal-container">
         <!-- 空状态提示：没有任何 session -->
         <div v-if="showEmptyState" class="empty-state-overlay">
@@ -128,6 +133,30 @@ function handleSelectCopy() {
 }
 
 const { t } = useI18n()
+
+// CLI 不可用状态条（检查失败或 spawn 失败的统一出口）
+const cliHealthBar = computed(() => {
+  const health = appStore.cliHealth
+  return health && health.status !== 'ok' ? health : null
+})
+
+const cliHealthText = computed(() => {
+  const health = cliHealthBar.value
+  if (!health) return ''
+  return health.status === 'missing'
+    ? `${t('cliUnavailable')}: ${health.message}`
+    : `${t('cliStartFailed')}: ${health.message}`
+})
+
+async function handleRetryChecks() {
+  // failed = 执行失败，检查可能早已通过：重跑检查确认 CLI 可用后，
+  // 还要重启当前 Tab 才算真正恢复（否则状态条消失而终端仍是错误页）
+  const wasFailed = appStore.cliHealth?.status === 'failed'
+  await appStore.runChecks(true)
+  if (wasFailed && appStore.cliHealth?.status === 'ok') {
+    await terminalRef.value?.restartCurrentPty?.()
+  }
+}
 
 const { isFocused } = useWindowAttention()
 const isTerminalVisible = computed(() => props.visible ?? false)
@@ -401,6 +430,42 @@ function handlePtyStarted(tabId: string, _ptyId: string) {
   display: flex;
   flex-direction: column;
   min-width: 0;
+}
+
+/* CLI 不可用状态条：不占终端高度预算（flex-shrink: 0），终端 fit 自动让位 */
+.cli-health-bar {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  background: rgba(220, 80, 80, 0.12);
+  border-bottom: 1px solid rgba(220, 80, 80, 0.35);
+  color: var(--text-primary);
+  font-size: 12px;
+}
+
+.cli-health-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cli-health-btn {
+  flex-shrink: 0;
+  padding: 2px 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.cli-health-btn:hover {
+  border-color: var(--accent-gold);
 }
 
 .terminal-container {

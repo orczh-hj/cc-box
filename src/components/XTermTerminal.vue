@@ -53,6 +53,7 @@ import {
   ptyClaim,
   onPtyOutput,
   onPtyExit,
+  onPtyError,
   onSessionTakenOver,
   onSessionReclaimed,
   logMessage,
@@ -142,6 +143,7 @@ let unlistenPtyOutput: (() => void) | null = null
 let unlistenTakenOver: (() => void) | null = null
 let unlistenReclaimed: (() => void) | null = null
 let unlistenPtyExit: (() => void) | null = null
+let unlistenPtyError: (() => void) | null = null
 let unlistenDragDrop: (() => void) | null = null
 let unlistenWindowResized: (() => void) | null = null
 let unlistenRemoteConn: (() => void) | null = null
@@ -343,7 +345,8 @@ function createTerminal(tabId: string): Terminal {
   // 用户输入 → 发送到对应的 PTY
   term.onData(data => {
     const instance = terminalInstances.get(tabId)
-    if (instance) {
+    // ptyId 为空 = spawn 失败留下的错误面板，没有底层进程可转发
+    if (instance?.ptyId) {
       ptyInput(instance.ptyId, data)
 
       // Escape 按键：Claude 的 Stop hook 不在用户中断时触发，立即清除 working
@@ -357,7 +360,7 @@ function createTerminal(tabId: string): Terminal {
   // 终端尺寸变化 → resize 对应的 PTY
   term.onResize(({ cols, rows }) => {
     const instance = terminalInstances.get(tabId)
-    if (instance) {
+    if (instance?.ptyId) {
       ptyResize(instance.ptyId, cols, rows)
     }
   })
@@ -584,6 +587,13 @@ async function setupEventListeners() {
       }
     }
   })
+
+  // PTY 启动失败 → 反哺 CLI 可用状态（统一状态源，提示条由此驱动）
+  unlistenPtyError = await onPtyError(({ error, stage }) => {
+    if (stage === 'detection' || stage === 'spawn' || stage === 'startup') {
+      appStore.setCliFailure(error, stage)
+    }
+  })
 }
 
 // 监听 fontSize 变化
@@ -609,6 +619,20 @@ watch(() => appStore.theme, (newTheme) => {
   const themeConfig = newTheme === 'dark' ? darkTheme : lightTheme
   for (const instance of terminalInstances.values()) {
     instance.term.options.theme = themeConfig
+  }
+})
+
+// Tab 被关闭时回收终端实例：正常运行由 pty-exit 事件清理，但 spawn 失败
+// 留下的占位实例（ptyId 为空）没有 PTY 事件，必须靠 Tab 消失兜底回收，
+// 否则错误面板会残留在容器里。监听 tabId 列表而非 size——同一 tick 内
+// 「关一个 + 开一个」时 size 不变，会漏掉被关闭的 Tab。
+watch(() => [...sessionStore.tabs.keys()].join('|'), () => {
+  for (const [tabId, instance] of [...terminalInstances]) {
+    if (sessionStore.tabs.has(tabId)) continue
+    void disposeTerminal(instance.term, `tabsChange removed(tabId=${tabId})`)
+    terminalInstances.delete(tabId)
+    terminalEls.delete(tabId)
+    if (instance.ptyId) attachedPtyIds.delete(instance.ptyId)
   }
 })
 
@@ -713,6 +737,15 @@ async function startTab(tabId: string) {
   let fitAddon: FitAddon | null = null
 
   try {
+    // 上次 spawn 失败留下的占位实例（ptyId 为空）仍占着 DOM：先释放，
+    // 否则新 Terminal 与旧实例叠加、旧的永不回收
+    const stale = terminalInstances.get(tabId)
+    if (stale && !stale.ptyId) {
+      await disposeTerminal(stale.term, `startTab(replace stale, tabId=${tabId})`)
+      terminalInstances.delete(tabId)
+      terminalEls.delete(tabId)
+    }
+
     const args = buildClaudeArgs(tab)
     const cwd = tab.projectPath
 
@@ -743,6 +776,7 @@ async function startTab(tabId: string) {
       sessionStore.setTabPty(tabId, info.id)
       sessionStore.setActiveTab(tabId)
       currentDisplayTabId.value = tabId
+      appStore.clearCliFailure()
 
       const el = await waitForElement(tabId)
       if (el) {
@@ -756,6 +790,8 @@ async function startTab(tabId: string) {
   } catch (err) {
     console.error('[XTerm] startTab ERROR:', err)
     logMessage('error', `startTab failed, tabId=${tabId}: ${err}`)
+    // CLI 相关失败反哺统一状态源（浏览器远程模式没有 pty-error，靠这里兜底）
+    if (/claude/i.test(String(err))) appStore.setCliFailure(String(err), 'spawn')
     // spawn 失败（工作目录不存在/CLI 未检出/exec 失败）必须打开终端写入
     // 错误，否则表现为静默白屏（Mac 打开历史会话白屏的教训）
     if (term && fitAddon) await showSpawnError(tabId, term, fitAddon, err)
@@ -818,6 +854,7 @@ async function restartTab(tabId: string) {
       sessionStore.setTabPty(tabId, info.id)
       sessionStore.setActiveTab(tabId)
       currentDisplayTabId.value = tabId
+      appStore.clearCliFailure()
 
       const el = await waitForElement(tabId)
       if (el) {
@@ -833,6 +870,7 @@ async function restartTab(tabId: string) {
   } catch (err) {
     console.error('[XTerm] restartTab ERROR:', err)
     logMessage('error', `restartTab failed, tabId=${tabId}: ${err}`)
+    if (/claude/i.test(String(err))) appStore.setCliFailure(String(err), 'spawn')
     // 同 startTab：失败必须可见（写入终端），不允许静默白屏
     if (term && fitAddon) await showSpawnError(tabId, term, fitAddon, err)
   } finally {
@@ -847,6 +885,18 @@ async function restartTab(tabId: string) {
  * 的 Err 消息（如 "Working directory does not exist: ..."）
  */
 async function showSpawnError(tabId: string, term: Terminal, fitAddon: FitAddon, err: unknown) {
+  // wrapper 元素由 terminalInstances 驱动渲染：spawn 失败时同样要登记实例，
+  // 否则 waitForElement 永远等不到元素（10s 后返回 null），终端从未 open，
+  // 错误只进 console——这正是「spawn 失败 → 白屏」的成因。
+  // 占位实例的 ptyId 为空：没有底层进程，不会触发 attach/输入转发。
+  if (!terminalInstances.has(tabId)) {
+    terminalInstances.set(tabId, { term: markRaw(term), fitAddon: markRaw(fitAddon), ptyId: '' })
+  }
+  // 失败 Tab 可能在启动期间未被激活（activeTab watcher 因 isPtyStarting 提前返回）。
+  // 仅当它确实是当前活跃 Tab 时才切换显示，避免后台启动失败把用户视图切走
+  if (sessionStore.activeTabId === tabId) currentDisplayTabId.value = tabId
+
+  await nextTick()
   const el = await waitForElement(tabId)
   if (el && !term.element) {
     term.open(el)
@@ -926,7 +976,7 @@ function sendText(text: string) {
   const tabId = currentDisplayTabId.value
   if (!tabId) return
   const instance = terminalInstances.get(tabId)
-  if (instance) {
+  if (instance?.ptyId) {
     ptyInput(instance.ptyId, text)
     instance.term.focus()
   }
@@ -1088,6 +1138,7 @@ onUnmounted(() => {
   window.removeEventListener('copy', handleNativeCopy)
   unlistenPtyOutput?.()
   unlistenPtyExit?.()
+  unlistenPtyError?.()
   unlistenTakenOver?.()
   unlistenReclaimed?.()
   unlistenDragDrop?.()

@@ -5,6 +5,8 @@ export default {
   save: 'Save',
   delete: 'Delete',
   retry: 'Retry',
+  cliUnavailable: 'Claude CLI unavailable',
+  cliStartFailed: 'Claude CLI failed to start',
   refresh: 'Refresh',
   loading: 'Loading...',
   loadingMore: 'Loading more...',

@@ -35,6 +35,15 @@ export interface PendingResume {
   sessionName?: string
 }
 
+/**
+ * Claude CLI 可用状态（运行态，不落盘）。
+ * 唯一状态源：启动检查结果 + pty-error + spawn 成功共同维护。
+ */
+export type CliHealth =
+  | { status: 'ok'; path: string; source: 'configured' | 'path' }
+  | { status: 'missing'; message: string }
+  | { status: 'failed'; message: string; stage: string }
+
 export const useAppStore = defineStore('app', () => {
   const cwd = ref<string>('')
   const theme = ref<string>('light')
@@ -50,6 +59,7 @@ export const useAppStore = defineStore('app', () => {
   // 环境检查
   const checkResults = ref<CheckResult[]>([])
   const checkFailed = ref(false)
+  const cliHealth = ref<CliHealth | null>(null)
 
   // 缓存：项目列表（分页）和近期会话
   const cachedProjects = ref<Project[]>([])
@@ -118,9 +128,33 @@ export const useAppStore = defineStore('app', () => {
     try {
       checkResults.value = force ? await runChecks() : await getCheckResults()
       checkFailed.value = checkResults.value.some(c => !c.passed)
+      syncCliHealthFromChecks(checkResults.value)
     } catch (err) {
       console.error('Failed to run checks:', err)
     }
+  }
+
+  /** 检查结果 → CLI 运行态（检查与执行共用的唯一状态源） */
+  function syncCliHealthFromChecks(results: CheckResult[]) {
+    const cli = results.find(c => c.name === 'Claude CLI')
+    if (!cli) return
+    cliHealth.value = cli.passed
+      ? {
+          status: 'ok',
+          path: cli.detectedPath ?? '',
+          source: cli.source === 'configured' ? 'configured' : 'path'
+        }
+      : { status: 'missing', message: cli.message }
+  }
+
+  /** spawn 失败反哺：CLI 不可用（执行与检查结论不一致时以执行结果为准） */
+  function setCliFailure(message: string, stage: string) {
+    cliHealth.value = { status: 'failed', message, stage }
+  }
+
+  /** spawn 成功：CLI 已被证明可用，清除所有非 ok 的旧提示 */
+  function clearCliFailure() {
+    if (cliHealth.value && cliHealth.value.status !== 'ok') cliHealth.value = null
   }
 
   async function loadCache() {
@@ -346,6 +380,9 @@ export const useAppStore = defineStore('app', () => {
     checkResults,
     checkFailed,
     failedChecks,
+    cliHealth,
+    setCliFailure,
+    clearCliFailure,
     cachedProjects,
     cachedRecentSessions,
     cacheLoaded,

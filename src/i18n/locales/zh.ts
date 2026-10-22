@@ -5,6 +5,8 @@ export default {
   save: '保存',
   delete: '删除',
   retry: '重试',
+  cliUnavailable: 'Claude CLI 不可用',
+  cliStartFailed: 'Claude CLI 启动失败',
   refresh: '刷新',
   loading: '加载中...',
   loadingMore: '加载更多...',

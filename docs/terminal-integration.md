@@ -34,7 +34,8 @@ pub fn kill_all(&self)
 
 ### Claude 进程启动
 
-Claude CLI 有多种安装方式，启动命令构建需要智能检测启动类型：
+Claude CLI 有多种安装方式。当前实现**不区分启动类型**（native / npm / Homebrew 一律交给
+平台查找），只判断“配置路径是否可运行”；未配置时由执行层按 PATH 解析。
 
 #### 安装方式与文件特征
 
@@ -45,39 +46,30 @@ Claude CLI 有多种安装方式，启动命令构建需要智能检测启动类
 | Homebrew | `brew install --cask claude-code` | 编译后可执行文件 | - | `/usr/local/bin/claude` |
 | WinGet | `winget install Anthropic.ClaudeCode` | 编译后可执行文件 | 系统PATH | - |
 
-#### 启动类型检测逻辑
-
-检测优先级（检测结果保存到配置避免重复检测）：
-
-```
-1. 检查扩展名
-   path.ends_with(".js") → node
-2. 检查文件内容（前5行）
-   "#!/usr/bin/env node" → node
-   "// (c) Anthropic" + "Version:" → node (cli.js特征)
-3. Mac/Linux: 解析符号链接
-   canonicalize(path).ends_with(".js") → node
-   真实文件内容检测 → node
-否则 → direct
-```
-
 #### 命令构建逻辑（pty.rs spawn_claude 实际实现）
 
-`get_claude_path()` 检测（配置 claudePath 优先 → where/which）返回**完整路径**，检测结果即执行路径：
+检查与执行共用 `platform::cli_target(configured)` 这一个解析入口：
+
+- 配置路径通过 `is_runnable_cli`（Unix：普通文件 + 执行位；Windows：PATHEXT 内扩展名）→ `CliTarget::Explicit(path)`
+- 未配置 / 配置失效 → `CliTarget::PathLookup`
 
 ```rust
-// Windows：npm 的 .cmd/batch 包装必须经 shell 中转（Git Bash -c，未检出
-// 回退 PowerShell）；完整路径加引号后拼参数字符串
-CommandBuilder::new(git_bash).args(["-c", "\"<claude_path>\" --resume x ..."])
+// Windows：.cmd/batch 包装必须经 shell 中转（Git Bash -c，未检出回退 PowerShell）
+CommandBuilder::new(git_bash).args(["-c", "\"<path>\" --resume x ..."])  // Explicit
+CommandBuilder::new(git_bash).args(["-c", "claude --resume x ..."])      // PathLookup
 
-// Mac/Linux：直接 exec 完整路径（结构化参数，不经 shell）
-CommandBuilder::new(claude_path).arg("--resume").arg(id)...
+// Mac/Linux：直接 exec（结构化参数，不经 shell）
+CommandBuilder::new(path).arg("--resume").arg(id)...      // Explicit
+CommandBuilder::new(resolved).arg("--resume").arg(id)...  // PathLookup（先 resolve）
 ```
 
-Unix 不经 shell 中转的原因（Mac 打开历史会话白屏的教训）：
-1. `bash -i -c` 交互模式的 job control 在 PTY 下可能把 TUI 子进程停入后台（SIGTTIN/SIGTTOU），表现为终端白屏
-2. GUI 应用继承的 PATH 与登录 shell 不同，裸命令名 `claude` 让 shell 二次从 PATH 查找会 command not found
-3. 结构化参数免引号拼接与分词歧义（路径含空格等）
+关键约定：
+
+1. **Unix PathLookup 先解析再 exec**：用共享的 `platform::find_executable("claude")`（which + `is_runnable_cli` 过滤）取出第一个可运行路径，再以完整路径 exec。不能把裸名直接交给 portable-pty——它的 `search_path` 会优先取 `cwd/claude` 且只判 `exists()`，PATH 候选用 `access(X_OK)`（目录也能通过），与终端语义不一致，可能重蹈 `EACCES` 白屏。Windows 的 PathLookup 仍用裸名交给 Git Bash/PowerShell（shell 的查找规则才是终端语义）。
+2. Unix 不经 shell 中转：`bash -i -c` 交互模式的 job control 在 PTY 下可能把 TUI 子进程停入后台（SIGTTIN/SIGTTOU），表现为终端白屏。
+3. PATH 来源必须与执行 shell 一致：Unix 由 `refresh_path` 从登录 shell 获取；Windows 以 Git Bash 看到的 PATH 为准。这是裸命令可用的前提。
+4. 配置路径失效时降级为 PathLookup，**执行层不写配置**；持久化 `claudePath` 只由用户设置或安装器写入。
+5. 检查层用 `probe_cli()`（which/where）展示命中路径，但**绝不用该结果作为执行目标**。
 
 npm 安装的 claude 是带 `#!/usr/bin/env node` shebang 的脚本，直接 exec 由内核 shebang 处理（要求 PATH 里有 node）；native 可执行文件直接运行。
 
@@ -91,6 +83,8 @@ npm 安装的 claude 是带 `#!/usr/bin/env node` shebang 的脚本，直接 exe
 - try_wait 自身失败不阻断启动（保守放行）
 
 前端对称：`startTab`/`restartTab` 的 catch 打开终端写入 `[CC-Box] 启动失败: <原因>`——spawn 调用只有两个结局（有流的终端 / 有原因的红字），"成功但白屏"的第三态不可表达。
+
+失败时还会把 `pty-error`（stage = detection/spawn/startup）反哺到 `appStore.cliHealth`，由 TerminalView 的状态条统一展示并提供「重试」入口；spawn 成功则清除 failed 状态。这是「检查 → 执行 → 失败反馈」闭环的反馈段。
 
 ### 数据流
 

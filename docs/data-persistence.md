@@ -42,7 +42,6 @@
 ```json
 {
   "claudePath": "C:\\Users\\xxx\\.local\\bin\\claude.exe",
-  "claudeLauncherType": "direct",
   "gitBashPath": "C:\\Program Files\\Git\\bin\\bash.exe",
   "defaultSkipPermissions": false,
   "defaultCustomArgs": "",
@@ -56,9 +55,8 @@
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| `claudePath` | string? | Claude CLI 路径（检测后缓存） |
-| `claudeLauncherType` | "direct" \| "node"? | 启动类型（检测后缓存） |
-| `gitBashPath` | string? | Git Bash 路径（Windows，检测后缓存） |
+| `claudePath` | string? | Claude CLI 路径（仅用户设置/安装器写入；自动检测不写盘） |
+| `gitBashPath` | string? | Git Bash 路径（Windows，仅用户设置/安装器写入） |
 | `defaultSkipPermissions` | boolean | `--dangerously-skip-permissions` 默认值 |
 | `defaultCustomArgs` | string | 自定义参数默认值 |
 | `theme` | string | GUI 主题 |

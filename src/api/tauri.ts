@@ -21,6 +21,7 @@ import type {
   PtySpawnResult,
   PtyOutputPayload,
   PtyExitPayload,
+  PtyErrorPayload,
   Project,
   SessionInfo,
   SessionDetails,
@@ -50,6 +51,7 @@ export type {
   PtySpawnResult,
   PtyOutputPayload,
   PtyExitPayload,
+  PtyErrorPayload,
   Project,
   SessionInfo,
   SessionDetails,
@@ -138,6 +140,10 @@ export const onPtyOutput = (callback: (payload: PtyOutputPayload) => void): Prom
 
 export const onPtyExit = (callback: (payload: PtyExitPayload) => void): Promise<Unlisten> =>
   listen<PtyExitPayload>('pty-exit', callback);
+
+/** PTY 启动/运行错误（stage 标明失败阶段），用于反哺 CLI 可用状态 */
+export const onPtyError = (callback: (payload: PtyErrorPayload) => void): Promise<Unlisten> =>
+  listen<PtyErrorPayload>('pty-error', callback);
 
 /** 远程接管事件（payload 为 { id: ptyId }） */
 export const onSessionTakenOver = (callback: (payload: { id: string }) => void): Promise<Unlisten> =>

@@ -171,42 +171,35 @@ impl PtyManager {
             }
         }
 
-        // 3. where git → 同目录下找 bash.exe
-        if let Some(git_path) = crate::platform::find_executable("git") {
-            if let Some(parent) = Path::new(&git_path).parent() {
-                let bash_path = parent.join("bash.exe");
-                if bash_path.exists() {
-                    log::info!("Git Bash found via 'where git': {}", bash_path.display());
-                    return Some(bash_path.to_string_lossy().to_string());
-                }
-            }
+        // 3. where git → 推导安装目录下的 bash.exe（与启动检查同一实现；
+        //    git.exe 常在 <install>\cmd，bash.exe 在 <install>\bin，不能只看同目录）
+        #[cfg(target_os = "windows")]
+        if let Some(bash_path) = crate::checks::detect_git_bash_from_git() {
+            log::info!("Git Bash found via 'where git': {}", bash_path);
+            return Some(bash_path);
         }
 
         log::warn!("Git Bash not found - Claude CLI may not work properly on Windows");
         None
     }
 
-    /// 获取 Claude CLI 路径（优先使用配置，其次自动检测）
-    fn get_claude_path() -> Option<String> {
-        // 1. 配置文件中的自定义路径
-        if let Ok(config) = crate::store::get_app_config() {
-            if let Some(ref path) = config.claude_path {
-                if Path::new(path).exists() {
-                    log::info!("Claude CLI path from config: {}", path);
-                    return Some(path.clone());
-                }
-            }
-        }
-
-        // 2. 自动检测（where/which）
-        crate::platform::find_executable("claude")
+    /// 解析本次执行的 Claude CLI 目标（与启动检查共用 platform::cli_target）。
+    ///
+    /// 配置路径必须是可运行文件；失效时返回 PathLookup，由执行层按平台
+    /// 查找（Unix 用 find_executable 过滤后 exec，Windows 交给 shell）——
+    /// 坏文件不会被选中（Mac 事故：无执行位的旧二进制被直接 exec 报 EACCES）。
+    fn claude_target() -> crate::platform::CliTarget {
+        let config_path = crate::store::get_app_config()
+            .ok()
+            .and_then(|config| config.claude_path);
+        crate::platform::cli_target(config_path.as_deref())
     }
 
-    /// 启动 Claude CLI（通过 shell 执行，模拟终端行为）
+    /// 启动 Claude CLI（命令解析与终端一致）
     ///
-    /// 核心思路：PTY 启动 shell，然后在 shell 里运行 `claude` 命令。
-    /// 这与用户在终端里直接输入 `claude` 的行为完全一致，
-    /// 不管 claude 是 npm 安装还是原生可执行文件，都能正常工作。
+    /// Unix 直接 exec：显式配置用完整路径，否则先按 PATH 解析出可运行文件；
+    /// Windows 经 Git Bash/PowerShell 执行（`.cmd` 包装必须由 shell 解析）。
+    /// 两条路径都保留“跳过不可执行文件”的终端语义。
     pub fn spawn_claude(
         &self,
         cwd: &str,
@@ -242,17 +235,12 @@ impl PtyManager {
             })
             .with_context(|| format!("Failed to open PTY with size {}x{}", cols, rows))?;
 
-        // 获取 Claude CLI 路径（配置优先，其次自动检测）——检测结果即执行
-        // 路径，不再让 shell 用裸命令名从 PATH 二次查找（GUI 应用继承的
-        // PATH 常缺 Homebrew/~/.local/bin 前缀，检测命中 ≠ shell 能找到）
-        let claude_path = match Self::get_claude_path() {
-            Some(p) => p,
-            None => {
-                let err_msg = "Claude CLI not found. Please install Claude CLI first (npm install -g @anthropic-ai/claude-code)";
-                log::error!("{}", err_msg);
-                self.emit_error(&id, err_msg, "detection");
-                return Err(anyhow!("{}", err_msg));
-            }
+        // 本次执行目标：显式配置（校验通过）或 PATH 查找。
+        // 解析复用 platform 的共享实现，执行层不写配置。
+        let target = Self::claude_target();
+        let mut claude_display = match &target {
+            crate::platform::CliTarget::Explicit(path) => path.clone(),
+            crate::platform::CliTarget::PathLookup => "claude".to_string(),
         };
 
         // --plugin-dir（hook 监控 plugin），目录存在才追加
@@ -263,8 +251,13 @@ impl PtyManager {
 
         let mut cmd = if cfg!(target_os = "windows") {
             // Windows：npm 安装的 claude 是 .cmd/batch 包装，必须经 shell 中转
-            // （Git Bash，未检出回退 PowerShell）；引号包裹完整路径防空格分词
-            let mut claude_cmd = format!("\"{}\"", claude_path);
+            // （Git Bash，未检出回退 PowerShell）。显式配置用完整路径（引号
+            // 防空格分词）；PathLookup 用裸命令名，让 shell 自己做 PATHEXT
+            // 查找，等价于用户在该终端输入 `claude`。
+            let mut claude_cmd = match &target {
+                crate::platform::CliTarget::Explicit(path) => format!("\"{}\"", path),
+                crate::platform::CliTarget::PathLookup => "claude".to_string(),
+            };
             if let Some(extra_args) = &args {
                 claude_cmd.push(' ');
                 claude_cmd.push_str(&extra_args.join(" "));
@@ -282,12 +275,32 @@ impl PtyManager {
             }
             cmd
         } else {
-            // Unix（macOS/Linux）：直接 exec 完整路径，不经 shell 中转——
-            // 1) `bash -i -c` 交互模式的 job control 在 PTY 下可能把 TUI 子
-            //    进程停入后台（SIGTTIN/SIGTTOU），表现为终端白屏（Mac 打开
-            //    历史会话白屏根因）；2) 免 PATH 二次查找与 rc 文件差异；
-            //    3) 结构化参数免引号拼接与分词歧义
-            let mut cmd = CommandBuilder::new(&claude_path);
+            // Unix（macOS/Linux）：不经 shell 中转——`bash -i -c` 交互模式的
+            // job control 在 PTY 下可能把 TUI 子进程停入后台（SIGTTIN/SIGTTOU），
+            // 表现为终端白屏（Mac 打开历史会话白屏根因）。
+            //
+            // PathLookup 必须先用共享解析器按 PATH 顺序取出可运行文件：
+            // portable-pty 的 search_path 会优先取 cwd 下同名项且只判 exists()，
+            // PATH 候选用 access(X_OK)（目录也能通过）——与终端语义不一致，
+            // 可能重蹈「坏路径被 exec → EACCES」的白屏故障。
+            let program = match &target {
+                crate::platform::CliTarget::Explicit(path) => path.clone(),
+                crate::platform::CliTarget::PathLookup => {
+                    match crate::platform::find_executable("claude") {
+                        Some(path) => {
+                            claude_display = path.clone();
+                            path
+                        }
+                        None => {
+                            let err_msg = "Claude CLI not found in PATH. Install it (npm install -g @anthropic-ai/claude-code) or set a custom path";
+                            log::error!("{}", err_msg);
+                            self.emit_error(&id, err_msg, "detection");
+                            return Err(anyhow!("{}", err_msg));
+                        }
+                    }
+                }
+            };
+            let mut cmd = CommandBuilder::new(&program);
             if let Some(extra_args) = &args {
                 for arg in extra_args {
                     cmd.arg(arg);
@@ -297,7 +310,7 @@ impl PtyManager {
                 cmd.arg("--plugin-dir");
                 cmd.arg(dir);
             }
-            log::info!("Executing claude directly: {}", claude_path);
+            log::info!("Executing claude directly: {}", program);
             cmd
         };
 
@@ -337,13 +350,19 @@ impl PtyManager {
             }
         }
 
-        log::debug!("Spawning claude: path={}, args={:?}", claude_path, args);
+        log::debug!("Spawning claude: target={}, args={:?}", claude_display, args);
 
         // 启动进程
         let mut child = match pair.slave.spawn_command(cmd) {
             Ok(c) => c,
             Err(e) => {
-                let err_msg = format!("Failed to spawn claude '{}': {}", claude_path, e);
+                let hint = match &target {
+                    crate::platform::CliTarget::PathLookup => {
+                        " (not found in PATH; install Claude CLI or set a custom path)"
+                    }
+                    crate::platform::CliTarget::Explicit(_) => "",
+                };
+                let err_msg = format!("Failed to spawn claude '{}'{}: {}", claude_display, hint, e);
                 log::error!("{}", err_msg);
                 self.emit_error(&id, &err_msg, "spawn");
                 return Err(anyhow!("{}", err_msg));
@@ -394,7 +413,7 @@ impl PtyManager {
 
         // 立即退出检测：秒退（EOF 先于本函数返回，事件落在前端消费端
         // 建立之前）转成 spawn 失败并携带 PTY 尾部输出
-        self.startup_check(&id, &mut child, &startup_buf, &claude_path)
+        self.startup_check(&id, &mut child, &startup_buf, &claude_display)
             .map_err(|e| anyhow!("{}", e))?;
 
         // 存储 PTY 实例（包含 child）

@@ -5,6 +5,8 @@ export interface CheckResult {
   passed: boolean
   message: string
   detectedPath?: string
+  /** 来源标记："configured"（用户配置）| "path"（PATH 检测） */
+  source?: 'configured' | 'path'
   action?: string
   url?: string
 }

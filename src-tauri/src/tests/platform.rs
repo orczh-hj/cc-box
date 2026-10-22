@@ -95,6 +95,95 @@ fn ConfigureCmd_Program_001() {
     assert!(format!("{:?}", cmd).contains("echo"));
 }
 
+// ---- is_runnable_cli ----
+
+// 当前测试二进制是可运行的普通文件
+#[test]
+fn IsRunnableCli_CurrentExe_001() {
+    let exe = std::env::current_exe().expect("current_exe");
+    assert!(is_runnable_cli(&exe.to_string_lossy()));
+}
+
+// 目录即使 exists() 为 true 也不能作为执行目标（execve 会返回 EACCES）
+#[test]
+fn IsRunnableCli_Directory_001() {
+    let dir = std::env::temp_dir();
+    assert!(!is_runnable_cli(&dir.to_string_lossy()));
+}
+
+// 不存在的路径不可运行
+#[test]
+fn IsRunnableCli_NotFound_001() {
+    let missing = if cfg!(windows) {
+        "C:\\nonexistent\\claude-xyz"
+    } else {
+        "/nonexistent/claude-xyz"
+    };
+    assert!(!is_runnable_cli(missing));
+}
+
+// Unix：普通文件缺少执行位时不可运行（Mac 事故场景：被复制后权限丢失）
+#[cfg(unix)]
+#[test]
+fn IsRunnableCli_NoExecBit_001() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let path = std::env::temp_dir().join(format!(
+        "cc-box-noexec-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    std::fs::write(&path, b"#!/bin/sh\necho hi\n").expect("write temp file");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
+        .expect("set permissions");
+
+    assert!(!is_runnable_cli(&path.to_string_lossy()));
+    let _ = std::fs::remove_file(&path);
+}
+
+// Windows：PATHEXT 之外的文件不视为可运行
+#[cfg(windows)]
+#[test]
+fn IsRunnableCli_WindowsExtension_001() {
+    let path = std::env::temp_dir().join(format!("cc-box-cli-{}.txt", std::process::id()));
+    std::fs::write(&path, b"not an executable").expect("write temp file");
+    assert!(!is_runnable_cli(&path.to_string_lossy()));
+    let _ = std::fs::remove_file(&path);
+}
+
+// ---- cli_target ----
+
+// 配置有效 → Explicit（用户显式指定的路径被尊重）
+#[test]
+fn CliTarget_Explicit_001() {
+    let exe = std::env::current_exe().expect("current_exe");
+    let exe = exe.to_string_lossy().to_string();
+    match cli_target(Some(&exe)) {
+        CliTarget::Explicit(path) => assert_eq!(path, exe),
+        CliTarget::PathLookup => panic!("expected Explicit"),
+    }
+}
+
+// 配置失效（不存在 / 目录 / 缺执行位）→ PathLookup，绝不返回坏路径
+#[test]
+fn CliTarget_BrokenConfig_FallsBackToPathLookup_002() {
+    let dir = std::env::temp_dir().to_string_lossy().to_string();
+    assert!(matches!(cli_target(Some(&dir)), CliTarget::PathLookup));
+
+    let missing = if cfg!(windows) {
+        "C:\\nonexistent\\claude-xyz"
+    } else {
+        "/nonexistent/claude-xyz"
+    };
+    assert!(matches!(cli_target(Some(missing)), CliTarget::PathLookup));
+}
+
+// 未配置 → PathLookup（与终端输入裸命令一致）
+#[test]
+fn CliTarget_NoConfig_003() {
+    assert!(matches!(cli_target(None), CliTarget::PathLookup));
+}
+
 // ---- find_executable ----
 
 // 查找系统自带的可执行文件返回 Some

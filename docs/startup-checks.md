@@ -1,8 +1,8 @@
 # 启动先决条件检查
 
-应用启动时自动检测 Claude CLI 和 Git Bash（仅 Windows）的可用性。检测结果自动保存到配置文件，后续启动直接从配置读取。
+应用启动时自动检测 Claude CLI 和 Git Bash（仅 Windows）的可用性。检测是**只读**的：结果只作为运行时状态返回，不写回持久化配置。
 
-涉及文件：`src-tauri/src/checks.rs`、`src-tauri/src/pty.rs`、`src-tauri/src/store.rs`、`src/App.vue`
+涉及文件：`src-tauri/src/checks.rs`、`src-tauri/src/platform.rs`、`src-tauri/src/pty.rs`、`src-tauri/src/store.rs`、`src/App.vue`
 
 ## 检查流程
 
@@ -11,17 +11,22 @@
   │
   ├─ lib.rs: CHECK_RESULTS (LazyLock)
   │   → checks::run_checks()
-  │     ├─ read_config_paths()          ← 从 ~/.cc-box/config.json 读取已保存路径
-  │     ├─ refresh_path_windows()       ← 检测便携版安装目录并添加到 PATH
-  │     ├─ check_claude_cli()           ← 检查 Claude CLI + 检测启动类型
-  │     ├─ check_git_bash()             ← 检查 Git Bash (Windows only)
-  │     └─ save_detected_paths()        ← 通过的路径和启动类型写回 config.json
+  │     ├─ platform::refresh_path()      ← PATH 来源对齐执行 shell
+  │     ├─ read_config_paths()           ← 读取用户配置的 claudePath / gitBashPath
+  │     ├─ check_claude_cli()            ← cli_target() + probe_cli()，不写配置
+  │     └─ check_git_bash()              ← 检查 Git Bash (Windows only)
   │
   ├─ 前端 App.vue onMounted()
   │   → appStore.runChecks()
   │   ├─ 全部通过 → initAfterChecks() 进入主界面
   │   └─ 有失败   → 显示检查失败面板
 ```
+
+## 配置写入边界
+
+- **只有用户操作会写 `claudePath` / `gitBashPath`**：设置里的自定义路径、安装器安装完成。
+- `run_checks()` / `pty::spawn_claude()` 都是只读；自动检测到的路径只出现在 `CheckResult`（`source = "path"`）与运行时 `cliHealth` 中。
+- 这样做消除了“自动检测覆盖用户配置”“检查与执行争抢写入”的隐式耦合——配置来源始终是用户意图。
 
 ## 自动安装功能
 
@@ -70,37 +75,25 @@ npm run download-deps
 
 ### PATH 动态配置
 
-应用启动时自动检测便携版安装目录：
+`platform::refresh_path()`（`src-tauri/src/platform.rs`）是 PATH 对齐的唯一入口：
 
-```rust
-// src-tauri/src/checks.rs
-fn refresh_path_windows() {
-    // 检测 %LOCALAPPDATA%\Claude
-    // 检测 %LOCALAPPDATA%\PortableGit\bin
-    // 添加到进程 PATH（立即生效）
-}
-```
+- **Unix**：从登录 shell（`$SHELL -l -c 'printenv PATH'`）读取——launchd 启动的 GUI 不继承 shell PATH，这是裸命令 `claude` 可用的前提。
+- **Windows**：Git Bash 会把继承的 Windows PATH 转成 POSIX 形式，因此只需保证父进程 PATH 完整（系统 + 用户环境），并补充 CC-Box 管理的安装目录（`%USERPROFILE%\.local\bin`、PortableGit\bin）。
+
+原则：**PATH 的来源必须与执行命令的 shell 一致**，否则检查结论与执行结果会分叉。
 
 ## Claude CLI 检查
 
-优先级从高到低：
+与执行层共用 `platform::cli_target()`：
 
-| 步骤 | 来源 | 说明 |
+| 步骤 | 来源 | 判定 |
 |------|------|------|
-| 1 | config.claudePath | 配置文件保存的路径 |
-| 2 | `where`/`which` 查找 | 系统路径搜索 |
+| 1 | config.claudePath | 必须通过 `is_runnable_cli`（Unix：普通文件 + 执行位；Windows：PATHEXT 扩展名）→ `source = "configured"` |
+| 2 | `where`/`which`（`probe_cli()`） | 仅用于检查/展示 → `source = "path"` |
 
-找到后检测启动类型并保存到 `config.claudeLauncherType`：
+两者都不可用时返回失败，并在文案里区分「配置路径不可运行」与「PATH 未找到」。
 
-| 检测方式 | 条件 | 结果 |
-|---------|------|------|
-| 扩展名 | `.js` 结尾 | node |
-| shebang | `#!/usr/bin/env node` | node |
-| 版权特征 | `// (c) Anthropic` + `Version:` | node |
-| 符号链接 (Mac/Linux) | 真实路径 `.js` 结尾 | node |
-| 其他 | - | direct |
-
-启动类型为 `node` 时额外检查 `node` 命令是否可用。
+注意：检查只回答“当前能否找到可运行的 CLI”，执行层仍会自行做 PATH 解析（Unix：`find_executable` → 完整路径；Windows：交给 shell）——**展示结果绝不直接作为执行目标**。
 
 ## Git Bash 检查（仅 Windows）
 
@@ -110,15 +103,14 @@ fn refresh_path_windows() {
 | 2 | 环境变量 `CLAUDE_CODE_GIT_BASH_PATH` | Claude Code 原生支持 |
 | 3 | `where git.exe` → 推导安装目录 | 找到 git.exe 后拼接 `bin/bash.exe` |
 
-## 路径自动保存
+## 运行态状态反馈
 
-`save_detected_paths()` 在 `run_checks()` 结束时调用：
-- 仅保存 passed=true 的检查项
-- 写入 `~/.cc-box/config.json` 的 `claudePath` / `claudeLauncherType` / `gitBashPath` 字段
-- 使用 `update_app_config()` 合并更新
+`appStore.cliHealth` 是 CLI 可用性的唯一状态源，三路更新：
 
-## 前端交互
+| 事件 | 状态 |
+|------|------|
+| `runChecks()` 返回 | `ok`（含 path/source）或 `missing` |
+| `pty-error`（stage = detection/spawn/startup） | `failed`（含原因与阶段） |
+| spawn 成功 | 清除 `failed` |
 
-检查失败时 App.vue 显示全屏遮罩：
-- 每个失败项显示输入框 + Browse 按钮 + 安装引导链接
-- 用户填写路径后点击 Save & Retry → 写入 config → 重新检测
+TerminalView 的状态条消费该状态，展示原因并提供「重试」（重新跑 `runChecks(true)`）入口；启动检查失败仍走 App.vue 的全屏遮罩（填写路径 + 安装引导）。

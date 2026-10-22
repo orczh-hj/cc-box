@@ -95,6 +95,7 @@ cc-box/
 - CLI 输出 → PTY reader → `decode_output()`（UTF-8 优先，失败回退 GBK，兼容 Windows 中文子进程）→ `pty-output` 事件 → `term.write()`
 - 浏览器远程模式：TokenGate 认证（#token=/#pair=）→ WS → rpc.call 调 Tauri command（rpc_dispatch 白名单）；PTY 数据流不走 rpc，走 session.create/attach/pty.input 专用消息（attach 即订阅、独占语义）
 - Hook 监控：`hook_server.rs` 接收 CLI hook 上报 → Rust `apply_hook_event` 单点状态机 → `hook-status` 事件 → `useStatusMonitor`（前端仅应用结果）
+- Claude CLI 启动：`platform::cli_target()` 是检查与 spawn 的唯一解析入口——配置路径可运行则用完整路径，否则 Unix 先经 `find_executable` 解析出可运行路径再 exec、Windows 用裸名交给 Git Bash；自动检测不写配置（只由用户设置/安装器写）；失败经 `pty-error` → `appStore.cliHealth` 统一展示与重试
 
 详细架构 → [docs/terminal-integration.md](docs/terminal-integration.md)、[docs/hook-monitor.md](docs/hook-monitor.md)
 
@@ -175,7 +176,7 @@ UI 已浏览器化（一套 UI 走桌面 Tauri / 宽屏浏览器 / 手机浏览�
 - **新事件** → `events.rs` 常量 + `emit_all`；远程会话类事件用 `remote_state::emit_event` / `emit_event_ex` / `emit_desktop_only`
 - **新协议消息** → `remote/protocol/` 四处同步：crate 定义 → protocol.ts → samples/ → remote/docs/protocol.md
 - **CLI 启动参数** → 只改 `pty::build_claude_args`，勿在前端另写一份
-- **CLI 进程启动** → Windows 经 Git Bash `-c` 中转；Unix 直接 exec 完整路径（勿改回 shell 中转）；遵守 spawn「返回即存活」契约
+- **CLI 进程启动** → 目标只由 `platform::cli_target()` 决定（配置可运行 → 完整路径；否则 PathLookup → Unix execvp 裸名 / Windows Git Bash `-c` 裸名）；Unix 不经 shell 中转；遵守 spawn「返回即存活」契约
 - **前端 invoke/listen** → 一律经 `src/api/transport.ts`（组件禁止直接 import @tauri-apps/api）
 
 守卫测试、背景与踩坑说明 → [docs/development.md](docs/development.md)「新增功能检查清单（完整版）」

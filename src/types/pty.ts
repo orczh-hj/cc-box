@@ -15,3 +15,10 @@ export interface PtyExitPayload {
   id: string
   exitCode: number
 }
+
+export interface PtyErrorPayload {
+  id: string
+  error: string
+  /** validation | detection | spawn | writer | reader | startup */
+  stage: string
+}

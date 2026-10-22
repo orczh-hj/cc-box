@@ -37,6 +37,71 @@ pub(crate) fn new_command(program: &str) -> Command {
 
 // ---- 2. 可执行文件查找 ----
 
+/// 判断路径是否可作为 CLI 启动目标。
+///
+/// `Path::exists()` 对目录同样返回 true，而 which 也可能把目录判为 X_OK；
+/// 这类路径直到 execve 才报 EACCES（Mac 上表现为点击会话后终端白屏）。
+/// Unix 要求普通文件 + 执行位；Windows 要求 PATHEXT 内的可执行扩展名
+/// （无扩展名视为 Git Bash shim，其可执行性交给 shell 判定）。
+pub(crate) fn is_runnable_cli(path: &str) -> bool {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return false;
+    };
+    if !meta.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        meta.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(windows)]
+    {
+        match Path::new(path).extension().and_then(|e| e.to_str()) {
+            None => true,
+            Some(ext) => {
+                let ext = ext.to_ascii_lowercase();
+                matches!(ext.as_str(), "exe" | "cmd" | "bat" | "com")
+            }
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        true
+    }
+}
+
+/// 一次执行的目标选择：显式配置可用，或交给平台按 PATH 查找。
+pub(crate) enum CliTarget {
+    /// 用户显式配置且校验通过——直接使用该路径
+    Explicit(String),
+    /// 未配置或配置失效——Unix 按 PATH 解析出可运行文件，Windows 交给 shell 查找
+    PathLookup,
+}
+
+/// 解析执行目标的唯一入口（检查与 spawn 共用）。
+///
+/// 只判断“显式配置是否可信”，不枚举 PATH——PATH 查找由执行层按平台规则完成
+/// （Unix 复用 `find_executable`，Windows 交给 shell），保持与终端一致的过滤语义。
+pub(crate) fn cli_target(configured: Option<&str>) -> CliTarget {
+    match configured {
+        Some(path) if is_runnable_cli(path) => CliTarget::Explicit(path.to_string()),
+        Some(path) => {
+            log::warn!(
+                "[Platform] Configured Claude path is not runnable: {}, falling back to PATH lookup",
+                path
+            );
+            CliTarget::PathLookup
+        }
+        None => CliTarget::PathLookup,
+    }
+}
+
+/// 探测 PATH 中会命中的 claude（仅用于检查展示，不参与执行决策）。
+pub(crate) fn probe_cli() -> Option<String> {
+    find_executable("claude")
+}
+
 /// 用 where (Windows) / which (Unix) 查找可执行文件，返回第一个匹配
 pub(crate) fn find_executable(name: &str) -> Option<String> {
     let output = run_locate(name)?;
@@ -47,9 +112,8 @@ pub(crate) fn find_executable(name: &str) -> Option<String> {
 
     decode_output(&output.stdout)
         .lines()
-        .next()
         .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty() && Path::new(s).exists())
+        .find(|s| !s.is_empty() && is_runnable_cli(s))
 }
 
 /// 用 where (Windows) / which (Unix) 查找可执行文件，返回所有匹配
@@ -82,7 +146,7 @@ pub(crate) fn find_all_executables(name: &str) -> Vec<String> {
     let results: Vec<String> = decode_output(&output.stdout)
         .lines()
         .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty() && Path::new(s).exists())
+        .filter(|s| !s.is_empty() && is_runnable_cli(s))
         .collect();
 
     log::debug!(
