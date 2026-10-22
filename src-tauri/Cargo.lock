@@ -404,11 +404,12 @@ dependencies = [
 
 [[package]]
 name = "cc-box"
-version = "0.16.0"
+version = "0.16.2"
 dependencies = [
  "anyhow",
  "arc-swap",
  "axum",
+ "base64 0.22.1",
  "cc-box-macros",
  "cc-box-remote-protocol",
  "cc-box-web-assets",

@@ -40,6 +40,12 @@
         v-show="activePanel === 'plugins'"
         @close="$emit('close')"
       />
+
+      <!-- 文件面板（浏览器远程模式专属；桌面模式 activePanel 不会切到 'files'） -->
+      <FilesPanel
+        v-show="activePanel === 'files'"
+        @close="$emit('close')"
+      />
     </div>
   </aside>
 </template>
@@ -51,6 +57,7 @@ import SkillsPanel from '../skills/SkillsPanel.vue'
 import AgentsPanel from '../agents/AgentsPanel.vue'
 import McpPanel from '../mcp/McpPanel.vue'
 import PluginsPanel from '../plugins/PluginsPanel.vue'
+import FilesPanel from '../files/FilesPanel.vue'
 
 defineProps<{
   visible: boolean

@@ -67,6 +67,17 @@
         <img src="@/assets/icons/phone.svg" alt="Remote" />
       </button>
 
+      <!-- 文件传输——仅浏览器远程模式（桌面有系统文件管理器；与设置同组） -->
+      <button
+        v-if="!isTauriEnv"
+        class="icon-btn"
+        :class="{ active: activePanel === 'files' }"
+        @click="$emit('toggle', 'files')"
+        :title="t('titleFiles')"
+      >
+        <img src="@/assets/icons/files.svg" alt="Files" />
+      </button>
+
       <!-- Settings -->
       <button
         class="icon-btn settings-btn"

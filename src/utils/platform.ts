@@ -35,3 +35,15 @@ export function getClaudePlatformKey(): string {
   return 'win32-x64'
 }
 
+/** 浏览器保存 Blob 到下载目录（a[download]；http 非安全上下文同可用——
+ * download 属性不受安全上下文限制；Tauri 环境不会走到此分支） */
+export function saveBlobToFile(blob: Blob, fileName: string): void {
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = fileName
+  a.click()
+  // 释放延迟：部分移动浏览器立即 revoke 会中断下载
+  setTimeout(() => URL.revokeObjectURL(url), 10_000)
+}
+

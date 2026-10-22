@@ -27,6 +27,16 @@
 | `~/.cc-box/claude-plugin/` | Hook Plugin 文件（运行时生成） |
 | `~/.cc-box/logs/` | 日志文件 |
 
+### 项目内传输目录 `.cc-box-files/`（远程文件上传）
+
+远程（手机）上传的文件落盘到**会话项目根**下 `.cc-box-files/`（非 ~/.cc-box——文件归属项目，Claude 直接可读）：
+
+- **创建**：`file_upload_begin` 按需 `create_dir_all`，路径由服务端拼接（客户端只传裸文件名，经 sanitize + canonicalize 锚点校验防穿越/junction 逃逸）
+- **临时文件**：`.upload-<id>.part`（UUID 命名，`file_list` 过滤不展示）；finish 用 `hard_link` 原子 no-replace 提交（冲突自动 `(n)` 改名）
+- **清理**：三层——begin/list 入口惰性 TTL（10 分钟）+ setup 定时 sweep（600s）+ 启动扫描已知项目删崩溃遗留 `.part`（仅过期文件且目录锚点校验通过）；连接断开即时回收该连接的会话
+- **大小限额**：`config.json` `remote.fileTransferMaxDirect`（默认 200MB）/`remote.fileTransferMaxRelay`（默认 20MB，0=禁用）
+- **不入任何 store**：纯文件系统数据，无跨端状态同步（发起端从 rpc 响应拿落盘路径）
+
 ## ~/.cc-box/config.json 结构
 
 ```json

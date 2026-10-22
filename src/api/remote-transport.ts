@@ -15,7 +15,7 @@ import {
   type ServerMessage,
 } from '../../remote/protocol/protocol'
 import { transportEnv } from './env'
-import type { Transport, Unlisten } from './transport'
+import type { Transport, Unlisten, InvokeOpts } from './transport'
 
 const TOKEN_KEY = 'ccbox-remote-token'
 const PING_INTERVAL = 30_000
@@ -81,6 +81,14 @@ class RemoteTransportImpl implements Transport {
     return this._controllerLabel
   }
 
+  /** 是否经中继连接（文件传输限额选档：中继流量按量计费从严；直连走局域网宽松）。
+   * 判定依据是运行时事实（配对入口走 relay 服页面 / 收到 relay 层 device.status），
+   * 非 URL 猜测；直连永不收到 device.status → 保持 false */
+  private _viaRelay = false
+  get viaRelay(): boolean {
+    return this._viaRelay
+  }
+
   /** 状态版本过滤：state-changed/controller-changed 携带 revision，
    * 不大于已应用版本的事件（旧事件/回环重复）直接丢弃，防止覆盖新状态。
    * 版本跳变（> 已应用+1，中间事件可能丢失——如全量应答基线先于在途事件
@@ -119,6 +127,8 @@ class RemoteTransportImpl implements Transport {
     if (pairCode) {
       history.replaceState(null, '', location.pathname)
       this.setConnState('connecting')
+      // 配对码仅在 relay 服出的页面上有效——本连接必经中继
+      this._viaRelay = true
       const token = await this.pair(pairCode)
       if (token) {
         this.storeAndConnect(token)
@@ -208,6 +218,8 @@ class RemoteTransportImpl implements Transport {
       // 中继层 device.status：桌面在线状态，转成事件供 UI 订阅
       const rawObj = raw as { type?: string; online?: boolean }
       if (rawObj?.type === 'device.status') {
+        // 仅中继链路下发此帧——收到即为经中继的运行时证据
+        this._viaRelay = true
         this.dispatchEvent('device-status', { online: rawObj.online === true })
         return
       }
@@ -350,7 +362,10 @@ class RemoteTransportImpl implements Transport {
 
   // ==================== Transport 接口 ====================
 
-  invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
+  async invoke<T>(cmd: string, args?: Record<string, unknown>, opts?: InvokeOpts): Promise<T> {
+    // 连接未就绪时先等重连（手机切后台/文件选择器回来时 WS 尚在重连，
+    // 直接 reject 会让用户操作瞬间莫名失败）
+    await this.waitForOpen(opts?.connectTimeoutMs ?? 8000)
     return new Promise<T>((resolve, reject) => {
       if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
         reject(new Error(`rpc '${cmd}': connection not open`))
@@ -359,10 +374,11 @@ class RemoteTransportImpl implements Transport {
       const id = this.nextRpcId++
       // 超时兜底：rpc.result 帧可能被服务端 try_send 丢弃（通道满），
       // WS 依旧健康时 Promise 会永久悬挂——15s 超时 reject 让调用方可重试
+      // （慢命令如文件分块可经 opts.timeoutMs 放宽）
       const timer = window.setTimeout(() => {
         this.pending.delete(id)
         reject(new Error(`rpc '${cmd}': timeout`))
-      }, 15000)
+      }, opts?.timeoutMs ?? 15000)
       this.pending.set(id, {
         resolve: (v: unknown) => { clearTimeout(timer); resolve(v as T) },
         reject: (e: Error) => { clearTimeout(timer); reject(e) },
@@ -370,6 +386,23 @@ class RemoteTransportImpl implements Transport {
       this.ws.send(
         JSON.stringify({ type: 'rpc.call', id, cmd, args: args ?? {} }),
       )
+    })
+  }
+
+  /** 等待 WS 进入 OPEN（重连窗口内），超时 reject */
+  private waitForOpen(timeoutMs: number): Promise<void> {
+    if (this.ws?.readyState === WebSocket.OPEN) return Promise.resolve()
+    return new Promise<void>((resolve, reject) => {
+      const deadline = Date.now() + timeoutMs
+      const timer = window.setInterval(() => {
+        if (this.ws?.readyState === WebSocket.OPEN) {
+          window.clearInterval(timer)
+          resolve()
+        } else if (Date.now() >= deadline || this._connState === 'denied') {
+          window.clearInterval(timer)
+          reject(new Error('connection not open (reconnecting)'))
+        }
+      }, 100)
     })
   }
 

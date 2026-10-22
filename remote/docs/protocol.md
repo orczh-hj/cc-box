@@ -79,6 +79,28 @@
 
 用户显式关闭（桌面 `pty_kill` command / 远程 `session.kill`，双路径同语义）**先广播 `remote-session-closed`（payload `{id: ptyId}`）再 kill**：各端（桌面及其他浏览器端）收到后联动删 Tab，"打开的标签页"不残留；先发保证 closed 先于 pty-exit 到达（同连接保序，晚到会因 ptyId 已清而匹配不到 Tab）。自然退出（CLI 内 `/exit` 或进程崩溃）只走 `pty.output`/`session.exit` 链路，Tab 保留显示"已停止"（可重启）。
 
+## 文件传输（rpc.call 命令，无专用消息）
+
+浏览器远程模式与桌面互传文件，**不新增协议消息**——全部经 `rpc.call` 白名单命令（8 个 `file_*`），512KB 串行 base64 分块（单消息 < relay 4MiB 上限；串行等 ack 天然背压）。实现单点 `src-tauri/src/file_transfer.rs`，传输逻辑 `src/api/fileTransfer.ts`，UI `FilesPanel.vue`（仅浏览器模式渲染）。
+
+| 命令 | 读/写 | 参数（camelCase） | 返回 |
+|---|---|---|---|
+| `file_transfer_limits` | read | — | `{directMax, relayMax}` |
+| `file_list` | read | `path`（须在授权项目内） | `[{name, path, isDir, size?, modified?}]`（过滤 `.upload-*.part`，目录在前） |
+| `file_upload_begin` | write(None) | `ptyId, fileName, size` | `{uploadId, targetPath, fileName}` |
+| `file_upload_chunk` | write(None) | `uploadId, offset, dataB64` | `{received}` |
+| `file_upload_finish` | write(None) | `uploadId` | `{targetPath}`（冲突自动 `(n)` 改名） |
+| `file_upload_abort` | write(None) | `uploadId` | `null`（幂等） |
+| `file_download_begin` | write(None) | `path` | `{downloadId, fileName, size, mtime?}` |
+| `file_download_chunk` | write(None) | `downloadId, offset` | `{dataB64, bytes, eof}` |
+
+- **服务端注入**：`handle_rpc` 对 `file_` 前缀命令权威注入 `connId`/`viaRelay`（覆盖客户端任何伪造值；未知连接按中继从严）。会话（uploadId/downloadId）绑定发起连接，他人使用返回同一错误文案（不泄露存在性）；桌面 invoke 路径（conn_id=None）上传/下载直接拒绝
+- **权限**：读写范围锁定授权项目内（~/.claude/projects 已知项目，canonicalize 锚点校验防 `.cc-box-files` 符号链接/junction 逃逸）；上传路径服务端拼接（客户端只传裸文件名 + sanitize：拒 `..`/分隔符/Windows 保留名等），落盘 `<会话项目>/.cc-box-files/`；上传与下载均受全局控制权拦截（他人持有被拒）
+- **可靠性**：chunk 幂等（`offset+len == written` 的重发不重写，ACK 丢失后前端重试安全）；finish 用 `hard_link` 原子 no-replace 提交，绝不覆盖已有文件；下载会话固化 size/mtime，源文件变化即返回 `source file changed during download`；eof 不清会话（最后一块重发幂等），TTL 10 分钟回收
+- **双限额（流量成本）**：`config.json` `remote.fileTransferMaxDirect`（默认 200MB）/`remote.fileTransferMaxRelay`（默认 20MB——中继流量 ≈2.7× 文件大小：双程 + base64 膨胀；`0` = 禁用）。判定依据是「经由中继」（连接表 `via_relay`：relay 桥接 true / LAN 直连 false），非「公网」——局域网自建 relay 可调高
+- **清理三层**：begin/list 入口惰性 TTL sweep（chunk/finish 不触发）+ lib.rs setup 定时（600s）+ 启动扫描已知项目 `.cc-box-files/*.upload-*.part`（崩溃遗留，仅 mtime >10 分钟且目录 canonicalize 后仍在项目内才删）；连接断开时即时回收该连接的传输会话
+- **审计**：begin/finish/abort/download_begin 记 `~/.cc-box/logs`（方向/连接/路径/大小）
+
 ## 关键结构
 
 ### RemoteSession

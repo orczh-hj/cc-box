@@ -206,6 +206,18 @@ registry! {
     "controller_status" => read() => | | crate::commands::controller_status,
     // set_relay_url 不远程暴露：已连客户端可把中继重定向到攻击者服务器，
     // 下次注册即送出 device_key（身份窃取）。中继地址由环境变量/内置默认管理
+
+    // ==== 文件传输（远程浏览器模式上传/下载；实现单点 file_transfer.rs） ====
+    // conn_id/via_relay 由 handle_rpc 服务端注入（覆盖客户端伪造值），
+    // 用于会话归属校验与限额选档（中继流量按量计费从严）
+    "file_transfer_limits" => read() => | | crate::commands::file_transfer_limits,
+    "file_list" => read() => |path: String| crate::commands::file_list,
+    "file_upload_begin" => write(None) => |pty_id: String, file_name: String, size: u64, conn_id: Option<u64>, via_relay: Option<bool>| crate::commands::file_upload_begin,
+    "file_upload_chunk" => write(None) => |upload_id: String, offset: u64, data_b64: String, conn_id: Option<u64>| crate::commands::file_upload_chunk,
+    "file_upload_finish" => write(None) => |upload_id: String, conn_id: Option<u64>| crate::commands::file_upload_finish,
+    "file_upload_abort" => write(None) => |upload_id: String, conn_id: Option<u64>| crate::commands::file_upload_abort,
+    "file_download_begin" => write(None) => |path: String, conn_id: Option<u64>, via_relay: Option<bool>| crate::commands::file_download_begin,
+    "file_download_chunk" => write(None) => |download_id: String, offset: u64, conn_id: Option<u64>| crate::commands::file_download_chunk,
 }
 
 /// 抹掉 rpc 响应中的远程凭证字段（token/deviceId/deviceKey）
@@ -233,6 +245,23 @@ pub async fn dispatch(cmd: &str, args: &Map<String, Value>) -> Result<Value, Str
 async fn log_message_rpc(level: String, message: String) -> Result<(), String> {
     crate::commands::log_message(level, message).await;
     Ok(())
+}
+
+/// 文件传输命令的服务端权威注入：connId 供会话归属校验（他人 uploadId/
+/// downloadId 拒绝）；viaRelay 供限额选档（中继流量按量计费，未知连接按
+/// 中继从严）。insert 覆盖客户端任何同名伪造值；take_arg 优先 camelCase，
+/// 故客户端 snake_case 变体同样无法绕过
+pub(crate) fn inject_file_transfer_args(
+    conn_id: u64,
+    cmd: &str,
+    args: &mut Map<String, Value>,
+    via_relay: bool,
+) {
+    if !cmd.starts_with("file_") {
+        return;
+    }
+    args.insert("viaRelay".into(), Value::Bool(via_relay));
+    args.insert("connId".into(), Value::Number(conn_id.into()));
 }
 
 /// 从 args 对象提取参数：优先 camelCase 键（Tauri invoke 惯例），回退原 snake_case；
@@ -281,7 +310,14 @@ pub const WRITE_EXEMPT: &[&str] = &["run_checks", "save_last_project"];
 /// 无人持有则发起者自动持有（write_success_acquire，与 attach/create 同规则）
 pub fn handle_rpc(conn_id: u64, rpc_id: u64, cmd: &str, args: &Value) {
     let cmd = cmd.to_string();
-    let args = args.as_object().cloned().unwrap_or_default();
+    let mut args = args.as_object().cloned().unwrap_or_default();
+    // 文件传输命令：服务端权威注入连接身份与中继标志（覆盖客户端任何伪造值）
+    if cmd.starts_with("file_") {
+        let via = crate::remote_state::REMOTE_STATE
+            .conn_via_relay(conn_id)
+            .unwrap_or(true); // 未知连接按中继从严
+        inject_file_transfer_args(conn_id, &cmd, &mut args, via);
+    }
     let is_write = is_remote_write(&cmd);
     if is_write {
         log::info!("[remote] rpc write cmd '{}' from conn {}", cmd, conn_id);
@@ -494,5 +530,33 @@ mod tests {
         assert_eq!(snake_to_camel("project_path"), "projectPath");
         assert_eq!(snake_to_camel("id"), "id");
         assert_eq!(snake_to_camel("provider_ids"), "providerIds");
+    }
+
+    /// 文件传输命令注入覆盖客户端伪造值（安全前提：会话归属/限额选档不可伪造）
+    #[test]
+    fn rpc_文件命令注入权威覆盖() {
+        // 客户端伪造 camelCase 注入键 → 被覆盖
+        let mut args = Map::new();
+        args.insert("connId".into(), serde_json::json!(999_999));
+        args.insert("viaRelay".into(), serde_json::json!(false));
+        inject_file_transfer_args(1001, "file_upload_chunk", &mut args, true);
+        assert_eq!(args["connId"], serde_json::json!(1001));
+        assert_eq!(args["viaRelay"], serde_json::json!(true));
+        // take_arg 优先 camelCase：注入值胜出
+        let got: Option<u64> = take_arg(&args, "conn_id").unwrap();
+        assert_eq!(got, Some(1001));
+
+        // 客户端 snake_case 变体无法绕过（camelCase 注入优先）
+        let mut args = Map::new();
+        args.insert("conn_id".into(), serde_json::json!(42));
+        args.insert("via_relay".into(), serde_json::json!(false));
+        inject_file_transfer_args(1002, "file_download_begin", &mut args, true);
+        let got: Option<u64> = take_arg(&args, "conn_id").unwrap();
+        assert_eq!(got, Some(1002));
+
+        // 非文件命令不注入
+        let mut args = Map::new();
+        inject_file_transfer_args(1003, "get_projects", &mut args, false);
+        assert!(args.is_empty());
     }
 }

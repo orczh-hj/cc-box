@@ -53,7 +53,7 @@ fn notification(ntype: &str) -> HookEventDetail {
 fn setup_conn(state: &RemoteState) -> (u64, mpsc::Receiver<ServerMessage>) {
     let (tx, rx) = mpsc::channel(64);
     let conn_id = crate::remote_state::next_conn_id();
-    state.add_conn(conn_id, tx);
+    state.add_conn(conn_id, tx, false);
     (conn_id, rx)
 }
 
@@ -758,7 +758,7 @@ async fn RemoteState_SessionKill_广播closed给远程连接() {
     state.register_pty("pk1", "claude", "/tmp");
     let (tx, mut rx) = mpsc::channel(16);
     let conn = crate::remote_state::next_conn_id();
-    state.add_conn(conn, tx);
+    state.add_conn(conn, tx, false);
 
     state.handle_client_message(conn, &ClientMessage::SessionKill { id: "pk1".into(), quiet: None });
 
@@ -783,7 +783,7 @@ async fn RemoteState_SessionKillQuiet_不广播closed() {
     state.register_pty("pkq1", "claude", "/tmp");
     let (tx, mut rx) = mpsc::channel(16);
     let conn = crate::remote_state::next_conn_id();
-    state.add_conn(conn, tx);
+    state.add_conn(conn, tx, false);
 
     state.handle_client_message(
         conn,
@@ -1309,7 +1309,7 @@ fn Controller_并发广播到达序revision严格递增() {
     // conn_b 不注册 channel 也能发消息——广播仍只入队 conn_a 一份
     let conn_a = crate::remote_state::next_conn_id();
     let conn_b = crate::remote_state::next_conn_id();
-    state.add_conn(conn_a, tx);
+    state.add_conn(conn_a, tx, false);
 
     const N: usize = 2000;
     let s1 = state.clone();

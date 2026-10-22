@@ -18,7 +18,7 @@
 
 1. **发布前检查**
    - `cd src-tauri && cargo test` + `npm test` 全绿
-   - 协议改动：确认四处同步（crate 定义 / protocol.ts / samples / remote/docs/protocol.md，见 CLAUDE.md 检查清单）
+   - 协议改动：确认四处同步（crate 定义 / protocol.ts / samples / remote/docs/protocol.md，见 docs/development.md 新增功能检查清单）
    - 远程功能改动：remote/docs/manual-test-cases.md U/R 系列关键条目真机走查
 2. **桌面版本发布**：`npm run release -- --bump <type> --notes "..."`（见下节全自动流程）
 3. **relay 部署**（上表"必须"时）：`npm run deploy:relay`（一键：前端构建 → musl 交叉编译 → scp `.new` + md5 校验 → 确认后切换重启 → 三查自动执行；手动细节见 remote/docs/deploy.md §3.5）

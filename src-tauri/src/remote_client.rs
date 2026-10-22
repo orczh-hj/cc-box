@@ -475,7 +475,7 @@ async fn run_once(
                             let (tx, mut rx) = mpsc::channel::<ServerMessage>(
                                 crate::remote_state::CONN_CHANNEL_CAPACITY,
                             );
-                            REMOTE_STATE.add_conn(local_id, tx);
+                            REMOTE_STATE.add_conn(local_id, tx, true);
                             tokio::spawn(async move {
                                 while let Some(msg) = rx.recv().await {
                                     let Ok(payload) = serde_json::to_value(&msg) else { continue };

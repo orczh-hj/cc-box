@@ -14,14 +14,24 @@ import type { ClientMessage, ServerMessage } from '../../remote/protocol/protoco
 import { tauriTransport } from './tauri-transport'
 import { remoteTransport } from './remote-transport'
 import { transportEnv } from './env'
+import type { TransportEnv } from './env'
 
 export type Unlisten = () => void
 export { transportEnv }
 export type { TransportEnv } from './env'
 
+/** invoke 可选项：timeoutMs 覆盖默认 15s 超时（浏览器远程 rpc；
+ * 大分块传输（文件）等慢命令需要更长窗口；桌面实现忽略）。
+ * connectTimeoutMs：浏览器远程连接未就绪（手机切后台回来 / WS 重连中）
+ * 时等待恢复的上限，避免操作瞬间直接报 connection not open */
+export interface InvokeOpts {
+  timeoutMs?: number
+  connectTimeoutMs?: number
+}
+
 export interface Transport {
   readonly env: TransportEnv
-  invoke<T = unknown>(cmd: string, args?: Record<string, unknown>): Promise<T>
+  invoke<T = unknown>(cmd: string, args?: Record<string, unknown>, opts?: InvokeOpts): Promise<T>
   listen<T = unknown>(event: string, cb: (payload: T) => void): Promise<Unlisten>
   /** 发送远程协议消息（仅浏览器模式；桌面模式抛错——PTY 流走 Tauri 通道） */
   sendClient(msg: ClientMessage): void

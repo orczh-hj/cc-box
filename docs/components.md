@@ -15,7 +15,8 @@ App.vue
 │   │   ├── SkillsPanel.vue         # Skills 面板
 │   │   ├── AgentsPanel.vue         # Agents 面板
 │   │   ├── McpPanel.vue            # MCP Servers 面板
-│   │   └── PluginsPanel.vue        # Plugins 面板
+│   │   ├── PluginsPanel.vue        # Plugins 面板
+│   │   └── FilesPanel.vue          # 文件传输面板（浏览器远程模式专属；上传/下载两 section）
 │   ├── TerminalHeader.vue          # 终端标题栏（会话名 + 返回按钮；项目名由标签页 title 承载）
 │   └── XTermTerminal.vue           # xterm.js 终端核心
 │
@@ -84,6 +85,15 @@ Events：
 
 根据 `sidebarStore.activePanel` 显示对应面板内容，支持 `v-show` 切换（保留各面板状态）。
 
+### FilesPanel.vue — 文件传输面板（浏览器远程模式专属，IconBar `v-if="!isTauriEnv"` 守卫）
+
+上传（手机 → 桌面 `.cc-box-files/`）与下载（授权项目内文件 → 手机）两 section，状态机 idle/transferring（进度+取消）/done/error。**职责分层**：分块循环/重试≤2/取消在 `src/api/fileTransfer.ts`（uploadFile/downloadFile/quotePath），本组件只做状态机与展示。
+
+- 上传完成：仅当活动终端仍是发起时的 ptyId 且 running 才 `sendTerminalCommand(quotePath(targetPath))` 插入（防串终端；路径转义三档：裸/双引号/单引号）
+- 下载：路径输入 + 项目内简易浏览器（`file_list`，入口=活动 Tab 项目根，回上级到根为止；文件点选回填不自动下载）；保存走 `saveBlobToFile`（utils/platform.ts，a[download]）
+- 限额：挂载时 `file_transfer_limits` 拉取，按 `remoteTransport.viaRelay` 选档展示；中继常显流量成本提示
+- 错误映射：控制权被占（附「接管」按钮 → controllerTakeover）/ 超限 / 项目外路径 / 源文件已变化 / 超时等本地化文案
+
 ### TitleBar.vue — 自定义标题栏
 
 Windows 平台去除原生装饰后自定义的拖拽区域 + 窗口控制按钮。
@@ -146,7 +156,7 @@ historySessions: HistorySession[]     // 未被 Tab 占用的历史会话
 ### sidebar.ts — 侧边栏状态
 
 ```typescript
-activePanel: SidebarPanelType  // 'sessions' | 'skills' | 'agents' | 'mcp' | 'plugins' | null
+activePanel: SidebarPanelType  // 'sessions' | 'skills' | 'agents' | 'mcp' | 'plugins' | 'files' | null
 panelVisible: boolean
 showSettings: boolean
 // 预加载数据

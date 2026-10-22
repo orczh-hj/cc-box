@@ -9,13 +9,15 @@ import { transportEnv } from './env'
 import type {
   Transport,
   Unlisten,
+  InvokeOpts,
   SpawnSessionOptions,
   SpawnSessionResult,
 } from './transport'
 
 export const tauriTransport: Transport = {
   env: transportEnv,
-  invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
+  invoke<T>(cmd: string, args?: Record<string, unknown>, _opts?: InvokeOpts): Promise<T> {
+    // 本地 IPC 无慢命令，忽略 timeoutMs（仅浏览器远程 rpc 有 15s 默认超时）
     return tauriInvoke<T>(cmd, args)
   },
   listen<T>(event: string, cb: (payload: T) => void): Promise<Unlisten> {

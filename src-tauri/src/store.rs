@@ -93,6 +93,11 @@ pub struct RemoteConfig {
     pub device_id: Option<String>,
     /// 设备密钥（64 hex，注册中继用）
     pub device_key: Option<String>,
+    /// 文件传输大小上限（字节）：直连默认 200MB（局域网零流量成本）；0 = 禁用传输
+    pub file_transfer_max_direct: Option<u64>,
+    /// 文件传输大小上限（字节）：经中继默认 20MB（中继流量按量计费，实际消耗 ≈2.7×
+    /// 文件大小：双程 + base64 膨胀 1.33×；局域网自建 relay 可调高）；0 = 禁用
+    pub file_transfer_max_relay: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

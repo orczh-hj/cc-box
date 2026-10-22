@@ -3,7 +3,7 @@ import { ref, computed } from 'vue'
 import { getAllAgents, getAllSkills, getAllMcpServers, getAllPlugins, setSkillEnabled, setAgentEnabled, setMcpServerEnabled, setPluginEnabled } from '@/api/tauri'
 import type { AgentInfo, SkillInfo, McpServerInfo, PluginInfo, UpdateInfo, ClaudeCliUpdateInfo } from '@/types'
 
-export type SidebarPanelType = 'sessions' | 'skills' | 'agents' | 'mcp' | 'plugins' | null
+export type SidebarPanelType = 'sessions' | 'skills' | 'agents' | 'mcp' | 'plugins' | 'files' | null
 
 export const useSidebarStore = defineStore('sidebar', () => {
   const activePanel = ref<SidebarPanelType>(null)

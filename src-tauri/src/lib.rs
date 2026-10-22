@@ -14,6 +14,7 @@ mod platform;
 mod remote_state;
 mod remote_server;
 mod remote_client;
+mod file_transfer;
 mod rpc_dispatch;
 mod events;
 #[cfg(test)]
@@ -151,6 +152,20 @@ pub fn run(initial_dir: Option<String>) {
                 // 远程中继出站客户端（配置了 relay_url 时自动连接）
                 remote_client::init().await;
 
+                // 文件传输清理：启动扫一次（删崩溃遗留的上传临时文件）
+                file_transfer::startup_cleanup();
+                // 定时 TTL sweep（惰性清理的兜底：连接断开后再无 file_ 命令触发）
+                tauri::async_runtime::spawn(async move {
+                    let mut interval =
+                        tokio::time::interval(std::time::Duration::from_secs(600));
+                    interval
+                        .set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                    loop {
+                        interval.tick().await;
+                        file_transfer::sweep_stale();
+                    }
+                });
+
                 // 如果通过命令行参数传入了目录（右键菜单打开），延迟 emit 事件给前端
                 if let Some(dir) = initial_dir {
                     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
@@ -234,6 +249,15 @@ pub fn run(initial_dir: Option<String>) {
             commands::set_remote_enabled,
             commands::set_relay_url,
             commands::refresh_relay_pair_code,
+            // File Transfer Commands（远程浏览器模式；桌面 invoke 走 conn_id=None 拒绝上传/下载）
+            commands::file_transfer_limits,
+            commands::file_list,
+            commands::file_upload_begin,
+            commands::file_upload_chunk,
+            commands::file_upload_finish,
+            commands::file_upload_abort,
+            commands::file_download_begin,
+            commands::file_download_chunk,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

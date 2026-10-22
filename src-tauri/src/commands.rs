@@ -280,6 +280,90 @@ pub async fn get_project_info(path: String) -> Result<Option<Project>, String> {
     crate::store::get_project_info(&path).map_err(|e| e.to_string())
 }
 
+// ==================== File Transfer Commands（远程浏览器模式文件上传/下载） ====
+// 实现单点在 file_transfer.rs（安全校验/会话/分块），此处仅薄包装。
+// conn_id/via_relay 由 rpc_dispatch::handle_rpc 服务端注入（远程路径），
+// 桌面 invoke 时为 None → 上传/下载拒绝（remote only）；limits/list 只读不拒。
+
+/// 当前文件传输限额（直连/中继两档；前端预检与提示展示）
+#[tauri::command]
+pub async fn file_transfer_limits() -> Result<crate::file_transfer::TransferLimits, String> {
+    Ok(crate::file_transfer::limits())
+}
+
+/// 列目录（含文件，下载浏览器用）：范围锁定已知项目内，过滤上传临时文件
+#[tauri::command]
+pub async fn file_list(path: String) -> Result<Vec<crate::file_transfer::FileEntryLite>, String> {
+    crate::file_transfer::list(&path)
+}
+
+/// 上传开启：落盘目标 = 会话项目 cwd 下 `.cc-box-files/`（服务端拼接，
+/// 客户端不可指定路径）。写命令：受全局控制权拦截（他人持有被拒）
+#[cc_command(write)]
+#[tauri::command]
+pub async fn file_upload_begin(
+    pty_id: String,
+    file_name: String,
+    size: u64,
+    conn_id: Option<u64>,
+    via_relay: Option<bool>,
+) -> Result<crate::file_transfer::UploadBeginResult, String> {
+    crate::file_transfer::upload_begin(conn_id, &pty_id, &file_name, size, via_relay)
+}
+
+/// 上传分块追加（幂等：ACK 丢失重发同块安全）
+#[cc_command(write)]
+#[tauri::command]
+pub async fn file_upload_chunk(
+    upload_id: String,
+    offset: u64,
+    data_b64: String,
+    conn_id: Option<u64>,
+) -> Result<crate::file_transfer::UploadChunkResult, String> {
+    crate::file_transfer::upload_chunk(conn_id, &upload_id, offset, &data_b64)
+}
+
+/// 上传完成：hard_link 原子提交（不覆盖已有文件，冲突自动 `(n)` 改名）
+#[cc_command(write)]
+#[tauri::command]
+pub async fn file_upload_finish(
+    upload_id: String,
+    conn_id: Option<u64>,
+) -> Result<crate::file_transfer::UploadFinishResult, String> {
+    crate::file_transfer::upload_finish(conn_id, &upload_id)
+}
+
+/// 放弃上传：删临时文件与会话（幂等）
+#[cc_command(write)]
+#[tauri::command]
+pub async fn file_upload_abort(upload_id: String, conn_id: Option<u64>) -> Result<(), String> {
+    crate::file_transfer::upload_abort(conn_id, &upload_id)
+}
+
+/// 下载开启（需控制权）：白名单（已知项目内）+ is_file + 限额；
+/// 会话固化 size/mtime 供后续 chunk 一致性校验
+#[cc_command(write)]
+#[tauri::command]
+pub async fn file_download_begin(
+    path: String,
+    conn_id: Option<u64>,
+    via_relay: Option<bool>,
+) -> Result<crate::file_transfer::DownloadBeginResult, String> {
+    crate::file_transfer::download_begin(conn_id, &path, via_relay)
+}
+
+/// 下载分块拉取：逐块校验归属连接与源文件 size/mtime 未变（变化即拒）
+#[cc_command(write)]
+#[tauri::command]
+pub async fn file_download_chunk(
+    download_id: String,
+    offset: u64,
+    conn_id: Option<u64>,
+) -> Result<crate::file_transfer::DownloadChunkResult, String> {
+    crate::file_transfer::download_chunk(conn_id, &download_id, offset)
+}
+
+
 /// 获取会话列表
 #[tauri::command]
 pub async fn get_sessions(

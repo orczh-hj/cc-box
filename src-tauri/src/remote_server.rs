@@ -372,7 +372,7 @@ async fn handle_socket(mut socket: WebSocket) {
     log::info!("[remote] conn {} authenticated", conn_id);
 
     let (tx, mut rx) = mpsc::channel::<ServerMessage>(crate::remote_state::CONN_CHANNEL_CAPACITY);
-    REMOTE_STATE.add_conn(conn_id, tx);
+    REMOTE_STATE.add_conn(conn_id, tx, false);
 
     // hello.ok 由 remote_state 的唯一 handler 回复（先 add_conn 再分发，
     // 与中继桥接路径完全一致——hello 应答不在连接层重复实现）

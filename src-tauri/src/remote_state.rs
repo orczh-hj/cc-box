@@ -151,13 +151,19 @@ fn align_head_to_ansi(s: &mut String) {
     }
 }
 
+/// 连接表条目：出站通道 + 是否经中继（文件传输按连接类型限额——中继流量按量计费）
+pub(crate) struct ConnEntry {
+    pub tx: mpsc::Sender<ServerMessage>,
+    pub via_relay: bool,
+}
+
 #[derive(Default)]
 struct StateInner {
     sessions: HashMap<String, SessionEntry>,
     /// pty_id → 订阅它的连接集合（attach 同时视为订阅）
     subscribers: HashMap<String, HashSet<u64>>,
     /// conn_id → 出站通道
-    conns: HashMap<u64, mpsc::Sender<ServerMessage>>,
+    conns: HashMap<u64, ConnEntry>,
     /// 全局状态版本号：每次状态变化（写命令广播/会话建关/控制权变更）+1。
     /// 附在 state-changed/controller-changed payload 与 HelloOk 下发，前端
     /// 单调过滤防旧事件乱序覆盖新状态；重连/接管后以服务端值为基线
@@ -343,8 +349,8 @@ impl RemoteState {
             name: name.to_string(),
             payload: serde_json::json!({ "id": id, "data": rev.to_string() }),
         };
-        for tx in inner.conns.values() {
-            let _ = tx.try_send(msg.clone());
+        for e in inner.conns.values() {
+            let _ = e.tx.try_send(msg.clone());
         }
     }
 
@@ -425,8 +431,8 @@ impl RemoteState {
             name: name.to_string(),
             payload: serde_json::json!({ "id": section, "data": rev.to_string() }),
         };
-        for tx in inner.conns.values() {
-            let _ = tx.try_send(msg.clone());
+        for e in inner.conns.values() {
+            let _ = e.tx.try_send(msg.clone());
         }
     }
 
@@ -547,13 +553,23 @@ impl RemoteState {
         Some(status)
     }
 
-    /// 连接认证通过后注册（remote_server 调用）
-    pub fn add_conn(&self, conn_id: u64, sender: mpsc::Sender<ServerMessage>) {
-        self.inner.lock().conns.insert(conn_id, sender);
+    /// 连接认证通过后注册（remote_server 直连传 false / remote_client 中继桥接传 true）
+    pub fn add_conn(&self, conn_id: u64, sender: mpsc::Sender<ServerMessage>, via_relay: bool) {
+        self.inner.lock().conns.insert(
+            conn_id,
+            ConnEntry { tx: sender, via_relay },
+        );
+    }
+
+    /// 连接是否经中继（文件传输限额选档；未知连接返回 None，调用方按中继从严处理）
+    pub fn conn_via_relay(&self, conn_id: u64) -> Option<bool> {
+        self.inner.lock().conns.get(&conn_id).map(|e| e.via_relay)
     }
 
     /// 连接断开后清理全部订阅，并归还其接管的会话
     pub fn remove_conn(&self, conn_id: u64) {
+        // 文件传输会话随连接回收（删 .part，防僵死会话占满配额）
+        crate::file_transfer::cleanup_conn(conn_id);
         // 控制权释放（持有者断连；广播空 id = 其他设备可自由操作）
         self.release_controller(conn_id);
         let reclaimed = {
@@ -581,6 +597,11 @@ impl RemoteState {
 
     fn desktop_size_of(&self, id: &str) -> Option<(u16, u16)> {
         self.inner.lock().sessions.get(id).and_then(|e| e.desktop_size)
+    }
+
+    /// ptyId → 项目 cwd（文件上传定位会话项目的 .cc-box-files 用）
+    pub fn cwd_of(&self, id: &str) -> Option<String> {
+        self.inner.lock().sessions.get(id).map(|e| e.cwd.clone())
     }
 
     /// 该会话控制权当前是否在远程连接手中（桌面 resize 应让位，仅记录尺寸）
@@ -695,7 +716,7 @@ impl RemoteState {
                     custom_args.as_deref().unwrap_or(""),
                 );
                 let args = (!cli_args.is_empty()).then_some(cli_args);
-                let conn_tx = { self.inner.lock().conns.get(&conn_id).cloned() };
+                let conn_tx = self.inner.lock().conns.get(&conn_id).map(|e| e.tx.clone());
                 let reply = move |msg: ServerMessage| {
                     if let Some(tx) = &conn_tx {
                         let _ = tx.try_send(msg);
@@ -1047,7 +1068,7 @@ impl RemoteState {
         let inner = self.inner.lock();
         if let Some(subs) = inner.subscribers.get(id) {
             for conn_id in subs {
-                if let Some(tx) = inner.conns.get(conn_id) {
+                if let Some(tx) = inner.conns.get(conn_id).map(|e| &e.tx) {
                     let _ = tx.try_send(msg.clone());
                 }
             }
@@ -1057,8 +1078,8 @@ impl RemoteState {
     /// 广播给全部在线连接（会话列表级信息：exit、working/pending 状态）
     fn broadcast_to_all(&self, msg: ServerMessage) {
         let inner = self.inner.lock();
-        for tx in inner.conns.values() {
-            let _ = tx.try_send(msg.clone());
+        for e in inner.conns.values() {
+            let _ = e.tx.try_send(msg.clone());
         }
     }
 
@@ -1083,17 +1104,17 @@ impl RemoteState {
             name: name.to_string(),
             payload,
         };
-        for (conn_id, tx) in inner.conns.iter() {
+        for (conn_id, e) in inner.conns.iter() {
             if Some(*conn_id) == exclude {
                 continue;
             }
-            let _ = tx.try_send(msg.clone());
+            let _ = e.tx.try_send(msg.clone());
         }
     }
 
     pub(crate) fn try_send(&self, conn_id: u64, msg: ServerMessage) {
         let inner = self.inner.lock();
-        if let Some(tx) = inner.conns.get(&conn_id) {
+        if let Some(tx) = inner.conns.get(&conn_id).map(|e| &e.tx) {
             let _ = tx.try_send(msg);
         }
     }
@@ -1107,7 +1128,7 @@ struct AttachOutcome {
 /// 持锁发送（快照顺序保证路径）：与 push_output 的广播共用同一把锁，
 /// 保证快照先于增量入队。返回是否成功入队
 fn send_locked(inner: &StateInner, conn_id: u64, msg: ServerMessage) -> bool {
-    match inner.conns.get(&conn_id) {
+    match inner.conns.get(&conn_id).map(|e| &e.tx) {
         Some(tx) => tx.try_send(msg).is_ok(),
         None => false,
     }

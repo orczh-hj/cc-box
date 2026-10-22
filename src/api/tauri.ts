@@ -1,10 +1,10 @@
 // 传输层统一入口（统一管理：桌面 Tauri 与浏览器远程共用同一套封装）。
 // invoke/listen 签名与 @tauri-apps/api 完全一致，下方函数体零感知运行环境。
 // （箭头包装而非方法解构——remoteTransport.invoke 内部依赖 this）
-import { transport, type Unlisten } from './transport';
+import { transport, type Unlisten, type InvokeOpts } from './transport';
 
-const invoke = <T,>(cmd: string, args?: Record<string, unknown>): Promise<T> =>
-  transport.invoke<T>(cmd, args);
+const invoke = <T,>(cmd: string, args?: Record<string, unknown>, opts?: InvokeOpts): Promise<T> =>
+  transport.invoke<T>(cmd, args, opts);
 const listen = <T,>(event: string, cb: (payload: T) => void): Promise<Unlisten> =>
   transport.listen<T>(event, cb);
 
@@ -319,6 +319,54 @@ export const getMcpServerDetail = (
 
 export const openInFileManager = (path: string): Promise<void> =>
   invoke<void>('open_in_file_manager', { path });
+
+// ============================================
+// File Transfer（远程浏览器模式上传/下载；传输逻辑层见 api/fileTransfer.ts）
+// ============================================
+
+export interface FileEntryLite {
+  name: string;
+  path: string;
+  isDir: boolean;
+  size?: number | null;
+  modified?: number | null;
+}
+
+export interface TransferLimits {
+  directMax: number;
+  relayMax: number;
+}
+
+/** 慢命令超时（分块 rpc 在弱网下需超过默认 15s 的窗口） */
+const FILE_RPC_TIMEOUT = 60_000;
+
+export const fileTransferLimits = (): Promise<TransferLimits> =>
+  invoke<TransferLimits>('file_transfer_limits', undefined, { timeoutMs: FILE_RPC_TIMEOUT });
+
+export const fileList = (path: string): Promise<FileEntryLite[]> =>
+  invoke<FileEntryLite[]>('file_list', { path }, { timeoutMs: FILE_RPC_TIMEOUT });
+
+interface UploadBeginResult { uploadId: string; targetPath: string; relativePath: string; fileName: string }
+
+export const fileUploadBegin = (ptyId: string, fileName: string, size: number): Promise<UploadBeginResult> =>
+  invoke<UploadBeginResult>('file_upload_begin', { ptyId, fileName, size }, { timeoutMs: FILE_RPC_TIMEOUT });
+
+export const fileUploadChunk = (uploadId: string, offset: number, dataB64: string): Promise<{ received: number }> =>
+  invoke<{ received: number }>('file_upload_chunk', { uploadId, offset, dataB64 }, { timeoutMs: FILE_RPC_TIMEOUT });
+
+export const fileUploadFinish = (uploadId: string): Promise<{ targetPath: string; relativePath: string }> =>
+  invoke<{ targetPath: string; relativePath: string }>('file_upload_finish', { uploadId }, { timeoutMs: FILE_RPC_TIMEOUT });
+
+export const fileUploadAbort = (uploadId: string): Promise<void> =>
+  invoke<void>('file_upload_abort', { uploadId }, { timeoutMs: FILE_RPC_TIMEOUT });
+
+interface DownloadBeginResult { downloadId: string; fileName: string; size: number; mtime?: number | null }
+
+export const fileDownloadBegin = (path: string): Promise<DownloadBeginResult> =>
+  invoke<DownloadBeginResult>('file_download_begin', { path }, { timeoutMs: FILE_RPC_TIMEOUT });
+
+export const fileDownloadChunk = (downloadId: string, offset: number): Promise<{ dataB64: string; bytes: number; eof: boolean }> =>
+  invoke<{ dataB64: string; bytes: number; eof: boolean }>('file_download_chunk', { downloadId, offset }, { timeoutMs: FILE_RPC_TIMEOUT });
 
 // ============================================
 // Updater (Tauri official plugin)

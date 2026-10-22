@@ -91,7 +91,7 @@ remote/
 | `pty.rs`（改动） | 输出 tee + ring buffer（256KB，快照从换行边界对齐防 ANSI 截断）+ `active_view` 字段 |
 | `hook_server.rs`（改动） | hook 事件在 emit 前端之外同步 broadcast 到远程连接 |
 
-Web UI 页面（= 主应用 UI）：TokenGate 认证门（token/配对码）→ 与桌面完全相同的视图流（项目选择 → 终端主视图 → 侧边栏面板 → 设置），仅系统级功能（installer、更新、文件管理器、新实例）在浏览器模式隐藏。功能范围：**全功能减系统级**——RPC 白名单覆盖项目/会话/配置/agents/skills/MCP/plugins/provider 全量命令。
+Web UI 页面（= 主应用 UI）：TokenGate 认证门（token/配对码）→ 与桌面完全相同的视图流（项目选择 → 终端主视图 → 侧边栏面板 → 设置），仅系统级功能（installer、更新、文件管理器、新实例）在浏览器模式隐藏。功能范围：**全功能减系统级**——RPC 白名单覆盖项目/会话/配置/agents/skills/MCP/plugins/provider 全量命令；另有浏览器专属**文件传输**（FilesPanel：上传到会话项目 `.cc-box-files/` 并插入终端路径 / 下载授权项目内文件，512KB rpc 分块、双限额、详见 protocol.md「文件传输」——读写范围锁定已知项目内，上传/下载受全局控制权拦截，审计日志进 `~/.cc-box/logs`）。
 
 ## 6. 协议
 
