@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { mount } from '@vue/test-utils'
+import { mount, flushPromises } from '@vue/test-utils'
 import { defineComponent, h } from 'vue'
 import type { Provider } from '@/types/provider'
 
@@ -45,6 +45,15 @@ vi.mock('@/stores/app', () => ({
 // 全局通知：断言调用参数（实时渲染由 ToastHost 测试覆盖）
 vi.mock('@/composables/useToast', () => ({
   useToast: () => toastMock,
+}))
+
+// 「打开用户配置」：由 Rust 命令直接调用系统默认程序
+const openUserSettingsMock = vi.hoisted(() => vi.fn(async () => {}))
+vi.mock('@/api/provider', () => ({
+  openClaudeUserSettings: openUserSettingsMock,
+}))
+vi.mock('@/api/platform', () => ({
+  isTauriEnv: true,
 }))
 
 import ProvidersSection from '@/components/settings/sections/ProvidersSection.vue'
@@ -161,5 +170,36 @@ describe('ProvidersSection 全局通知', () => {
     await new Promise(r => setTimeout(r))
 
     expect(toastMock.error).toHaveBeenCalledWith('importFailed', 6000)
+  })
+})
+
+describe('ProvidersSection 打开用户配置', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    storeMock.providers = [provider]
+    storeMock.hasCcSwitchDb = false
+  })
+
+  // 桌面端：按钮可见，点击后按后端返回的路径调用系统打开
+  it('ProviderSection_OpenUserConfig_001', async () => {
+    const wrapper = mountSection()
+    const button = wrapper.findAll('button').find(b => b.text() === 'openUserConfig')
+    expect(button).toBeTruthy()
+
+    await button!.trigger('click')
+    await flushPromises()
+
+    expect(openUserSettingsMock).toHaveBeenCalled()
+  })
+
+  // 打开失败：错误 toast
+  it('ProviderSection_OpenUserConfigFailure_001', async () => {
+    openUserSettingsMock.mockRejectedValueOnce(new Error('no home'))
+    const wrapper = mountSection()
+
+    await wrapper.findAll('button').find(b => b.text() === 'openUserConfig')!.trigger('click')
+    await flushPromises()
+
+    expect(toastMock.error).toHaveBeenCalledWith('openUserConfigFailed', 5000)
   })
 })

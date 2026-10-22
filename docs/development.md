@@ -63,6 +63,28 @@ UI 已浏览器化（一套 UI 走桌面 Tauri / 宽屏浏览器 / 手机浏览�
 - **CLI 进程启动方式** → 目标由 `platform::cli_target()` 唯一决定：配置路径通过 `is_runnable_cli` → 完整路径；否则 `PathLookup` → Unix 用 `find_executable` 解析出可运行路径再 exec / Windows 经 Git Bash `-c` 裸命令（bash 自己做 PATHEXT/shim 查找）。Unix 不经 shell 中转（`bash -i -c` 的 job control 在 PTY 下会把 TUI 子进程停入后台致 Mac 白屏）；PATH 由 `refresh_path` 从登录 shell 刷新，是裸命令可用的前提。**spawn 契约 = 返回即存活**：`startup_check`（spawn_claude/spawn_shell 共用）在 50ms 启动期后 `try_wait()` 检测秒退，秒退转 Err 并携带 `StartupBuf` 缓存的 PTY 尾部输出（claude 自身报错不丢，前端红字显示）——否则事件落在前端终端实例建立之前全部丢失、表现为纯白屏
 - **前端 invoke/listen** → 一律经 `src/api/transport.ts`（组件禁止直接 import @tauri-apps/api；桌面专属 API 用 `transport.env.isTauri` 守卫）
 
+## 生产构建安全：xterm 死枚举 IIFE（终端卡死根因）
+
+**症状**：生产构建（0.16.4 及之前）终端无输出、输入无回显、拖动窗口不 resize，但应用本身仍响应；`~/.cc-box/logs/*.error.log` 反复出现
+`ReferenceError: Can't find variable: i @ .../xterm-vendor-*.js`。
+
+**根因链**（勿只凭 dev 模式排查——dev 加载未压缩源码，不会复现）：
+
+1. `@xterm/xterm` 的 `lib/xterm.mjs` 含 TS enum 编译产物 `let r; (te => (...))(r ||= {})` 的死代码（枚举建好后从未读取）。`@xterm/addon-webgl` 同类。
+2. `vite.config.ts` 的 `build.target` 含 `safari13`，esbuild 先把 `||=` 降级为 `|| (r = {})`；随后语法压缩把未初始化的 `r` 折叠成 `void 0`，并删掉已无读取的 `let r` 声明，产出 `(void 0||(i={}))` —— 对未声明标识符赋值（esbuild 0.21.5/0.24.2/0.25.0 均复现）。
+3. ESM 严格模式下该行抛 `ReferenceError`。它发生在 xterm `WriteBuffer._innerWrite → parser.parse` 内：抛错跳过 `_bufferOffset` 前进与后续 `_scheduleInnerWrite`，此后 `term.write()` 只入队不处理——输出、回显、resize 重绘全部消失。
+4. Claude CLI 启动时发送 DECRQM（`CSI ? Ps $ p`）进入 `requestMode`，因此每次新建会话都会触发，卡死的是该 Terminal 实例。
+
+**修复**：
+
+- `scripts/lib/patch-xterm-enum.ts`：Vite `enforce:'pre'` 插件（仅 build），把所有 `@xterm/*/lib/*.mjs` 中的 `)(x||={})` 改写为等价的 `)(x||(x={}))`，避开降级折叠路径。单个 addon 无此模式属正常；**整个构建一次都没命中**时 `buildEnd` 会 warn——说明依赖形态已变，需复核补丁是否仍需要。
+- `scripts/lib/dist-safety.ts` + `scripts/verify-dist-safety.ts`：`npm run build` 在 vite build 后扫描 `dist/**/*.js`，命中 `void 0||(x={})` 这类坏赋值即失败退出（dist 缺失/无 JS 也失败）。桌面与 relay/手机 Web UI 共用同一份 dist，因此同一道闸覆盖两端。
+- 回归测试：`tests/scripts/xterm-bundle-safety.test.ts`（函数作用域 fixture 必须保留——顶层 `let` 不复现；用与生产一致的 target/minify 断言）。
+
+**不要**改用「去掉 safari13」（`minimumSystemVersion` 为 10.13，旧 WebKit 会整包解析失败）或「升级 esbuild」快修（新版对 safari13 的降级直接报错）作为默认方案。
+
+**发布注意**：修复后需重新构建并部署 relay（`npm run deploy:relay`）；配置了 `CC_BOX_RELAY_WEB_DIR` 的服务器需更新 dist，手机端刷新缓存。
+
 ## 远程服务机制要点
 
 - `remote_server.rs`：局域网直连（axum WS + Web UI，web-assets 磁盘优先/内嵌兜底 + token 认证）；**stop 轮询等待端口释放**——Windows abort 后 IOCP 清理延迟曾致端口长期 LISTENING 残留、bind 10048
@@ -80,6 +102,23 @@ UI 已浏览器化（一套 UI 走桌面 Tauri / 宽屏浏览器 / 手机浏览�
 - **断连自动释放**；持有期间其他设备（含桌面）整界面遮罩（ControllerMask `selfLabel` 响应式维护——重连换连接 id 后旧快照会自己遮自己；桌面 UI 启动/重载经 `controller_status` command 补初始快照）
 - **revision 版本号**：每次状态变化 +1，附在 `state-changed`/`controller-changed` payload 与 hello.ok（controller：null=无人/0=桌面/连接 id）/sessions；前端（remote-transport `filterStaleEvent`）单调过滤旧事件防乱序覆盖，**版本跳变触发 `state-resync-needed` 全 section 权威重拉**（兜底乱序漏刷）；**服务端保序**：`emit_state_changed`/`broadcast_controller_changed` 取号与入队同一锁窗口（到达序=取号序，并发回归测试守卫），否则低版本事件后到被前端丢弃、状态永久丢失
 - **state-changed 统一广播**：写命令落盘后（`#[cc_command]` 宏出口自动 emit）全端按 section 权威刷新（前端状态中心 `src/state/sections.ts` 查表分发：section → loader 注册表，plugins 级联子项、providers/config 设置面板打开时暂存防覆盖编辑中表单、关闭补刷；App.vue 只订阅转发，新功能在注册表加一行）。**注意**：刷新回调链不得包含写操作（曾因 loadAppConfig 内无条件 doSyncEnv 写回 + 事件刷新形成 写→广播→读→写 死循环，风暴塞满通道致 RpcResult 丢失、config.json 原子写窗口被击穿丢失 remote 配置）
+
+### 用户级资源开关（skills/agents/mcp/plugins）
+
+后端单点 `store.rs` 的 `set_skill_enabled` / `set_agent_enabled` / `set_mcp_server_enabled` / `set_plugin_enabled`（桌面 invoke 与远程 rpc 调同一函数，两端行为天然一致）：
+
+- **skill/agent 禁用 = 移动到 `~/.cc-box/disabled/<category>/`**。用户级 skill/agent 常以**符号链接**安装（`~/.claude/skills/x -> ../../.agents/skills/x`），移动必须 symlink 感知：
+  - 相对链接按**目标位置**重算相对路径（`move_entry`/`relocate_symlink`），不能直接 rename——否则链接搬进 disabled 目录即断链；
+  - **相对路径必须以真实目录为基准**：`src.parent()`/`dst.parent()` 先 `canonicalize`（`canonical_dir`）再拼目标。`~/.claude` 本身是符号链接（dotfiles/stow/chezmoi）时，内核按真实目录解析 `..`，词法计算会算出不存在的路径；
+  - 存在性/冲突判定一律用 `symlink_metadata`（`path_entry_exists`），断链也算"存在"；`Path::exists()` 会把断链判成不存在，导致备份既扫不到也恢复不了；目标位是断链残留时直接覆盖（active/disabled 两侧同理），否则对列表不可见的残留会永久阻塞恢复；
+  - disabled 扫描（`scan_disabled_skills`）**必须列出断链**（description 为空），否则该类备份只能手工 `mv` 恢复；历史断链在 enable 时按目标目录重新解析并修复；
+  - agent 的列表名来自 frontmatter `name`，移动用 `find_agent_file` 扫描定位：**frontmatter 命中优先于文件名命中**，有 frontmatter 名却不等的文件不能按 stem 匹配（否则会移动错 agent）；多匹配报 ambiguous。
+- **前端刷新必须静默**：`state-changed` 回环/级联刷新走 `loadXxx(cwd, { silent: true })`——只换数据、不切 `loading`。面板用 `v-if="loading"` 渲染，切 loading 会让整块列表卸载重建（展开态、滚动位置全丢）；首屏/切项目才显示 loading。loader 内置请求序号丢弃乱序响应。
+- **本端写回环抑制（条目原地响应）**：开关成功会广播 `state-changed` 并回环给发起方；发起方已乐观更新，再刷新会替换数组/重排列表。因此 toggle 前 `markSelfWrite(section)`（失败 `cancelSelfWrite`），`applyStateSection` 消费一次后**跳过该 section 的 loader**；plugin 的级联子项（skills/agents/mcp）仍照常刷新。其他设备没有登记，照常静默刷新（跨端同步不受影响）。登记带 5s TTL，切项目时清空，避免广播丢失后误吞后续事件；**`state-resync-needed` 触发的权威重拉必须带 `{ resync: true }` 绕过并清除登记**（兜底路径不能被回环抑制吞掉）。失败回滚的身份包含 `sourceLabel`（active/disabled 同名时不能只按 `enabled` 定位，会翻错行）。
+- **列表顺序与 enabled 解耦**：`get_all_skills` / `get_all_agents` / `get_all_mcp_servers` 末尾 `sort_by_name` 稳定排序。否则禁用项从 disabled 目录读出后被追加到用户组末尾，开关会让条目"跳位"。
+- **开关定位用 `(sourceType=user, name)`**（`findToggleIndex`），不能用裸 `name`：store 同时含 project/user/plugin 项，同名 project 项排前面会被误改（点 user 项却改 project 项 → 看起来"操作无效"）。
+- **plugin 开关**走 `claude plugin enable/disable` 子进程（可能 >15s），远程调用传 `timeoutMs: 60000` 避免远程先超时；`plugins list --json` 有 2s TTL 缓存（一次开关级联刷新 4 个 section，缓存把 4 个子进程收敛为 1 个），plugin 变更后主动失效。
+- **CLAUDE_CONFIG_DIR**：skills/agents 的读取与开关已尊重该环境变量（`claude_config_dir()`）；MCP/plugins 等历史路径仍为 `~/.claude`。
 
 ### 远程文件传输（浏览器模式专属，FilesPanel）
 

@@ -137,6 +137,8 @@
           />
         </div>
         <p class="json-status" v-if="jsonError">{{ jsonError }}</p>
+        <p class="json-hint" v-if="commonMerged">{{ t('commonConfigMergeHint') }}</p>
+        <p class="json-hint hint-warn" v-if="commonChangedWhileDirty">{{ t('commonConfigChangedWhileEditing') }}</p>
         <p class="json-hint">{{ t('ignoredFieldsHint') }}</p>
       </div>
 
@@ -159,6 +161,14 @@ import { linter } from '@codemirror/lint'
 import { EditorView } from '@codemirror/view'
 import { useAppStore } from '@/stores/app'
 import type { Provider, CommonConfig } from '@/types/provider'
+import {
+  resolveEffective,
+  diffAgainstCommon,
+  computeRemovedPaths,
+  isCommonActive,
+  isPlainObject,
+  stripEmptyCoreEnv,
+} from '@/utils/provider-config'
 
 const { t } = useI18n()
 const appStore = useAppStore()
@@ -184,17 +194,9 @@ const REQUIRED_ENV_KEYS = [
   'ANTHROPIC_DEFAULT_SONNET_MODEL',
 ]
 
-const DEFAULT_CONFIG: Record<string, any> = {
-  env: {
-    ANTHROPIC_AUTH_TOKEN: '',
-    ANTHROPIC_BASE_URL: '',
-    ANTHROPIC_MODEL: 'claude-sonnet-4-6',
-    ANTHROPIC_DEFAULT_HAIKU_MODEL: 'claude-haiku-4-5-20251001',
-    ANTHROPIC_DEFAULT_SONNET_MODEL: 'claude-sonnet-4-6',
-    ANTHROPIC_DEFAULT_OPUS_MODEL: 'claude-opus-4-7',
-  },
-  permissions: { allow: [], deny: [] },
-}
+// 不再使用 DEFAULT_CONFIG 兜底：schema v2 中 `settingsConfig: {}` 是合法且有意义的
+// 「完全继承通用配置」，用模板替换会凭空产生空 token 覆盖通用配置。
+// 缺省展示由 env 表单（getEnvValue 返回空串）负责，不会写入 JSON。
 
 // CodeMirror 扩展
 const cmExtensions = computed(() => {
@@ -218,26 +220,11 @@ const editName = ref(props.provider.name)
 const editNotes = ref(props.provider.notes || '')
 const applyCommonConfig = ref(props.provider.meta?.commonConfigEnabled ?? true)
 
-// JSON 内容：完整的 settingsConfig（包含 env），与表单字段双向同步
+// JSON 内容：展示层（通用配置 + 覆盖层，或仅覆盖层），与表单字段双向同步
 const jsonContent = ref('')
 const jsonError = ref('')
 const showSensitive = reactive<Record<string, boolean>>({})
 const showCustomEnv = ref(false)
-
-// ── 深度合并（与 Rust deep_merge_json 一致） ──
-function isObject(val: any): val is Record<string, any> {
-  return val !== null && typeof val === 'object' && !Array.isArray(val)
-}
-function deepMerge(target: any, source: any): any {
-  if (isObject(target) && isObject(source)) {
-    const result = { ...target }
-    for (const key of Object.keys(source)) {
-      result[key] = key in result ? deepMerge(result[key], source[key]) : source[key]
-    }
-    return result
-  }
-  return source
-}
 
 // 缓存解析后的 JSON，避免 getEnvValue 每次都 JSON.parse
 const parsedConfig = computed(() => {
@@ -245,29 +232,93 @@ const parsedConfig = computed(() => {
   catch { return null }
 })
 
-// 通用配置是否可合并
-const hasCommonConfig = computed(() => {
-  const c = props.commonConfig
-  return c?.enabled && c.settings && Object.keys(c.settings).length > 0
-})
+const commonAvailable = computed(() => isCommonActive(props.commonConfig))
+/** 当前编辑器视图是否叠加了通用配置 */
+const commonMerged = computed(() => applyCommonConfig.value && commonAvailable.value)
 
-// ── 勾选"应用通用配置" → 即时合并到 JSON 编辑器 ──
-watch(applyCommonConfig, (newVal, oldVal) => {
-  if (newVal && !oldVal && hasCommonConfig.value && parsedConfig.value) {
-    const merged = deepMerge(parsedConfig.value, props.commonConfig!.settings)
-    jsonContent.value = JSON.stringify(merged, null, 2)
-    jsonError.value = ''
+// 是否有未保存修改：程序化写入（切换视图/外部同步）不置脏
+const dirty = ref(false)
+let suppressDirty = false
+watch(jsonContent, () => {
+  if (!suppressDirty) dirty.value = true
+}, { flush: 'sync' })
+
+/** 通用配置在面板打开期间被更新，但当前有未保存修改 → 不覆盖，仅提示 */
+const commonChangedWhileDirty = ref(false)
+
+/** 打开面板时的 effective 快照（保存时用于计算被删除的继承项） */
+let initialEffective: Record<string, any> = {}
+/** 当前覆盖层（非编辑状态下的来源，用于外部 common 变化时重新展开） */
+let lastOverrides: Record<string, any> = {}
+/**
+ * 当前编辑器视图对应的通用配置快照。
+ * dirty 期间外部 common 变化时保存仍按此快照差分，避免把旧继承值冻结成覆盖层。
+ */
+let viewCommonSettings: Record<string, any> = {}
+/** 当前视图是否叠加了通用配置（打开/切换/非 dirty 重算时确定） */
+let viewHadCommon = false
+
+function pretty(value: Record<string, any>): string {
+  return JSON.stringify(value, null, 2)
+}
+
+/** 程序化写入编辑器（不置 dirty） */
+function setJsonContent(content: string) {
+  suppressDirty = true
+  jsonContent.value = content
+  jsonError.value = ''
+  queueMicrotask(() => { suppressDirty = false })
+}
+
+/**
+ * 把通用配置展开到当前视图；去掉用户删除的继承项由 resolveEffective 处理。
+ * 不在 JSON 里补空 env 占位：否则保存时会被当成显式覆盖，把用户 settings.json
+ * 中已有的值覆盖成空串（必需项由 env 表单直接展示为空输入框）。
+ */
+function effectiveFrom(overrides: Record<string, any>): Record<string, any> {
+  return commonMerged.value
+    ? resolveEffective(props.commonConfig, overrides, props.provider.meta)
+    : JSON.parse(JSON.stringify(overrides))
+}
+
+// ── 勾选/取消"应用通用配置" → 在 effective / 覆盖层两种视图间转换 ──
+watch(applyCommonConfig, (now) => {
+  const current = parsedConfig.value ?? {}
+  // 视图切换以当前实际 common 为准，并同步快照
+  viewHadCommon = now && commonAvailable.value
+  viewCommonSettings = JSON.parse(JSON.stringify(props.commonConfig?.settings ?? {}))
+
+  if (now) {
+    // 当前视图是覆盖层 → 展开为 effective
+    lastOverrides = JSON.parse(JSON.stringify(current))
+    setJsonContent(pretty(effectiveFrom(lastOverrides)))
+  } else {
+    // 当前视图是 effective → 提取覆盖层（与通用配置相同的值自动继承）
+    const overrides = commonAvailable.value
+      ? diffAgainstCommon(current, viewCommonSettings)
+      : current
+    lastOverrides = JSON.parse(JSON.stringify(overrides))
+    setJsonContent(pretty(JSON.parse(JSON.stringify(overrides))))
   }
+  initialEffective = JSON.parse(JSON.stringify(parsedConfig.value ?? {}))
 })
 
-// ── 通用配置外部修改（如从 CommonConfigPanel 保存）→ 重复合并到当前编辑内容 ──
+// ── 通用配置外部修改（如从 CommonConfigPanel 保存） ──
+// 有未保存修改时不覆盖编辑器，只提示；否则按最新 common 重新展开。
+// common 变为「未启用/空」时也要重算回覆盖层视图，否则旧继承值会被当成覆盖层保存。
 watch(() => props.commonConfig, (newConfig) => {
-  if (applyCommonConfig.value && newConfig?.enabled && newConfig.settings &&
-      Object.keys(newConfig.settings).length > 0 && parsedConfig.value) {
-    const merged = deepMerge(parsedConfig.value, newConfig.settings)
-    jsonContent.value = JSON.stringify(merged, null, 2)
-    jsonError.value = ''
+  if (!applyCommonConfig.value) return
+  if (dirty.value) {
+    commonChangedWhileDirty.value = true
+    return
   }
+  viewHadCommon = isCommonActive(newConfig)
+  viewCommonSettings = JSON.parse(JSON.stringify(newConfig?.settings ?? {}))
+  const display = viewHadCommon
+    ? resolveEffective(newConfig, lastOverrides, props.provider.meta)
+    : JSON.parse(JSON.stringify(lastOverrides))
+  initialEffective = JSON.parse(JSON.stringify(display))
+  setJsonContent(pretty(display))
 }, { deep: true })
 
 // 内联添加自定义变量
@@ -277,22 +328,14 @@ const newEnvValue = ref('')
 const newEnvKeyInput = ref<HTMLInputElement | null>(null)
 
 onMounted(() => {
-  const config = props.provider.settingsConfig
-  const initial = config && Object.keys(config).length > 0
-    ? config
-    : JSON.parse(JSON.stringify(DEFAULT_CONFIG))
-
-  // 确保必需的 env key 存在
-  if (!initial.env || typeof initial.env !== 'object') {
-    initial.env = {}
-  }
-  for (const key of REQUIRED_ENV_KEYS) {
-    if (!(key in initial.env)) {
-      initial.env[key] = ''
-    }
-  }
-
-  jsonContent.value = JSON.stringify(initial, null, 2)
+  // 已存在的 Provider 一律以真实覆盖层为起点；空对象表示「完全继承通用配置」
+  const stored = JSON.parse(JSON.stringify(props.provider.settingsConfig ?? {}))
+  lastOverrides = JSON.parse(JSON.stringify(stored))
+  viewHadCommon = commonMerged.value
+  viewCommonSettings = JSON.parse(JSON.stringify(props.commonConfig?.settings ?? {}))
+  initialEffective = effectiveFrom(stored)
+  setJsonContent(pretty(initialEffective))
+  dirty.value = false
 })
 
 // 从缓存中读取 env 值
@@ -310,11 +353,9 @@ function setEnvValue(key: string, value: string) {
   jsonError.value = ''
 }
 
-const requiredEnvKeys = computed(() => {
-  const env = parsedConfig.value?.env
-  if (!env || typeof env !== 'object') return [...REQUIRED_ENV_KEYS]
-  return REQUIRED_ENV_KEYS.filter(k => k in env)
-})
+// 必需项始终展示（缺失时输入框为空，但不会写入 JSON）；
+// 若按 `k in env` 过滤，{env:{}} 的预设会连输入行都消失
+const requiredEnvKeys = computed(() => [...REQUIRED_ENV_KEYS])
 
 const customEnvKeys = computed(() => {
   const env = parsedConfig.value?.env
@@ -396,8 +437,8 @@ function validateJson() {
 function formatJson() {
   try {
     const parsed = JSON.parse(jsonContent.value)
-    jsonContent.value = JSON.stringify(parsed, null, 2)
-    jsonError.value = ''
+    // 纯格式化不改变语义，不应把面板标记为“有未保存修改”
+    setJsonContent(JSON.stringify(parsed, null, 2))
   } catch { /* keep */ }
 }
 
@@ -419,14 +460,49 @@ function openWebsite() {
 function handleSave() {
   if (jsonError.value) return
   try {
-    const settingsConfig = JSON.parse(jsonContent.value)
+    const current = JSON.parse(jsonContent.value)
+    // 根必须是对象：非对象会在激活时把 settings.json 根写坏
+    if (!isPlainObject(current)) {
+      jsonError.value = t('configRootMustBeObject')
+      return
+    }
+    const prevRemoved = props.provider.meta?.commonConfigRemoved ?? []
+
+    let settingsConfig: Record<string, any>
+    let commonConfigRemoved: string[]
+
+    if (viewHadCommon) {
+      // 展示的是 effective → 按「打开/重算时的 common 快照」差分，
+      // 避免 dirty 期间 common 变化导致旧继承值被冻结成覆盖层
+      settingsConfig = diffAgainstCommon(current, viewCommonSettings)
+      commonConfigRemoved = computeRemovedPaths(
+        initialEffective,
+        current,
+        prevRemoved,
+        viewCommonSettings,
+        settingsConfig
+      )
+    } else {
+      // 未叠加通用配置：编辑器内容就是覆盖层。
+      // 保留 removed：取消勾选只是暂停继承，再次勾选应恢复原有屏蔽意图
+      settingsConfig = current
+      commonConfigRemoved = prevRemoved
+    }
+    // 空字符串核心 env 视为未设置，避免覆盖用户/通用配置的有效值
+    settingsConfig = stripEmptyCoreEnv(settingsConfig)
+
     const updatedProvider: Provider = {
       ...props.provider,
       name: editName.value,
       notes: editNotes.value,
       settingsConfig,
-      meta: { ...props.provider.meta, commonConfigEnabled: applyCommonConfig.value }
+      meta: {
+        ...props.provider.meta,
+        commonConfigEnabled: applyCommonConfig.value,
+        commonConfigRemoved,
+      }
     }
+    // dirty 由父组件保存成功/面板关闭决定；这里不清，避免保存失败后丢失保护
     emit('save', updatedProvider)
   } catch {
     jsonError.value = t('jsonParseError')
@@ -699,6 +775,10 @@ function handleSave() {
   color: var(--text-tertiary, #999);
   flex-shrink: 0;
   line-height: 1.5;
+}
+
+.json-hint.hint-warn {
+  color: var(--accent-gold, #d19a3f);
 }
 
 .panel-footer {

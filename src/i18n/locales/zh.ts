@@ -401,6 +401,8 @@ export default {
   providersDesc: '管理 Claude API 接口配置，支持预设厂商和自定义配置',
   addProvider: '新增 Provider',
   editCommonConfig: '编辑通用配置',
+  openUserConfig: '打开用户配置',
+  openUserConfigFailed: '打开用户配置失败：{error}',
   importFromCcSwitch: '从 cc-switch 导入',
   noProviders: '暂无 Provider 配置',
   noProvidersHint: '点击"新增 Provider"从预设模板创建配置',
@@ -438,6 +440,7 @@ export default {
   applyCommonConfig: '应用通用配置',
   format: '格式化',
   jsonFormatError: 'JSON 格式错误',
+  configRootMustBeObject: '配置根节点必须是 JSON 对象（{ }）',
   jsonParseError: 'JSON 解析失败',
   ignoredFieldsHint: '以下字段不会被应用（由 Claude Code 管理）：enabledPlugins、disabledPlugins、extraKnownMarketplaces、hooks',
 
@@ -457,7 +460,9 @@ export default {
 
   // Common config panel
   commonConfigTitle: '通用配置',
-  commonConfigDesc: '所有勾选了"应用通用配置"的 Provider，激活时会将此配置合并进去。适合放置公共参数（如权限、归属等）。',
+  commonConfigDesc: '通用配置作为默认值：仅勾选"应用通用配置"的 Provider 会继承；Provider 中的同名字段优先，激活时由通用配置补全缺失项。',
+  commonConfigMergeHint: '当前展示已合并通用配置的结果；修改的值会保存为 Provider 覆盖值，与通用配置相同的值自动继承。',
+  commonConfigChangedWhileEditing: '通用配置已更新，但你有未保存的修改，未自动覆盖当前编辑内容。',
   configContentJson: '配置内容 (JSON)',
   extractFromEdit: '从编辑内容中提取',
 

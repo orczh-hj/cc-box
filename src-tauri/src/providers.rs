@@ -1,10 +1,11 @@
 //! Provider 模块
 //! API Provider 配置管理（完全兼容 cc-switch 数据结构）
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::PathBuf;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 
 /// Provider 元数据（完全兼容 cc-switch ProviderMeta，22 个字段）
 /// JSON 存储在 providers.meta 列中
@@ -12,6 +13,10 @@ use std::path::PathBuf;
 #[serde(rename_all = "camelCase")]
 pub struct ProviderMeta {
     pub common_config_enabled: Option<bool>,
+    /// 需显式屏蔽的通用配置继承路径（JSON Pointer，如 `/env/FOO`）。
+    /// 仅在该 Provider 启用通用配置时生效；只抑制继承，不影响显式覆盖。
+    #[serde(default)]
+    pub common_config_removed: Option<Vec<String>>,
     pub endpoint_auto_select: Option<bool>,
     pub api_format: Option<String>,
     pub api_key_field: Option<String>,
@@ -31,6 +36,9 @@ pub struct ProviderMeta {
     pub live_config_managed: Option<bool>,
     pub github_account_id: Option<String>,
     pub custom_endpoints: Option<serde_json::Value>,
+    /// 保留 cc-switch 未来新增 / 本结构未声明的字段，避免迁移与保存时静默丢弃
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 /// Provider 实例（完全兼容 cc-switch Provider）
@@ -53,20 +61,63 @@ pub struct Provider {
 }
 
 /// 通用配置片段
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CommonConfig {
     pub enabled: bool,
     pub settings: serde_json::Value,
 }
 
-/// Provider 配置文件结构
+impl Default for CommonConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            settings: serde_json::json!({}),
+        }
+    }
+}
+
+/// 上次激活时由 cc-box 写入 settings.json 的托管路径（JSON Pointer）。
+/// 用于切换 Provider / 取消继承时删除不再应有的残留键，且不误删用户自己加的键。
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
+pub struct AppliedSettings {
+    pub provider_id: Option<String>,
+    pub paths: Vec<String>,
+}
+
+/// 当前 providers.json 语义版本。
+/// 1 = 旧版（通用配置物化进 Provider）；2 = 分层存储（通用默认 + Provider 覆盖）。
+pub const CURRENT_SCHEMA_VERSION: u32 = 2;
+
+fn default_schema_version() -> u32 {
+    1
+}
+
+/// Provider 配置文件结构
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ProvidersConfig {
+    /// 旧文件缺失该字段 → 1（需要迁移）
+    #[serde(default = "default_schema_version")]
+    pub schema_version: u32,
     pub providers: Vec<Provider>,
     pub common_config: CommonConfig,
     pub active_provider_id: Option<String>,
+    #[serde(default)]
+    pub applied_settings: AppliedSettings,
+}
+
+impl Default for ProvidersConfig {
+    fn default() -> Self {
+        Self {
+            schema_version: CURRENT_SCHEMA_VERSION,
+            providers: Vec::new(),
+            common_config: CommonConfig::default(),
+            active_provider_id: None,
+            applied_settings: AppliedSettings::default(),
+        }
+    }
 }
 
 /// 导入结果
@@ -90,11 +141,14 @@ fn get_providers_config_path() -> Result<PathBuf> {
     get_gui_config_dir().map(|d| d.join("providers.json"))
 }
 
-/// 获取 Claude settings.json 文件路径
+/// 获取 Claude settings.json 文件路径（尊重 CLAUDE_CONFIG_DIR，与 store.rs 同一实现）
 fn get_claude_settings_path() -> Result<PathBuf> {
-    dirs::home_dir()
-        .map(|h| h.join(".claude").join("settings.json"))
-        .context("Home directory not found")
+    Ok(crate::store::claude_config_dir()?.join("settings.json"))
+}
+
+/// 用户级 Claude 配置路径（供「打开用户配置」按钮使用）
+pub fn claude_user_settings_path() -> Result<String> {
+    Ok(get_claude_settings_path()?.to_string_lossy().to_string())
 }
 
 /// 获取 cc-switch 数据库路径
@@ -104,30 +158,69 @@ fn get_cc_switch_db_path() -> Result<PathBuf> {
         .context("Home directory not found")
 }
 
-/// 读取 Provider 配置
+/// 读取 Provider 配置。
+/// 纯读：legacy 文件只在内存中按 v2 语义解释，不写盘；
+/// 落盘迁移由应用启动时调用 `ensure_providers_schema()` 完成。
 pub fn get_providers_config() -> Result<ProvidersConfig> {
     let config_path = get_providers_config_path()?;
-
     if !config_path.exists() {
-        return Ok(ProvidersConfig {
-            providers: Vec::new(),
-            common_config: CommonConfig {
-                enabled: false,
-                settings: serde_json::json!({}),
-            },
-            active_provider_id: None,
-        });
+        return Ok(ProvidersConfig::default());
     }
 
     let content = fs::read_to_string(&config_path)?;
-    let config: ProvidersConfig =
+    let mut config: ProvidersConfig =
         serde_json::from_str(&content).context("Failed to parse providers.json")?;
+
+    // 防御：旧版本 cc-box 可能在迁移后又写回 legacy 结构
+    if config.schema_version < CURRENT_SCHEMA_VERSION {
+        migrate_config(&mut config);
+    }
 
     Ok(config)
 }
 
+/// 一次性迁移 legacy providers.json（schema v1 → v2）。
+/// 迁移前备份 `providers.json.cc-box.bak`，只执行一次（schemaVersion 守门）。
+pub fn ensure_providers_schema() -> Result<()> {
+    let config_path = get_providers_config_path()?;
+    if !config_path.exists() {
+        return Ok(());
+    }
+
+    let content = fs::read_to_string(&config_path)?;
+    let mut config: ProvidersConfig =
+        serde_json::from_str(&content).context("Failed to parse providers.json")?;
+
+    if !migrate_config(&mut config) {
+        return Ok(());
+    }
+
+    backup_file(&config_path)?;
+    save_providers_config(&config)?;
+    log::info!("[providers] migrated providers.json to schema v{}", CURRENT_SCHEMA_VERSION);
+    Ok(())
+}
+
+/// 校验整包配置：Provider / 通用配置根节点必须是对象。
+/// `save_providers_config` 可经 RPC 调用，不能只依赖 create/update 的校验。
+pub(crate) fn validate_providers_config(config: &ProvidersConfig) -> Result<()> {
+    if !config.common_config.settings.is_object() {
+        return Err(anyhow!("commonConfig.settings must be a JSON object"));
+    }
+    for provider in &config.providers {
+        if !provider.settings_config.is_object() {
+            return Err(anyhow!(
+                "Provider {} settingsConfig must be a JSON object",
+                provider.id
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// 保存 Provider 配置
 pub fn save_providers_config(config: &ProvidersConfig) -> Result<()> {
+    validate_providers_config(config)?;
     let config_path = get_providers_config_path()?;
     let config_dir = config_path
         .parent()
@@ -138,9 +231,118 @@ pub fn save_providers_config(config: &ProvidersConfig) -> Result<()> {
     }
 
     let content = serde_json::to_string_pretty(config)?;
-    fs::write(&config_path, content)?;
+    write_file_atomic(&config_path, &content)?;
 
     Ok(())
+}
+
+/// 覆盖前备份（`<file>.cc-box.bak`，每次覆盖更新一份）
+pub(crate) fn backup_file(path: &Path) -> Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    let file_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .context("Invalid file path")?;
+    let backup = path.with_file_name(format!("{}.cc-box.bak", file_name));
+    fs::copy(path, backup)?;
+    Ok(())
+}
+
+/// settings.json 常被用户软链到 dotfiles 仓库；直接 rename 会替换链接本身。
+/// 写入目标解析为链接指向的真实文件（不存在/断链时回退原路径）。
+fn resolve_write_target(path: &Path) -> PathBuf {
+    match fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+        }
+        _ => path.to_path_buf(),
+    }
+}
+
+/// 原子写入：同目录临时文件 + rename；Windows 目标已存在时先删除再 rename。
+pub(crate) fn write_file_atomic(path: &Path, content: &str) -> Result<()> {
+    let target = resolve_write_target(path);
+    let file_name = target
+        .file_name()
+        .and_then(|n| n.to_str())
+        .context("Invalid file path")?;
+    // 唯一临时名：同进程并发写（迁移 + 激活）不会互相截断
+    let tmp = target.with_file_name(format!(
+        ".{}.{}.{}.tmp",
+        file_name,
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
+
+    let write_result = (|| -> Result<()> {
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        // 新建文件默认 0600：settings.json 含 token，不能依赖 umask
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&tmp)?;
+        file.write_all(content.as_bytes())?;
+        file.sync_all()?;
+        Ok(())
+    })();
+    if let Err(e) = write_result {
+        let _ = fs::remove_file(&tmp);
+        return Err(e);
+    }
+
+    // 继承目标文件权限：settings.json 常含 API token，不能被 umask 放宽成 0644。
+    // 仅 Unix：Windows 只读属性会阻止后续 rename/覆盖。
+    #[cfg(unix)]
+    if let Ok(metadata) = fs::metadata(&target) {
+        if let Err(e) = fs::set_permissions(&tmp, metadata.permissions()) {
+            log::warn!(
+                "[providers] failed to copy permissions to {}: {}",
+                tmp.display(),
+                e
+            );
+        }
+    }
+
+    match fs::rename(&tmp, &target) {
+        Ok(()) => Ok(()),
+        Err(first_err) => {
+            // Unix rename 覆盖是原子的，失败说明是权限/磁盘等真实错误，删原文件反而扩大损失。
+            // Windows rename 不能覆盖已存在文件：用 copy 覆盖（不先删除目标），
+            // 避免二次失败时原文件已被删掉。
+            #[cfg(windows)]
+            {
+                match fs::copy(&tmp, &target) {
+                    Ok(_) => {
+                        let _ = fs::remove_file(&tmp);
+                        Ok(())
+                    }
+                    Err(e) => {
+                        let _ = fs::remove_file(&tmp);
+                        Err(anyhow!(
+                            "Failed to replace {} (rename: {}, copy: {})",
+                            target.display(),
+                            first_err,
+                            e
+                        ))
+                    }
+                }
+            }
+            #[cfg(not(windows))]
+            {
+                let _ = fs::remove_file(&tmp);
+                Err(anyhow!(
+                    "Failed to write {}: {}",
+                    target.display(),
+                    first_err
+                ))
+            }
+        }
+    }
 }
 
 /// 从通用配置的 env 中剥离 6 个核心 Provider 字段，防止导入时覆盖各 Provider 独有的配置
@@ -158,6 +360,20 @@ pub(crate) fn strip_core_env(settings: &serde_json::Value) -> serde_json::Value 
     if let Some(env) = result.get_mut("env").and_then(|v| v.as_object_mut()) {
         for key in CORE_ENV_KEYS {
             env.remove(*key);
+        }
+    }
+    result
+}
+
+/// 核心 env 的空字符串视为「未设置」：预设大量 `ANTHROPIC_AUTH_TOKEN: ''`，
+/// 若按显式值参与分层合成会把用户/通用配置里的有效值覆盖成空串。
+pub(crate) fn strip_empty_core_env(settings: &serde_json::Value) -> serde_json::Value {
+    let mut result = settings.clone();
+    if let Some(env) = result.get_mut("env").and_then(|v| v.as_object_mut()) {
+        for key in CORE_ENV_KEYS {
+            if env.get(*key).and_then(|v| v.as_str()) == Some("") {
+                env.remove(*key);
+            }
         }
     }
     result
@@ -204,8 +420,232 @@ pub(crate) fn deep_merge_json(target: &serde_json::Value, source: &serde_json::V
     }
 }
 
-/// activate 时把 Provider 配置 merge 进当前 settings.json 的纯计算逻辑
-/// current = 磁盘现状；provider_cfg 应已通过 strip_cc_state_fields 剥离状态字段
+/// 通用配置是否对该 Provider 生效：全局开关 + Provider meta（缺省 true）
+pub(crate) fn provider_common_enabled(
+    common: &CommonConfig,
+    provider: &Provider,
+) -> bool {
+    if !common.enabled {
+        return false;
+    }
+    provider
+        .meta
+        .as_ref()
+        .and_then(|m| m.common_config_enabled)
+        .unwrap_or(true)
+}
+
+/// 解析 Provider 的最终生效配置（覆盖层优先）：
+/// `deepMerge(通用配置 - removed 路径, Provider 覆盖层)`。
+pub(crate) fn resolve_effective(common: &CommonConfig, provider: &Provider) -> serde_json::Value {
+    let overrides = strip_empty_core_env(&strip_cc_state_fields(&provider.settings_config));
+    if !provider_common_enabled(common, provider) {
+        return overrides;
+    }
+
+    let mut base = strip_empty_core_env(&strip_cc_state_fields(&common.settings));
+    if let Some(removed) = provider
+        .meta
+        .as_ref()
+        .and_then(|m| m.common_config_removed.as_ref())
+    {
+        for pointer in removed {
+            delete_at_json_pointer(&mut base, pointer);
+        }
+    }
+
+    deep_merge_json(&base, &overrides)
+}
+
+/// JSON 深度相等（对象键序无关）
+pub(crate) fn deep_equal(a: &serde_json::Value, b: &serde_json::Value) -> bool {
+    match (a, b) {
+        (serde_json::Value::Object(am), serde_json::Value::Object(bm)) => {
+            am.len() == bm.len()
+                && am
+                    .iter()
+                    .all(|(k, av)| bm.get(k).map_or(false, |bv| deep_equal(av, bv)))
+        }
+        (serde_json::Value::Array(aa), serde_json::Value::Array(ba)) => {
+            aa.len() == ba.len() && aa.iter().zip(ba).all(|(x, y)| deep_equal(x, y))
+        }
+        _ => a == b,
+    }
+}
+
+/// 从 value 中移除与 base 相同的叶子（递归），用于迁移旧版物化配置：
+/// 与通用配置相同的值视为「继承」，不同或 base 没有的视为「显式覆盖」。
+/// 返回 None 表示该子树与 base 完全一致、可以整体丢弃。
+pub(crate) fn subtract_equal(
+    value: &serde_json::Value,
+    base: &serde_json::Value,
+) -> Option<serde_json::Value> {
+    if deep_equal(value, base) {
+        return None;
+    }
+    match (value, base) {
+        (serde_json::Value::Object(vm), serde_json::Value::Object(bm)) => {
+            let mut out = serde_json::Map::new();
+            for (key, vv) in vm {
+                match bm.get(key) {
+                    Some(bv) => {
+                        if let Some(reduced) = subtract_equal(vv, bv) {
+                            out.insert(key.clone(), reduced);
+                        }
+                    }
+                    None => {
+                        out.insert(key.clone(), vv.clone());
+                    }
+                }
+            }
+            if out.is_empty() {
+                None
+            } else {
+                Some(serde_json::Value::Object(out))
+            }
+        }
+        _ => Some(value.clone()),
+    }
+}
+
+/// JSON Pointer token 转义（RFC 6901）
+pub(crate) fn json_pointer_escape(token: &str) -> String {
+    token.replace('~', "~0").replace('/', "~1")
+}
+
+fn json_pointer_unescape(token: &str) -> String {
+    token.replace("~1", "/").replace("~0", "~")
+}
+
+/// 按 JSON Pointer 删除对象叶子；路径不存在返回 false。
+/// 路径只遍历对象（数组在设计中是叶子，不会被指向内部）。
+pub(crate) fn delete_at_json_pointer(root: &mut serde_json::Value, pointer: &str) -> bool {
+    let Some(rest) = pointer.strip_prefix('/') else {
+        return false;
+    };
+    if rest.is_empty() {
+        return false;
+    }
+    let tokens: Vec<String> = rest.split('/').map(json_pointer_unescape).collect();
+
+    let mut current = root;
+    for token in &tokens[..tokens.len() - 1] {
+        match current.get_mut(token) {
+            Some(next) => current = next,
+            None => return false,
+        }
+    }
+
+    match current.as_object_mut() {
+        Some(obj) => obj.remove(tokens.last().unwrap()).is_some(),
+        None => false,
+    }
+}
+
+/// 收集叶子路径（对象递归；数组/标量视作叶子）。
+pub(crate) fn collect_leaf_paths(
+    value: &serde_json::Value,
+    prefix: &str,
+    out: &mut Vec<String>,
+) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, child) in map {
+                let path = format!("{}/{}", prefix, json_pointer_escape(key));
+                collect_leaf_paths(child, &path, out);
+            }
+        }
+        _ => {
+            if !prefix.is_empty() {
+                out.push(prefix.to_string());
+            }
+        }
+    }
+}
+
+pub(crate) fn leaf_paths(value: &serde_json::Value) -> Vec<String> {
+    let mut out = Vec::new();
+    collect_leaf_paths(value, "", &mut out);
+    out.sort();
+    out
+}
+
+/// 激活合并的纯计算：先删除上次托管、本次不应存在的残留路径，再合并 effective。
+pub(crate) fn apply_effective_to_settings(
+    current: &serde_json::Value,
+    effective: &serde_json::Value,
+    stale_paths: &[String],
+) -> serde_json::Value {
+    let mut merged = current.clone();
+    for pointer in stale_paths {
+        delete_at_json_pointer(&mut merged, pointer);
+    }
+    deep_merge_json(&merged, effective)
+}
+
+/// 解析用户 settings.json；坏 JSON / 非对象根节点都拒绝覆盖。
+pub(crate) fn parse_settings_json(content: &str) -> Result<serde_json::Value> {
+    let value: serde_json::Value =
+        serde_json::from_str(content).context("settings.json is not valid JSON")?;
+    if !value.is_object() {
+        return Err(anyhow!("settings.json root must be a JSON object"));
+    }
+    Ok(value)
+}
+
+/// 迁移 legacy（schema v1）配置到分层语义。
+/// 旧版把通用配置物化进了 Provider，且通用配置赢；
+/// 移除与通用配置相同的叶子后，effective 与迁移前完全一致。
+/// 返回是否发生了迁移。
+pub(crate) fn migrate_config(config: &mut ProvidersConfig) -> bool {
+    if config.schema_version >= CURRENT_SCHEMA_VERSION {
+        return false;
+    }
+
+    if !config.common_config.settings.is_object() {
+        config.common_config.settings = serde_json::json!({});
+    }
+    let common = strip_cc_state_fields(&config.common_config.settings);
+    let common_active = config.common_config.enabled;
+
+    for provider in &mut config.providers {
+        let enabled = provider
+            .meta
+            .as_ref()
+            .and_then(|m| m.common_config_enabled)
+            .unwrap_or(true);
+
+        // 状态字段不参与分层，统一从存储中清掉（激活时本来也会被剥离）
+        provider.settings_config = strip_cc_state_fields(&provider.settings_config);
+        // 非法根节点（数组/null/标量）归一化为空覆盖层，避免激活写坏 settings.json
+        if !provider.settings_config.is_object() {
+            log::warn!(
+                "[providers] provider {} has non-object settingsConfig; reset to {{}}",
+                provider.id
+            );
+            provider.settings_config = serde_json::json!({});
+        }
+
+        if common_active && enabled {
+            provider.settings_config = subtract_equal(&provider.settings_config, &common)
+                .unwrap_or_else(|| serde_json::json!({}));
+        }
+
+        // 显式化缺省值，消除前端 true / 后端 false 的历史歧义
+        let meta = provider.meta.get_or_insert_with(ProviderMeta::default);
+        meta.common_config_enabled = Some(enabled);
+        if meta.common_config_removed.is_none() {
+            meta.common_config_removed = Some(Vec::new());
+        }
+    }
+
+    config.schema_version = CURRENT_SCHEMA_VERSION;
+    true
+}
+
+/// 旧版激活合并的纯计算逻辑（仅测试保留，回归用户现状保护语义）。
+/// 现行激活走 `apply_effective_to_settings`。
+#[cfg(test)]
 pub(crate) fn merge_provider_into_settings(
     current: &serde_json::Value,
     provider_cfg: &serde_json::Value,
@@ -214,42 +654,75 @@ pub(crate) fn merge_provider_into_settings(
 }
 
 /// 激活 Provider
-/// 把 Provider 的 settingsConfig deep merge 进当前 ~/.claude/settings.json
-/// 剥离 Claude Code 状态字段（enabledPlugins 等），避免覆盖用户后续 CLI 修改
+/// effective = 通用默认层 + Provider 覆盖层（Provider 优先，状态字段已剥离），
+/// 再 merge 进用户 ~/.claude/settings.json：用户独有键保留，旧托管键按 appliedSettings 清理。
 pub fn activate_provider(provider_id: &str) -> Result<()> {
     let config = get_providers_config()?;
 
-    let provider = config
-        .providers
-        .iter()
-        .find(|p| p.id == provider_id)
-        .context("Provider not found")?;
+    let effective = {
+        let provider = config
+            .providers
+            .iter()
+            .find(|p| p.id == provider_id)
+            .context("Provider not found")?;
+        resolve_effective(&config.common_config, provider)
+    };
+    // 非对象根会把 settings.json 写坏，后续所有激活都被拒绝
+    if !effective.is_object() {
+        return Err(anyhow!(
+            "Provider config root must be a JSON object (id={})",
+            provider_id
+        ));
+    }
+    let new_paths = leaf_paths(&effective);
 
     let settings_path = get_claude_settings_path()?;
     let settings_dir = settings_path
         .parent()
         .context("Could not get Claude settings directory")?;
-
     if !settings_dir.exists() {
         fs::create_dir_all(settings_dir)?;
     }
 
-    // 读取当前 settings.json（不存在或解析失败视为空对象，保留 Provider 全量字段）
-    let current_settings = fs::read_to_string(&settings_path)
-        .ok()
-        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-        .unwrap_or(serde_json::json!({}));
+    // 用户现状是底座；坏 JSON 拒绝覆盖（此前会静默当成 {} 写回，造成数据丢失）
+    let current_settings = if settings_path.exists() {
+        let raw = fs::read_to_string(&settings_path)?;
+        parse_settings_json(&raw)
+            .with_context(|| format!("Refusing to overwrite {}", settings_path.display()))?
+    } else {
+        serde_json::json!({})
+    };
 
-    // 剥离状态字段后 merge 进当前 settings，避免覆盖 CLI 后续修改
-    let stripped = strip_cc_state_fields(&provider.settings_config);
-    let merged = merge_provider_into_settings(&current_settings, &stripped);
+    // 覆盖前备份（settings.json.cc-box.bak）
+    backup_file(&settings_path)?;
 
+    // 只清理「上次由 cc-box 写入、本次 effective 不再包含」的路径
+    let stale_paths: Vec<String> = config
+        .applied_settings
+        .paths
+        .iter()
+        .filter(|p| !new_paths.contains(p))
+        .cloned()
+        .collect();
+
+    let merged = apply_effective_to_settings(&current_settings, &effective, &stale_paths);
     let content = serde_json::to_string_pretty(&merged)?;
-    fs::write(&settings_path, content)?;
+    write_file_atomic(&settings_path, &content)?;
 
     let mut updated_config = config;
     updated_config.active_provider_id = Some(provider_id.to_string());
-    save_providers_config(&updated_config)?;
+    updated_config.applied_settings = AppliedSettings {
+        provider_id: Some(provider_id.to_string()),
+        paths: new_paths,
+    };
+    if let Err(e) = save_providers_config(&updated_config) {
+        // settings.json 已更新但 providers.json 失败：记录后返回，避免静默状态漂移
+        log::error!(
+            "[providers] settings.json updated but providers.json save failed: {}",
+            e
+        );
+        return Err(e);
+    }
 
     Ok(())
 }
@@ -264,6 +737,9 @@ pub fn create_provider(
     icon_color: Option<String>,
     meta: Option<ProviderMeta>,
 ) -> Result<Provider> {
+    if !settings_config.is_object() {
+        return Err(anyhow!("Provider config root must be a JSON object"));
+    }
     let id = uuid::Uuid::new_v4().to_string();
     let created_at = Some(
         std::time::SystemTime::now()
@@ -294,6 +770,32 @@ pub fn create_provider(
     Ok(provider)
 }
 
+/// 合并 Provider meta：incoming 未提供的关键字段沿用现有值。
+/// `ProviderMeta` 是整对象替换语义，旧客户端只传部分字段时会丢新字段。
+fn meta_to_non_null_value(meta: &ProviderMeta) -> serde_json::Value {
+    let mut value = serde_json::to_value(meta).unwrap_or_else(|_| serde_json::json!({}));
+    if let Some(obj) = value.as_object_mut() {
+        // Option None 序列化为 null；视为「未提供」，不参与覆盖
+        obj.retain(|_, v| !v.is_null());
+    }
+    value
+}
+
+pub(crate) fn merge_provider_meta(
+    existing: &Option<ProviderMeta>,
+    incoming: ProviderMeta,
+) -> ProviderMeta {
+    let Some(existing) = existing else {
+        return incoming;
+    };
+    // existing 打底 + incoming 非空字段覆盖；未知字段（extra/flatten）也一并保留
+    let merged = deep_merge_json(
+        &meta_to_non_null_value(existing),
+        &meta_to_non_null_value(&incoming),
+    );
+    serde_json::from_value(merged).unwrap_or(incoming)
+}
+
 /// 更新 Provider
 pub fn update_provider(
     id: &str,
@@ -314,13 +816,19 @@ pub fn update_provider(
         provider.name = n;
     }
     if let Some(s) = settings_config {
+        if !s.is_object() {
+            return Err(anyhow!("Provider config root must be a JSON object"));
+        }
         provider.settings_config = s;
     }
     if let Some(n) = notes {
         provider.notes = if n.is_empty() { None } else { Some(n) };
     }
     if let Some(m) = meta {
-        provider.meta = Some(m);
+        // 部分更新（旧前端/第三方客户端可能只传 commonConfigEnabled）不得清空
+        // commonConfigRemoved 等新字段
+        let merged = merge_provider_meta(&provider.meta, m);
+        provider.meta = Some(merged);
     }
 
     let result = provider.clone();
@@ -365,28 +873,17 @@ pub fn update_provider_sort_order(provider_ids: Vec<String>) -> Result<()> {
     Ok(())
 }
 
-/// 更新通用配置
-/// 保存通用配置后，将新内容 deepMerge 到所有 meta.commonConfigEnabled === true 的 Provider
-/// 入参中的 Claude Code 状态字段会被剥离，避免后续 activate 写回 settings.json 时覆盖 CLI 修改
+/// 更新通用配置（分层语义：只保存默认层，不改写任何 Provider）。
+/// 调用方保存后重激活当前 Provider，新的默认值才会写入 settings.json。
+/// Claude Code 状态字段在这里剥离，避免经通用配置回写覆盖 CLI 状态。
 pub fn update_common_config(enabled: bool, settings: serde_json::Value) -> Result<()> {
-    let mut config = get_providers_config()?;
-    let safe_settings = strip_cc_state_fields(&settings);
-    config.common_config.enabled = enabled;
-    config.common_config.settings = safe_settings.clone();
-
-    // 批量合并：遍历所有勾选了"应用通用配置"的 Provider
-    for provider in &mut config.providers {
-        let should_merge = provider
-            .meta
-            .as_ref()
-            .and_then(|m| m.common_config_enabled)
-            .unwrap_or(false);
-
-        if should_merge {
-            provider.settings_config = deep_merge_json(&provider.settings_config, &safe_settings);
-        }
+    if !settings.is_object() {
+        return Err(anyhow!("Common config must be a JSON object"));
     }
 
+    let mut config = get_providers_config()?;
+    config.common_config.enabled = enabled;
+    config.common_config.settings = strip_cc_state_fields(&settings);
     save_providers_config(&config)?;
 
     Ok(())
@@ -480,23 +977,10 @@ pub fn import_from_cc_switch() -> Result<ImportResult> {
         imported_providers.iter().find(|p| p.id == *id).map(|p| p.name.clone())
     });
 
-    // 合并到现有配置
+    // 合并到现有配置（get 内部已完成 legacy → v2 迁移）
     let mut config = get_providers_config()?;
 
-    for provider in imported_providers {
-        if !config.providers.iter().any(|p| p.id == provider.id) {
-            config.providers.push(provider);
-        }
-    }
-
-    // 如果识别到 cc-switch 的当前 Provider，且 CC-Box 尚无激活的，设置之
-    if config.active_provider_id.is_none() {
-        if let Some(ref id) = current_provider_id {
-            config.active_provider_id = Some(id.clone());
-        }
-    }
-
-    // 导入通用配置
+    // 先导入通用配置：分层语义下它只作为默认层，不再物化进 Provider
     let mut imported_common_config = false;
     if let Ok(common_str) = conn.query_row(
         "SELECT value FROM settings WHERE key = 'common_config_claude'",
@@ -507,31 +991,56 @@ pub fn import_from_cc_switch() -> Result<ImportResult> {
             if !common_settings.is_null()
                 && common_settings.as_object().map_or(false, |o| !o.is_empty())
             {
+                // 与旧行为一致：核心 env 不作为通用默认值，避免共享 API Key / 模型
                 config.common_config.enabled = true;
-                config.common_config.settings = common_settings.clone();
+                config.common_config.settings =
+                    strip_cc_state_fields(&strip_core_env(&common_settings));
                 imported_common_config = true;
-
-                // 剥离核心 env 字段后再合并，防止覆盖各 Provider 独有的 API Key / 模型等
-                // 同时剥离 Claude Code 状态字段，避免 commonConfig 污染 Provider 后再被 activate 写回
-                let safe_settings = strip_cc_state_fields(&strip_core_env(&common_settings));
-
-                // 按原则：将通用配置合并到所有 commonConfigEnabled === true 的 Provider
-                for provider in &mut config.providers {
-                    let should_merge = provider
-                        .meta
-                        .as_ref()
-                        .and_then(|m| m.common_config_enabled)
-                        .unwrap_or(false);
-
-                    if should_merge {
-                        provider.settings_config =
-                            deep_merge_json(&provider.settings_config, &safe_settings);
-                    }
-                }
             }
         }
     }
 
+    // 导入的 Provider 是 cc-switch 物化后的配置：归一化为覆盖层。
+    // （与通用配置相同的叶子视为继承；不同或通用配置没有的保留为显式覆盖）
+    for mut provider in imported_providers {
+        if config.providers.iter().any(|p| p.id == provider.id) {
+            continue;
+        }
+
+        let enabled = provider
+            .meta
+            .as_ref()
+            .and_then(|m| m.common_config_enabled)
+            .unwrap_or(true);
+
+        // 导入数据可能是非对象根节点，先归一化
+        if !provider.settings_config.is_object() {
+            provider.settings_config = serde_json::json!({});
+        }
+
+        if config.common_config.enabled && enabled {
+            provider.settings_config =
+                subtract_equal(&provider.settings_config, &config.common_config.settings)
+                    .unwrap_or_else(|| serde_json::json!({}));
+        }
+
+        let meta = provider.meta.get_or_insert_with(ProviderMeta::default);
+        meta.common_config_enabled = Some(enabled);
+        if meta.common_config_removed.is_none() {
+            meta.common_config_removed = Some(Vec::new());
+        }
+
+        config.providers.push(provider);
+    }
+
+    // 如果识别到 cc-switch 的当前 Provider，且 CC-Box 尚无激活的，设置之
+    if config.active_provider_id.is_none() {
+        if let Some(ref id) = current_provider_id {
+            config.active_provider_id = Some(id.clone());
+        }
+    }
+
+    config.schema_version = CURRENT_SCHEMA_VERSION;
     save_providers_config(&config)?;
 
     Ok(ImportResult {
@@ -617,8 +1126,10 @@ pub async fn test_provider_connection(provider_id: &str) -> Result<TestConnectio
         .iter()
         .find(|p| p.id == provider_id)
         .context("Provider not found")?;
+    // 测试连接必须使用合并通用配置后的生效配置（覆盖层优先）
+    let effective = resolve_effective(&config.common_config, provider);
 
-    let params = match extract_test_params(&provider.settings_config) {
+    let params = match extract_test_params(&effective) {
         Some(p) => p,
         None => {
             return Ok(TestConnectionResult {

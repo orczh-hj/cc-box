@@ -13,6 +13,14 @@ export async function getProvidersConfig(): Promise<ProvidersConfig> {
   return invoke('get_providers_config')
 }
 
+/**
+ * 用系统默认程序打开用户级 Claude settings.json（桌面专属）。
+ * Rust 侧直接调用系统 open：JS shell 插件的 open 只允许 URL，本地路径会被 scope 拒绝。
+ */
+export async function openClaudeUserSettings(): Promise<void> {
+  return invoke('open_claude_user_settings')
+}
+
 /** 保存 Provider 配置 */
 export async function saveProvidersConfig(config: ProvidersConfig): Promise<void> {
   return invoke('save_providers_config', { config })

@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.16.5] - 2026-10-22
+
+### Features
+- Provider common config is now a defaults layer: provider overrides win, inheritance is resolved at activation time, can be disabled or removed per provider, with one-time schema v2 migration, backups and stale-key cleanup
+- Add an "Open User Config" button to the API Providers page (desktop)
+- Sidebar resource toggles refresh silently in place (no list unmount / scroll loss) and show inline errors on failure; plugin toggle RPC timeout raised for slow CLI operations
+
+### Fixed
+- Fix production-build terminal freeze caused by an esbuild/xterm dead-enum minification bug; add a build-time dist safety scan
+- Fix "Open User Config" doing nothing on macOS by opening local settings from Rust instead of the URL-scoped JS shell API
+- Prevent empty preset credentials from overwriting valid provider/user API tokens
+
+Note: relay/web UI should be refreshed after deployment; no OSS upload is required for this release.
+
 ## [0.16.4] - 2026-10-22
 
 ### Features

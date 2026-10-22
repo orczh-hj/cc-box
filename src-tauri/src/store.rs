@@ -5,7 +5,7 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Mutex;
 
 /// 项目信息
@@ -207,6 +207,19 @@ static PROJECT_PATH_MAPPING: Mutex<Option<HashMap<String, Vec<PathBuf>>>> = Mute
 
 /// 获取 Claude 配置目录
 fn get_claude_dir() -> Result<PathBuf> {
+    claude_config_dir()
+}
+
+/// Claude 配置目录：尊重 `CLAUDE_CONFIG_DIR`（CLI 支持自定义配置目录），
+/// 未设置时回退 `~/.claude`。硬编码 home 会让自定义配置目录的用户
+/// 在 GUI 里改到另一份数据（操作对 CLI 完全无效）。
+pub(crate) fn claude_config_dir() -> Result<PathBuf> {
+    if let Some(dir) = std::env::var_os("CLAUDE_CONFIG_DIR") {
+        let dir = PathBuf::from(dir);
+        if !dir.as_os_str().is_empty() {
+            return Ok(dir);
+        }
+    }
     dirs::home_dir()
         .map(|h| h.join(".claude"))
         .context("Home directory not found")
@@ -1135,10 +1148,9 @@ pub fn get_project_config(project_path: &str) -> Result<ProjectConfig> {
 
 fn read_basic_config(project_path: &str) -> Result<Vec<BasicConfigItem>> {
     let mut result = Vec::new();
-    let home = dirs::home_dir().context("Home directory not found")?;
 
-    // 用户级 ~/.claude/settings.json
-    let user_settings = home.join(".claude").join("settings.json");
+    // 用户级 <claude config>/settings.json（尊重 CLAUDE_CONFIG_DIR）
+    let user_settings = claude_config_dir()?.join("settings.json");
     if user_settings.exists() {
         if let Ok(content) = fs::read_to_string(&user_settings) {
             if let Ok(settings) = serde_json::from_str::<serde_json::Value>(&content) {
@@ -1348,9 +1360,8 @@ fn read_skills_config(project_path: &str) -> Result<Vec<SkillItem>> {
         }
     }
 
-    // 用户级 ~/.claude/skills/<name>/SKILL.md
-    let home = dirs::home_dir().context("Home directory not found")?;
-    let user_skills_dir = home.join(".claude").join("skills");
+    // 用户级 <claude config>/skills/<name>/SKILL.md（尊重 CLAUDE_CONFIG_DIR）
+    let user_skills_dir = claude_config_dir()?.join("skills");
     if user_skills_dir.exists() {
         for entry in fs::read_dir(&user_skills_dir)? {
             let entry = entry?;
@@ -1408,9 +1419,8 @@ fn read_agents_config(project_path: &str) -> Result<Vec<AgentItem>> {
         }
     }
 
-    // 用户级 ~/.claude/agents/*.md
-    let home = dirs::home_dir().context("Home directory not found")?;
-    let user_agents_dir = home.join(".claude").join("agents");
+    // 用户级 <claude config>/agents/*.md（尊重 CLAUDE_CONFIG_DIR）
+    let user_agents_dir = claude_config_dir()?.join("agents");
     if user_agents_dir.exists() {
         for entry in fs::read_dir(&user_agents_dir)? {
             let entry = entry?;
@@ -1473,9 +1483,8 @@ fn read_agents_from_filesystem(project_path: &str) -> Result<Vec<AgentInfo>> {
         }
     }
 
-    // 用户级 ~/.claude/agents/*.md
-    let home = dirs::home_dir().context("Home directory not found")?;
-    let user_agents_dir = home.join(".claude").join("agents");
+    // 用户级 <claude config>/agents/*.md（尊重 CLAUDE_CONFIG_DIR）
+    let user_agents_dir = claude_config_dir()?.join("agents");
     if user_agents_dir.exists() {
         if let Ok(entries) = fs::read_dir(&user_agents_dir) {
             for entry in entries.flatten() {
@@ -1540,10 +1549,8 @@ fn read_agents_from_filesystem(project_path: &str) -> Result<Vec<AgentInfo>> {
 fn read_hooks_config(project_path: &str) -> Result<Vec<HookItem>> {
     let mut result = Vec::new();
 
-    let home = dirs::home_dir().context("Home directory not found")?;
-
     let settings_paths: Vec<(PathBuf, &str)> = vec![
-        (home.join(".claude").join("settings.json"), "user"),
+        (claude_config_dir()?.join("settings.json"), "user"),
         (
             PathBuf::from(project_path)
                 .join(".claude")
@@ -1907,88 +1914,130 @@ pub fn get_all_agents(project_path: &str) -> Result<Vec<AgentInfo>> {
         agents.push(agent);
     }
 
+    // 顺序与 enabled 解耦：开关不改变条目在面板中的位置
+    sort_by_name(&mut agents, |a| a.name.as_str());
     Ok(agents)
 }
 
 /// 获取所有 Skills（包括 project、user、plugin）
+/// 扫描一个 skills 目录中的可用 skill：真实目录或可解析的符号链接 + 可读 SKILL.md。
+/// 返回 (目录名, description)。
+pub(crate) fn scan_active_skills(dir: &Path) -> Vec<(String, Option<String>)> {
+    let mut out = Vec::new();
+    if !dir.exists() {
+        return out;
+    }
+    let Ok(entries) = fs::read_dir(dir) else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !is_dir_or_link(&path) {
+            continue;
+        }
+        let skill_file = path.join("SKILL.md");
+        // 断链/无 SKILL.md：CLI 同样加载不到，跳过
+        if !skill_file.exists() {
+            continue;
+        }
+        out.push((
+            entry.file_name().to_string_lossy().to_string(),
+            parse_skill_description(&skill_file),
+        ));
+    }
+    out
+}
+
+/// 扫描 disabled 备份目录：目录与符号链接（**含断链**）都列出。
+/// 断链是历史 bug 的产物（相对链接被搬断），必须列出才能从 GUI 恢复；
+/// 其 SKILL.md 读不到，description 为 None。
+pub(crate) fn scan_disabled_skills(dir: &Path) -> Vec<(String, Option<String>)> {
+    let mut out = Vec::new();
+    if !dir.exists() {
+        return out;
+    }
+    let Ok(entries) = fs::read_dir(dir) else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !is_dir_or_link(&path) {
+            continue;
+        }
+        let skill_file = path.join("SKILL.md");
+        let description = if skill_file.exists() {
+            parse_skill_description(&skill_file)
+        } else {
+            None
+        };
+        out.push((
+            entry.file_name().to_string_lossy().to_string(),
+            description,
+        ));
+    }
+    out
+}
+
+/// 稳定按名称排序：列表顺序与 `enabled` 解耦——条目在 active/disabled 之间
+/// 移动后仍停在原位，配合前端"本端写回环抑制"实现开关不重排列表。
+pub(crate) fn sort_by_name<T, F>(items: &mut [T], name: F)
+where
+    F: for<'a> Fn(&'a T) -> &'a str,
+{
+    items.sort_by(|a, b| name(a).cmp(name(b)));
+}
+
 /// 与 CLI 源码 loadSkillsDir.ts 一致：从 skills/name/SKILL.md frontmatter 解析 description
 pub fn get_all_skills(project_path: &str) -> Result<Vec<SkillInfo>> {
     let mut skills = Vec::new();
 
     // 1. 从项目目录读取 skills（与源码 loadSkillsFromSkillsDir 一致：只支持 dir/SKILL.md 格式）
     let project_skills_dir = PathBuf::from(project_path).join(".claude").join("skills");
-    if project_skills_dir.exists() {
-        if let Ok(entries) = fs::read_dir(&project_skills_dir) {
-            for entry in entries.flatten() {
-                if entry.path().is_dir() {
-                    let skill_file = entry.path().join("SKILL.md");
-                    if skill_file.exists() {
-                        let name = entry.file_name().to_string_lossy().to_string();
-                        let description = parse_skill_description(&skill_file);
-                        skills.push(SkillInfo {
-                            name: name.clone(),
-                            display_name: name.clone(),
-                            description,
-                            source_type: "project".to_string(),
-                            source_label: "Project".to_string(),
-                            invoke_format: format!("/{}", name),
-                            enabled: true,
-                        });
-                    }
-                }
-            }
-        }
+    for (name, description) in scan_active_skills(&project_skills_dir) {
+        skills.push(SkillInfo {
+            invoke_format: format!("/{}", name),
+            display_name: name.clone(),
+            name,
+            description,
+            source_type: "project".to_string(),
+            source_label: "Project".to_string(),
+            enabled: true,
+        });
     }
 
-    // 2. 从用户目录读取 skills
-    let home = dirs::home_dir().context("Home directory not found")?;
-    let user_skills_dir = home.join(".claude").join("skills");
-    if user_skills_dir.exists() {
-        if let Ok(entries) = fs::read_dir(&user_skills_dir) {
-            for entry in entries.flatten() {
-                if entry.path().is_dir() {
-                    let skill_file = entry.path().join("SKILL.md");
-                    if skill_file.exists() {
-                        let name = entry.file_name().to_string_lossy().to_string();
-                        let description = parse_skill_description(&skill_file);
-                        skills.push(SkillInfo {
-                            name: name.clone(),
-                            display_name: name.clone(),
-                            description,
-                            source_type: "user".to_string(),
-                            source_label: "User".to_string(),
-                            invoke_format: format!("/{}", name),
-                            enabled: true,
-                        });
-                    }
-                }
-            }
-        }
+    // 2. 从用户目录读取 skills（尊重 CLAUDE_CONFIG_DIR）
+    let user_skills_dir = claude_config_dir()?.join("skills");
+    let user_skills = scan_active_skills(&user_skills_dir);
+    let active_names: std::collections::HashSet<String> =
+        user_skills.iter().map(|(name, _)| name.clone()).collect();
+    for (name, description) in user_skills {
+        skills.push(SkillInfo {
+            invoke_format: format!("/{}", name),
+            display_name: name.clone(),
+            name,
+            description,
+            source_type: "user".to_string(),
+            source_label: "User".to_string(),
+            enabled: true,
+        });
     }
 
-    // 2b. 从 disabled 备份目录读取用户级 skills（原位灰显）
+    // 2b. 从 disabled 备份目录读取用户级 skills（原位灰显；断链也列出以便恢复）
     if let Ok(disabled_skills_dir) = get_disabled_subdir("skills") {
-        if disabled_skills_dir.exists() {
-            if let Ok(entries) = fs::read_dir(&disabled_skills_dir) {
-                for entry in entries.flatten() {
-                    if entry.path().is_dir() {
-                        let skill_file = entry.path().join("SKILL.md");
-                        if skill_file.exists() {
-                            let name = entry.file_name().to_string_lossy().to_string();
-                            let description = parse_skill_description(&skill_file);
-                            skills.push(SkillInfo {
-                                name: name.clone(),
-                                display_name: name.clone(),
-                                description,
-                                source_type: "user".to_string(),
-                                source_label: "User (Disabled)".to_string(),
-                                invoke_format: format!("/{}", name),
-                                enabled: false,
-                            });
-                        }
-                    }
-                }
+        for (name, description) in scan_disabled_skills(&disabled_skills_dir) {
+            // active 已有同名项：残留备份不作为独立条目展示（避免同组重复 key）
+            if active_names.contains(&name) {
+                continue;
             }
+            skills.push(SkillInfo {
+                invoke_format: format!("/{}", name),
+                display_name: name.clone(),
+                name,
+                description,
+                source_type: "user".to_string(),
+                source_label: "User (Disabled)".to_string(),
+                enabled: false,
+            });
         }
     }
 
@@ -2017,6 +2066,8 @@ pub fn get_all_skills(project_path: &str) -> Result<Vec<SkillInfo>> {
         }
     }
 
+    // 顺序与 enabled 解耦：禁用项混在用户组里按名称定位，开关不会让条目"跳位"
+    sort_by_name(&mut skills, |s| s.name.as_str());
     Ok(skills)
 }
 
@@ -2123,6 +2174,8 @@ pub fn get_all_mcp_servers(project_path: &str) -> Result<Vec<McpServerInfo>> {
         }
     }
 
+    // 顺序与 enabled 解耦：开关不改变条目在面板中的位置
+    sort_by_name(&mut servers, |s| s.name.as_str());
     Ok(servers)
 }
 
@@ -2335,61 +2388,63 @@ fn capitalize_scope(scope: &str) -> String {
     }
 }
 
-/// 执行 claude 命令并获取输出（设置 git-bash 环境）
-fn run_claude_command(args: &str) -> Result<String> {
-    // Windows 上需要设置 git-bash 环境
-    let mut cmd = std::process::Command::new("claude");
-    cmd.args(args.split_whitespace());
+/// 构造 claude 子进程：目标解析与 PTY 启动共用 `platform::cli_target`
+/// （CLAUDE.md 约定：CLI 启动目标只在单点决定，不能在别处直接写 `claude`——
+/// 用户配置了非 PATH 内的 CLI 时，子进程会找不到可执行文件）。
+fn claude_command() -> std::process::Command {
+    let configured = get_app_config().ok().and_then(|c| c.claude_path);
+    let mut cmd = match crate::platform::cli_target(configured.as_deref()) {
+        crate::platform::CliTarget::Explicit(path) => std::process::Command::new(path),
+        crate::platform::CliTarget::PathLookup => {
+            #[cfg(unix)]
+            {
+                // Unix：解析成可运行路径再 exec，避免依赖 GUI 继承的 PATH
+                match crate::platform::find_executable("claude") {
+                    Some(path) => std::process::Command::new(path),
+                    None => std::process::Command::new("claude"),
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                // Windows：CreateProcess 不能直接执行 npm 的 .cmd 包装，这里依赖
+                // PATH 能解析到可执行文件（npm 安装通常同时提供 claude.exe）。
+                // 该行为与本次修复前一致，未在本机（macOS）验证。
+                std::process::Command::new("claude")
+            }
+        }
+    };
 
-    // 设置 git-bash 环境
+    // Windows 上需要设置 git-bash 环境
     if cfg!(target_os = "windows") {
-        // 尝试从环境变量获取
         if let Ok(git_bash_path) = std::env::var("CLAUDE_CODE_GIT_BASH_PATH") {
             if Path::new(&git_bash_path).exists() {
                 cmd.env("CLAUDE_CODE_GIT_BASH_PATH", git_bash_path);
             }
-        } else {
-            // 检测 git-bash 路径
-            let git_bash_path = detect_git_bash_path();
-            if let Some(path) = git_bash_path {
-                cmd.env("CLAUDE_CODE_GIT_BASH_PATH", path);
-            }
+        } else if let Some(git_bash_path) = detect_git_bash_path() {
+            cmd.env("CLAUDE_CODE_GIT_BASH_PATH", git_bash_path);
         }
     }
 
     // Windows 上禁止子进程创建控制台窗口
     crate::platform::configure_command(&mut cmd);
+    cmd
+}
 
+/// 执行 claude 命令并获取输出（设置 git-bash 环境）
+fn run_claude_command(args: &str) -> Result<String> {
+    let mut cmd = claude_command();
+    cmd.args(args.split_whitespace());
     let output = cmd.output().context("Failed to run claude command")?;
 
-    if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).to_string())
-    } else {
-        // 即使失败也返回输出，可能包含有用信息
-        Ok(String::from_utf8_lossy(&output.stdout).to_string())
-    }
+    // 即使失败也返回输出：调用方（如 plugins list）可能仍能从 stdout 取到信息
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
 /// 严格版的 claude 命令执行：exit code != 0 时返回 Err（含 stderr）
 /// 用于 plugin enable/disable 等需要明确成败判断的场景
 fn run_claude_command_strict(args: &str) -> Result<String> {
-    let mut cmd = std::process::Command::new("claude");
+    let mut cmd = claude_command();
     cmd.args(args.split_whitespace());
-
-    if cfg!(target_os = "windows") {
-        if let Ok(git_bash_path) = std::env::var("CLAUDE_CODE_GIT_BASH_PATH") {
-            if Path::new(&git_bash_path).exists() {
-                cmd.env("CLAUDE_CODE_GIT_BASH_PATH", git_bash_path);
-            }
-        } else {
-            let git_bash_path = detect_git_bash_path();
-            if let Some(path) = git_bash_path {
-                cmd.env("CLAUDE_CODE_GIT_BASH_PATH", path);
-            }
-        }
-    }
-
-    crate::platform::configure_command(&mut cmd);
 
     let output = cmd.output().context("Failed to run claude command")?;
     if output.status.success() {
@@ -2403,6 +2458,51 @@ fn run_claude_command_strict(args: &str) -> Result<String> {
             output.status.code(),
             if stderr.is_empty() { stdout.trim() } else { stderr.trim() }
         );
+    }
+}
+
+/// plugins list --json 短 TTL 缓存：一次 plugin 开关会级联刷新
+/// plugins/skills/agents/mcp 四个 section，每个 section 都会 spawn 一个 claude
+/// 子进程（`get_all_skills` 等内部都要读 plugin 列表）。2s 内复用同一份输出，
+/// 把「一次点击 4 个子进程」收敛为 1 个；plugin 自身变更后主动失效。
+static PLUGINS_LIST_CACHE: Mutex<Option<(std::time::Instant, String)>> = Mutex::new(None);
+/// single-flight：并发刷新时只有一个线程真正 spawn CLI，其余等待后命中缓存
+static PLUGINS_LIST_FETCH_LOCK: Mutex<()> = Mutex::new(());
+/// 失效代次：防止"失效前开始、失效后才完成"的旧读取回填缓存
+static PLUGINS_LIST_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+const PLUGINS_LIST_TTL: std::time::Duration = std::time::Duration::from_secs(2);
+
+fn plugins_list_json() -> Result<String> {
+    // 锁中毒时降级为不串行（仍可读缓存），不 panic
+    let _flight = PLUGINS_LIST_FETCH_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let gen = PLUGINS_LIST_GEN.load(std::sync::atomic::Ordering::SeqCst);
+
+    if let Ok(guard) = PLUGINS_LIST_CACHE.lock() {
+        if let Some((at, raw)) = guard.as_ref() {
+            if at.elapsed() < PLUGINS_LIST_TTL {
+                return Ok(raw.clone());
+            }
+        }
+    }
+    let raw = run_claude_command("plugins list --json")?;
+    // 代次校验与回填必须在同一把 CACHE 锁内完成：否则 invalidate 可能恰好
+    // 卡在两者之间（清空后旧 raw 又带着新时间戳写回，最多 2s 读到旧状态）
+    if let Ok(mut guard) = PLUGINS_LIST_CACHE.lock() {
+        if PLUGINS_LIST_GEN.load(std::sync::atomic::Ordering::SeqCst) == gen {
+            *guard = Some((std::time::Instant::now(), raw.clone()));
+        }
+    }
+    Ok(raw)
+}
+
+/// 失效 plugins 列表缓存（plugin 安装/开关后必须调用，避免读到旧状态）
+pub(crate) fn invalidate_plugins_list_cache() {
+    // 持锁自增代次 + 清空：与 plugins_list_json 的"校验后回填"互斥
+    if let Ok(mut guard) = PLUGINS_LIST_CACHE.lock() {
+        PLUGINS_LIST_GEN.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        *guard = None;
     }
 }
 
@@ -2556,8 +2656,8 @@ struct CliPluginInfo {
 
 /// 获取所有 Plugins（使用 CLI 命令），包含内部 skills/agents
 pub fn get_all_plugins(project_path: &str) -> Result<Vec<PluginInfo>> {
-    // 使用 CLI 命令获取 plugin 信息
-    let output = run_claude_command("plugins list --json")?;
+    // 使用 CLI 命令获取 plugin 信息（短 TTL 缓存，见 plugins_list_json）
+    let output = plugins_list_json()?;
     let cli_plugins: Vec<CliPluginInfo> =
         serde_json::from_str(&output).context("Failed to parse plugins list JSON")?;
 
@@ -2823,12 +2923,217 @@ fn validate_simple_name(name: &str) -> Result<()> {
     Ok(())
 }
 
+// ---------- 路径项与符号链接工具 ----------
+//
+// 背景：用户级 skill/agent 常以**符号链接**安装（macOS/Linux 常见，尤其
+// `~/.claude/skills/x -> ../../.agents/skills/x` 这类相对链接）。开关实现必须
+// 区分"链接本身"与"链接目标"，且存在性判定不能跟随链接——否则相对链接被 move
+// 到 disabled 目录后目标失效，备份既扫不到也恢复不了（历史事故）。
+
+/// 判断目录项是否"存在"——**不跟随**符号链接。
+/// `Path::exists()` 对断链符号链接返回 false，会让备份从 UI 消失且无法恢复。
+pub(crate) fn path_entry_exists(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok()
+}
+
+/// 是否为断链符号链接（链接本身存在，但目标解析不到）
+pub(crate) fn is_broken_symlink(path: &Path) -> bool {
+    match fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => fs::metadata(path).is_err(),
+        _ => false,
+    }
+}
+
+/// 目录项是否可视为用户级资源：真实目录或符号链接（含断链）
+fn is_dir_or_link(path: &Path) -> bool {
+    fs::symlink_metadata(path)
+        .map(|meta| meta.is_dir() || meta.file_type().is_symlink())
+        .unwrap_or(false)
+}
+
+/// 词法归一化路径（不触碰文件系统，可用于断链目标）：折叠 "." 与 ".."。
+/// 前导 ".." 单独保留——不能把已压入的 ".." 当成普通组件再弹掉
+/// （否则相对路径 `a/../../..` 会被错误折成空）。
+pub(crate) fn normalize_lexical(path: &Path) -> PathBuf {
+    let mut out: Vec<Component> = Vec::new();
+    for comp in path.components() {
+        match comp {
+            Component::CurDir => {}
+            Component::ParentDir => match out.last() {
+                Some(Component::Normal(_)) => {
+                    out.pop();
+                }
+                // 相对路径的 ".." 无法再回退：累积保留
+                Some(Component::ParentDir) | None if !path.is_absolute() => out.push(comp),
+                // 绝对路径回到根后忽略多余 ".."
+                _ => {}
+            },
+            other => out.push(other),
+        }
+    }
+    let mut result = PathBuf::new();
+    for comp in out {
+        result.push(comp.as_os_str());
+    }
+    result
+}
+
+/// 目录的真实路径（穿透祖先符号链接）。相对链接里的 ".." 由内核按**真实目录**
+/// 解析，词法拼接会得到错误结果（如 `~/.claude` 本身是 dotfiles 符号链接）。
+/// 目录不存在/不可解析时退回原路径。
+fn canonical_dir(dir: &Path) -> PathBuf {
+    fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf())
+}
+
+/// 计算 from_dir → to 的相对路径（两者需为绝对路径）；无有效结果为 None
+fn relative_path(from_dir: &Path, to: &Path) -> Option<PathBuf> {
+    let from = normalize_lexical(from_dir);
+    let to = normalize_lexical(to);
+    if !from.is_absolute() || !to.is_absolute() {
+        return None;
+    }
+    let from_comps: Vec<_> = from.components().collect();
+    let to_comps: Vec<_> = to.components().collect();
+    let common = from_comps
+        .iter()
+        .zip(to_comps.iter())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let mut out = PathBuf::new();
+    for _ in common..from_comps.len() {
+        out.push("..");
+    }
+    for comp in to_comps.iter().skip(common) {
+        out.push(comp.as_os_str());
+    }
+    if out.as_os_str().is_empty() {
+        None
+    } else {
+        Some(out)
+    }
+}
+
+/// 删除一个目录项（不跟随符号链接：链接本身被删除）。
+/// 目录符号链接在 Windows 上必须用 remove_dir，这里做双路兜底。
+fn remove_entry(path: &Path) -> std::io::Result<()> {
+    let meta = fs::symlink_metadata(path)?;
+    if meta.file_type().is_symlink() {
+        fs::remove_file(path).or_else(|_| fs::remove_dir(path))
+    } else if !meta.is_dir() {
+        fs::remove_file(path)
+    } else {
+        fs::remove_dir_all(path)
+    }
+}
+
+#[cfg(unix)]
+fn create_symlink(target: &Path, link: &Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(target, link)
+}
+
+#[cfg(windows)]
+fn create_symlink(target: &Path, link: &Path) -> std::io::Result<()> {
+    // 目标可能是相对路径：按链接所在目录解析后判断目录/文件类型
+    let resolved = match link.parent() {
+        Some(dir) if !target.is_absolute() => dir.join(target),
+        _ => target.to_path_buf(),
+    };
+    if resolved.is_dir() {
+        std::os::windows::fs::symlink_dir(target, link)
+    } else {
+        std::os::windows::fs::symlink_file(target, link)
+    }
+}
+
+/// 在 dst 处重建符号链接，保持"解析后目标不变"。
+/// 相对链接按 dst 所在目录**重算**相对路径（否则搬进 disabled 目录即断链）；
+/// 绝对链接原样保留。返回写入的新目标文本。
+fn relocate_symlink(src: &Path, dst: &Path) -> std::io::Result<PathBuf> {
+    let target = fs::read_link(src)?;
+    let new_target = if target.is_absolute() {
+        target
+    } else {
+        // 内核按"链接所在目录的真实路径"解析相对目标（祖先若为符号链接——
+        // 如 `~/.claude -> ~/dotfiles/claude`——词法拼接会得到不存在的路径）。
+        let src_dir = canonical_dir(src.parent().unwrap_or_else(|| Path::new(".")));
+        let dst_dir = canonical_dir(dst.parent().unwrap_or_else(|| Path::new(".")));
+        let resolved = if fs::metadata(src).is_err() {
+            // 源链接已断链：可能是历史 bug 留下的备份（相对文本原本相对恢复目标
+            // 目录生成）。优先按目标目录重新解析——命中则顺手修复该备份。
+            let via_dst = normalize_lexical(&dst_dir.join(&target));
+            if fs::metadata(&via_dst).is_ok() {
+                via_dst
+            } else {
+                normalize_lexical(&src_dir.join(&target))
+            }
+        } else {
+            normalize_lexical(&src_dir.join(&target))
+        };
+        relative_path(&dst_dir, &resolved).unwrap_or(resolved)
+    };
+    // 目标位残留（历史断链备份）先清掉，避免 create 报 EEXIST
+    if path_entry_exists(dst) {
+        remove_entry(dst)?;
+    }
+    create_symlink(&new_target, dst)?;
+    Ok(new_target)
+}
+
+/// 移动目录项：符号链接按"目标不变"重建，其余走 rename（跨卷回退 copy+remove）。
+/// 调用方负责冲突判定；这里只清理目标位的断链残留。
+fn move_entry(src: &Path, dst: &Path) -> std::io::Result<()> {
+    let meta = fs::symlink_metadata(src)?;
+    if meta.file_type().is_symlink() {
+        match relocate_symlink(src, dst) {
+            Ok(_) => {
+                // 链接已在新位置建好，删除原链接；失败则回滚，避免出现双份
+                if let Err(e) = fs::remove_file(src).or_else(|_| fs::remove_dir(src)) {
+                    let _ = remove_entry(dst);
+                    return Err(e);
+                }
+                return Ok(());
+            }
+            Err(e) => {
+                // 无法重建（如 Windows 无权限）：退回 rename 旧行为。
+                // 绝对链接仍可用；相对链接会断，但至少不阻断用户操作。
+                log::warn!(
+                    "[Store] Rebuild symlink failed ({}), falling back to rename: {} -> {}",
+                    e,
+                    src.display(),
+                    dst.display()
+                );
+            }
+        }
+    }
+
+    if path_entry_exists(dst) {
+        remove_entry(dst)?;
+    }
+
+    match fs::rename(src, dst) {
+        Ok(()) => Ok(()),
+        Err(e) if e.raw_os_error() == Some(17) || e.raw_os_error() == Some(18) => {
+            // 跨卷（EXDEV/EEXIST 兼容旧逻辑）：copy + remove。
+            // 复制失败时清掉半成品，避免留下"半个备份"阻塞后续开关。
+            if let Err(copy_err) = copy_dir_recursive(src, dst) {
+                let _ = remove_entry(dst);
+                return Err(std::io::Error::other(copy_err.to_string()));
+            }
+            if src.is_dir() {
+                fs::remove_dir_all(src)
+            } else {
+                fs::remove_file(src)
+            }
+        }
+        Err(e) => Err(e),
+    }
+}
+
 // ---------- Skill（目录移动）----------
 
 /// 切换用户级 skill 启用状态（公开 API）
 pub fn set_skill_enabled(name: &str, enabled: bool) -> Result<()> {
-    let home = dirs::home_dir().context("Home directory not found")?;
-    let claude_skills = home.join(".claude").join("skills");
+    let claude_skills = claude_config_dir()?.join("skills");
     let disabled_skills = get_disabled_subdir("skills")?;
     set_skill_enabled_in(&claude_skills, &disabled_skills, name, enabled)
 }
@@ -2845,24 +3150,27 @@ pub(crate) fn set_skill_enabled_in(
     let dst = disabled_base.join(name);
 
     let (from, to, op) = if enabled {
-        if !dst.exists() {
+        // 存在性一律用 symlink_metadata：断链备份也算"存在"，否则永远恢复不了
+        if !path_entry_exists(&dst) {
             bail!("Skill '{}' is not disabled (no backup found)", name);
         }
-        if src.exists() {
+        // active 侧的断链残留对列表不可见，直接覆盖——否则会永久阻塞恢复
+        if path_entry_exists(&src) && !is_broken_symlink(&src) {
             bail!("Skill '{}' already exists in active directory (conflict)", name);
         }
         (dst, src, "enable")
     } else {
-        if !src.exists() {
+        if !path_entry_exists(&src) {
             bail!("Skill '{}' not found in active directory", name);
         }
-        if dst.exists() {
+        // 只有"有效备份"才算冲突；断链是历史 bug 的产物，直接覆盖以恢复可用
+        if path_entry_exists(&dst) && !is_broken_symlink(&dst) {
             bail!("Skill '{}' already disabled (backup exists)", name);
         }
         (src, dst, "disable")
     };
 
-    if let Err(e) = fs::rename(&from, &to) {
+    if let Err(e) = move_entry(&from, &to) {
         // Windows：skill 目录被运行中的进程占用（典型：Claude Code 会话已加载
         // 该 skill，目录句柄未共享删除）→ 给出可行动的提示而非裸 os error
         if is_dir_busy_error(&e) {
@@ -2872,25 +3180,11 @@ pub(crate) fn set_skill_enabled_in(
                 name
             );
         }
-        // 跨卷时 rename 可能失败，回退到 copy + remove
-        if e.raw_os_error() == Some(17) || e.raw_os_error() == Some(18) {
-            copy_dir_recursive(&from, &to)
-                .with_context(|| format!("Failed to {} skill '{}'", op, name))?;
-            if from.is_dir() {
-                fs::remove_dir_all(&from)
-                    .with_context(|| format!("Failed to {} skill '{}'", op, name))?;
-            } else {
-                fs::remove_file(&from)
-                    .with_context(|| format!("Failed to {} skill '{}'", op, name))?;
-            }
-        } else {
-            // 消息带上底层原因：错误经 anyhow to_string 只显最外层 context，
-            // 不带 (e) 时 os error（如拒绝访问的具体码）在链路中丢失
-            let cause = e.to_string();
-            return Err(e).with_context(move || {
-                format!("Failed to {} skill '{}' ({})", op, name, cause)
-            });
-        }
+        // 消息带上底层原因：错误经 anyhow to_string 只显最外层 context，
+        // 不带 (e) 时 os error（如拒绝访问的具体码）在链路中丢失
+        let cause = e.to_string();
+        return Err(e)
+            .with_context(move || format!("Failed to {} skill '{}' ({})", op, name, cause));
     }
     Ok(())
 }
@@ -2920,10 +3214,55 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
 
 /// 切换用户级 agent 启用状态（公开 API）
 pub fn set_agent_enabled(name: &str, enabled: bool) -> Result<()> {
-    let home = dirs::home_dir().context("Home directory not found")?;
-    let claude_agents = home.join(".claude").join("agents");
+    let claude_agents = claude_config_dir()?.join("agents");
     let disabled_agents = get_disabled_subdir("agents")?;
     set_agent_enabled_in(&claude_agents, &disabled_agents, name, enabled)
+}
+
+/// 在目录中按"frontmatter name 或文件名 stem"定位 agent 文件。
+/// 列表展示的是 frontmatter 名，直接拼 `<name>.md` 会在两者不一致时误报 not found；
+/// 返回真实文件路径，移动时沿用其文件名（保证 enable/disable 往返不改名）。
+fn find_agent_file(dir: &Path, name: &str) -> Result<Option<PathBuf>> {
+    if !dir.exists() {
+        return Ok(None);
+    }
+    // 不能先直查 `<name>.md`：列表展示的是 frontmatter name，若 `bar.md` 的
+    // frontmatter 是 `baz`、`foo.md` 的 frontmatter 是 `bar`，直查会把 "bar"
+    // 错定位到 `bar.md`（该 agent 实际叫 baz）。因此统一扫描，并让
+    // frontmatter 命中优先于文件名命中。
+    let mut fm_matches = Vec::new();
+    let mut stem_matches = Vec::new();
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.extension().map(|e| e == "md").unwrap_or(false) {
+                continue;
+            }
+            let stem = path
+                .file_stem()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_default();
+            match parse_agent_frontmatter(&path).map(|(n, _, _)| n) {
+                Some(fm) if fm == name => fm_matches.push(path),
+                // 有 frontmatter 名却不是用户点的那个 agent：它代表别的条目，
+                // 文件名不构成身份依据（否则会移动错文件）
+                Some(_) => {}
+                // 无 frontmatter：只能退回文件名匹配（与列表的 fallback 一致）
+                None if stem == name => stem_matches.push(path),
+                None => {}
+            }
+        }
+    }
+    let mut matches = if fm_matches.is_empty() {
+        stem_matches
+    } else {
+        fm_matches
+    };
+    match matches.len() {
+        0 => Ok(None),
+        1 => Ok(matches.pop()),
+        _ => bail!("Agent '{}' is ambiguous (multiple matching files)", name),
+    }
 }
 
 pub(crate) fn set_agent_enabled_in(
@@ -2933,29 +3272,36 @@ pub(crate) fn set_agent_enabled_in(
     enabled: bool,
 ) -> Result<()> {
     validate_simple_name(name)?;
-    let filename = format!("{}.md", name);
-    let src = claude_base.join(&filename);
-    let dst = disabled_base.join(&filename);
 
-    let (from, to, op) = if enabled {
-        if !dst.exists() {
-            bail!("Agent '{}' is not disabled", name);
-        }
-        if src.exists() {
-            bail!("Agent '{}' already exists (conflict)", name);
-        }
-        (dst, src, "enable")
+    let (from_dir, to_dir, op) = if enabled {
+        (disabled_base, claude_base, "enable")
     } else {
-        if !src.exists() {
-            bail!("Agent '{}' not found", name);
-        }
-        if dst.exists() {
-            bail!("Agent '{}' already disabled", name);
-        }
-        (src, dst, "disable")
+        (claude_base, disabled_base, "disable")
     };
 
-    fs::rename(&from, &to).with_context(|| format!("Failed to {} agent '{}'", op, name))?;
+    let from = find_agent_file(from_dir, name)?
+        .with_context(|| format!("Agent '{}' not found", name))?;
+    let filename = from
+        .file_name()
+        .with_context(|| format!("Invalid agent path for '{}'", name))?
+        .to_owned();
+    let to = to_dir.join(&filename);
+
+    // 存在性用 symlink_metadata：断链链接也算存在（否则永远恢复不了）。
+    // 目标位是断链残留时直接覆盖（active 侧残留对列表不可见，不放行会永久阻塞恢复）
+    if path_entry_exists(&to) && !is_broken_symlink(&to) {
+        if enabled {
+            bail!("Agent '{}' already exists (conflict)", name);
+        }
+        bail!("Agent '{}' already disabled", name);
+    }
+
+    if let Err(e) = move_entry(&from, &to) {
+        // 与 skill 一致：带上底层 os 原因（anyhow 只显最外层 context）
+        let cause = e.to_string();
+        return Err(e)
+            .with_context(move || format!("Failed to {} agent '{}' ({})", op, name, cause));
+    }
     Ok(())
 }
 
@@ -3066,8 +3412,10 @@ pub fn set_plugin_enabled(plugin_id: &str, enabled: bool) -> Result<()> {
     }
     let action = if enabled { "enable" } else { "disable" };
     let args = format!("plugin {} {}", action, plugin_id);
-    run_claude_command_strict(&args)
-        .with_context(|| format!("Failed to {} plugin '{}'", action, plugin_id))?;
+    // 无论成败都失效缓存：CLI 可能已部分写入，且失败后下次读取必须反映真实状态
+    let result = run_claude_command_strict(&args);
+    invalidate_plugins_list_cache();
+    result.with_context(|| format!("Failed to {} plugin '{}'", action, plugin_id))?;
     Ok(())
 }
 

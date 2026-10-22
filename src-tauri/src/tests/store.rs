@@ -921,6 +921,330 @@ fn SetAgentEnabled_PathTraversal_001() {
     assert!(r.is_err());
 }
 
+// 列表用 frontmatter name，文件名可与它不同：禁用/启用都必须找到真实文件
+// 并按原文件名往返（否则报 not found，开关"无效"）
+#[test]
+fn SetAgentEnabled_FrontmatterNameDiffers_RoundTrip_001() {
+    let active = tempfile::tempdir().unwrap();
+    let disabled = tempfile::tempdir().unwrap();
+    std::fs::write(
+        active.path().join("reviewer.md"),
+        "---\nname: code-reviewer\ndescription: x\n---\n",
+    )
+    .unwrap();
+
+    set_agent_enabled_in(active.path(), disabled.path(), "code-reviewer", false).unwrap();
+    assert!(!active.path().join("reviewer.md").exists());
+    assert!(
+        disabled.path().join("reviewer.md").exists(),
+        "禁用后应保留原文件名"
+    );
+
+    set_agent_enabled_in(active.path(), disabled.path(), "code-reviewer", true).unwrap();
+    assert!(active.path().join("reviewer.md").exists());
+    assert!(!disabled.path().join("reviewer.md").exists());
+}
+
+// frontmatter 名与别的文件名撞车：必须按 frontmatter 身份移动，不能直查文件名
+#[test]
+fn SetAgentEnabled_FrontmatterCollision_MovesCorrectFile_001() {
+    let active = tempfile::tempdir().unwrap();
+    let disabled = tempfile::tempdir().unwrap();
+    // foo.md 的 frontmatter name 是 bar；bar.md 的 frontmatter name 是 baz
+    std::fs::write(
+        active.path().join("foo.md"),
+        "---\nname: bar\ndescription: x\n---\n",
+    )
+    .unwrap();
+    std::fs::write(
+        active.path().join("bar.md"),
+        "---\nname: baz\ndescription: y\n---\n",
+    )
+    .unwrap();
+
+    set_agent_enabled_in(active.path(), disabled.path(), "bar", false).unwrap();
+
+    assert!(
+        disabled.path().join("foo.md").exists(),
+        "应移动 frontmatter 名为 bar 的 foo.md"
+    );
+    assert!(
+        active.path().join("bar.md").exists(),
+        "frontmatter 名为 baz 的 bar.md 不能被移动"
+    );
+}
+
+// 多个文件声明同一 frontmatter 名 → 拒绝（不能静默挑一个移动）
+#[test]
+fn SetAgentEnabled_AmbiguousName_Rejected_001() {
+    let active = tempfile::tempdir().unwrap();
+    let disabled = tempfile::tempdir().unwrap();
+    for file in ["a.md", "b.md"] {
+        std::fs::write(
+            active.path().join(file),
+            "---\nname: dup\ndescription: x\n---\n",
+        )
+        .unwrap();
+    }
+
+    let r = set_agent_enabled_in(active.path(), disabled.path(), "dup", false);
+    assert!(r.is_err());
+}
+
+// 词法归一化：相对路径的前导 ".." 不能被后续 ".." 误折叠
+#[test]
+fn NormalizeLexical_RelativeParent_001() {
+    use std::path::Path;
+
+    for (input, expected) in [
+        ("a/../../..", "../.."),
+        ("a/b/../c", "a/c"),
+        ("../a/..", ".."),
+        ("./a/./b", "a/b"),
+        ("/a/b/../../c", "/c"),
+    ] {
+        assert_eq!(
+            crate::store::normalize_lexical(Path::new(input)),
+            Path::new(expected),
+            "input = {}",
+            input
+        );
+    }
+}
+
+// 稳定按名称排序：启用状态不参与排序键，开关前后条目位置不变
+#[test]
+fn SortByName_StableOrder_001() {
+    let mut items = vec![("b", false), ("a", true), ("c", false)];
+
+    crate::store::sort_by_name(&mut items, |x| x.0);
+
+    let names: Vec<&str> = items.iter().map(|x| x.0).collect();
+    assert_eq!(names, vec!["a", "b", "c"]);
+    // enabled 不参与排序：a 仍为 true、b/c 仍为 false
+    assert_eq!(items[0].1, true);
+    assert_eq!(items[1].1, false);
+
+    // 稳定排序：同名项保持原有相对顺序（active 在前、disabled 在后）
+    let mut same_name = vec![("a", true), ("a", false)];
+    crate::store::sort_by_name(&mut same_name, |x| x.0);
+    assert_eq!(same_name, vec![("a", true), ("a", false)]);
+}
+
+// ==================== 符号链接（相对链接）往返 ====================
+//
+// 回归：`~/.claude/skills/x -> ../../.agents/skills/x` 这类相对链接被 rename
+// 搬进 disabled 目录后目标失效，备份既扫不到也恢复不了。
+
+/// 构造 active/disabled 与链接目标：active 下的 `<name>` 是指向 `../../agents/<name>` 的相对链接
+#[cfg(unix)]
+fn setup_relative_symlink_skill() -> (
+    tempfile::TempDir,
+    std::path::PathBuf,
+    std::path::PathBuf,
+) {
+    let root = tempfile::tempdir().unwrap();
+    let target = root.path().join("agents").join("deploy");
+    std::fs::create_dir_all(&target).unwrap();
+    std::fs::write(target.join("SKILL.md"), "---\ndescription: x\n---\n").unwrap();
+
+    let active = root.path().join("claude").join("skills");
+    let disabled = root.path().join("ccbox").join("disabled").join("skills");
+    std::fs::create_dir_all(&active).unwrap();
+    std::fs::create_dir_all(&disabled).unwrap();
+    std::os::unix::fs::symlink("../../agents/deploy", active.join("deploy")).unwrap();
+    (root, active, disabled)
+}
+
+#[cfg(unix)]
+#[test]
+fn SetSkillEnabled_SymlinkRelative_RoundTrip_001() {
+    let (_root, active, disabled) = setup_relative_symlink_skill();
+
+    set_skill_enabled_in(&active, &disabled, "deploy", false).unwrap();
+    let moved = disabled.join("deploy");
+    assert!(
+        std::fs::symlink_metadata(&moved)
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "禁用后应仍是符号链接（不能把目标目录整体搬走）"
+    );
+    assert!(
+        moved.join("SKILL.md").exists(),
+        "禁用后链接必须仍可解析（相对目标需按新位置重算）"
+    );
+
+    set_skill_enabled_in(&active, &disabled, "deploy", true).unwrap();
+    assert!(active.join("deploy").join("SKILL.md").exists());
+    assert!(!crate::store::path_entry_exists(&moved));
+}
+
+// 历史 bug 产物：disabled 里的断链相对链接仍能从 GUI 恢复。
+// 链接文本原本相对 active 目录生成 → 恢复时按目标目录解析即修复。
+#[cfg(unix)]
+#[test]
+fn SetSkillEnabled_BrokenBackup_Recoverable_001() {
+    let root = tempfile::tempdir().unwrap();
+    let target = root.path().join("agents").join("deploy");
+    std::fs::create_dir_all(&target).unwrap();
+    std::fs::write(target.join("SKILL.md"), "x").unwrap();
+
+    let active = root.path().join("claude").join("skills");
+    let disabled = root.path().join("ccbox").join("disabled").join("skills");
+    std::fs::create_dir_all(&active).unwrap();
+    std::fs::create_dir_all(&disabled).unwrap();
+    // 相对文本本应相对 active 解析，被搬进 disabled 后断链
+    std::os::unix::fs::symlink("../../agents/deploy", disabled.join("deploy")).unwrap();
+    assert!(crate::store::is_broken_symlink(&disabled.join("deploy")));
+
+    set_skill_enabled_in(&active, &disabled, "deploy", true).unwrap();
+
+    assert!(
+        active.join("deploy").join("SKILL.md").exists(),
+        "断链备份恢复后必须可解析"
+    );
+}
+
+// 再次禁用时，目标位的断链残留直接覆盖（否则报 already disabled，开关无效）
+#[cfg(unix)]
+#[test]
+fn SetSkillEnabled_Disable_ReplacesBrokenBackup_001() {
+    let root = tempfile::tempdir().unwrap();
+    let active = root.path().join("claude").join("skills");
+    let disabled = root.path().join("ccbox").join("disabled").join("skills");
+    std::fs::create_dir_all(active.join("deploy")).unwrap();
+    std::fs::write(active.join("deploy").join("SKILL.md"), "x").unwrap();
+    std::fs::create_dir_all(&disabled).unwrap();
+    std::os::unix::fs::symlink("../../nowhere", disabled.join("deploy")).unwrap();
+
+    set_skill_enabled_in(&active, &disabled, "deploy", false).unwrap();
+
+    assert!(disabled.join("deploy").join("SKILL.md").exists());
+}
+
+// 祖先目录本身是符号链接（dotfiles/stow 常见）：相对链接必须按真实目录解析，
+// 词法拼接会算出不存在的路径
+#[cfg(unix)]
+#[test]
+fn SetSkillEnabled_SymlinkAncestor_RoundTrip_001() {
+    let root = tempfile::tempdir().unwrap();
+    // 真实布局：<root>/real/claude/skills + <root>/real/.agents/skills/deploy
+    let real_claude = root.path().join("real").join("claude");
+    let target = root
+        .path()
+        .join("real")
+        .join(".agents")
+        .join("skills")
+        .join("deploy");
+    std::fs::create_dir_all(&target).unwrap();
+    std::fs::write(target.join("SKILL.md"), "---\ndescription: x\n---\n").unwrap();
+    std::fs::create_dir_all(real_claude.join("skills")).unwrap();
+
+    // <root>/home/claude -> <root>/real/claude（配置目录本身是链接）
+    let home = root.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    std::os::unix::fs::symlink(&real_claude, home.join("claude")).unwrap();
+    let active = home.join("claude").join("skills");
+    // 链接文本相对真实目录：real/claude/skills -> ../../.agents/skills/deploy
+    std::os::unix::fs::symlink("../../.agents/skills/deploy", active.join("deploy")).unwrap();
+    assert!(
+        active.join("deploy").join("SKILL.md").exists(),
+        "前置：链接应可解析"
+    );
+
+    let disabled = root.path().join("ccbox").join("disabled").join("skills");
+    std::fs::create_dir_all(&disabled).unwrap();
+
+    set_skill_enabled_in(&active, &disabled, "deploy", false).unwrap();
+    assert!(
+        disabled.join("deploy").join("SKILL.md").exists(),
+        "祖先为符号链接时，禁用后链接仍须可解析"
+    );
+
+    set_skill_enabled_in(&active, &disabled, "deploy", true).unwrap();
+    assert!(
+        active.join("deploy").join("SKILL.md").exists(),
+        "恢复后链接仍须可解析"
+    );
+}
+
+// disabled 侧祖先目录也是符号链接时同样要按真实目录重算（与 src 侧对称）
+#[cfg(unix)]
+#[test]
+fn SetSkillEnabled_SymlinkDstAncestor_RoundTrip_001() {
+    let root = tempfile::tempdir().unwrap();
+    let real = root.path().join("real");
+    let target = real.join(".agents").join("skills").join("deploy");
+    std::fs::create_dir_all(&target).unwrap();
+    std::fs::write(target.join("SKILL.md"), "x").unwrap();
+    let active = real.join("claude").join("skills");
+    std::fs::create_dir_all(&active).unwrap();
+    std::os::unix::fs::symlink("../../.agents/skills/deploy", active.join("deploy")).unwrap();
+    // <root>/ccbox -> <root>/real/ccbox（disabled 侧祖先为链接）
+    std::fs::create_dir_all(real.join("ccbox").join("disabled").join("skills")).unwrap();
+    std::os::unix::fs::symlink(real.join("ccbox"), root.path().join("ccbox")).unwrap();
+    let disabled = root.path().join("ccbox").join("disabled").join("skills");
+
+    set_skill_enabled_in(&active, &disabled, "deploy", false).unwrap();
+    assert!(
+        disabled.join("deploy").join("SKILL.md").exists(),
+        "disabled 侧祖先为符号链接时链接仍须可解析"
+    );
+
+    set_skill_enabled_in(&active, &disabled, "deploy", true).unwrap();
+    assert!(active.join("deploy").join("SKILL.md").exists());
+}
+
+// 启用时允许覆盖 active 侧的断链残留（该残留对列表不可见，否则永久阻塞恢复）
+#[cfg(unix)]
+#[test]
+fn SetSkillEnabled_Enable_ReplacesBrokenActiveLeftover_001() {
+    let active = tempfile::tempdir().unwrap();
+    let disabled = tempfile::tempdir().unwrap();
+    std::os::unix::fs::symlink("../../nowhere", active.path().join("deploy")).unwrap();
+    std::fs::create_dir_all(disabled.path().join("deploy")).unwrap();
+    std::fs::write(disabled.path().join("deploy").join("SKILL.md"), "x").unwrap();
+
+    set_skill_enabled_in(active.path(), disabled.path(), "deploy", true).unwrap();
+
+    assert!(active.path().join("deploy").join("SKILL.md").exists());
+}
+
+// disabled 扫描必须列出断链（否则从列表消失，无法恢复）；描述为 None
+#[cfg(unix)]
+#[test]
+fn ScanDisabledSkills_BrokenSymlink_Listed_001() {
+    let dir = tempfile::tempdir().unwrap();
+    std::os::unix::fs::symlink("../../nowhere", dir.path().join("deploy")).unwrap();
+
+    let items = crate::store::scan_disabled_skills(dir.path());
+
+    assert_eq!(items.len(), 1, "断链备份必须列出");
+    assert_eq!(items[0].0, "deploy");
+    assert!(items[0].1.is_none());
+}
+
+// active 扫描跳过断链（CLI 也加载不到），但正常相对链接必须可见
+#[cfg(unix)]
+#[test]
+fn ScanActiveSkills_SymlinkVisibility_001() {
+    let root = tempfile::tempdir().unwrap();
+    let target = root.path().join("agents").join("deploy");
+    std::fs::create_dir_all(&target).unwrap();
+    std::fs::write(target.join("SKILL.md"), "---\ndescription: ok\n---\n").unwrap();
+    let active = root.path().join("claude").join("skills");
+    std::fs::create_dir_all(&active).unwrap();
+    std::os::unix::fs::symlink("../../agents/deploy", active.join("deploy")).unwrap();
+    std::os::unix::fs::symlink("../../nowhere", active.join("broken")).unwrap();
+
+    let items = crate::store::scan_active_skills(&active);
+
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].0, "deploy");
+    assert_eq!(items[0].1.as_deref(), Some("ok"));
+}
+
 // ==================== set_mcp_server_enabled_in ====================
 
 // 禁用 MCP：从 ~/.claude.json::mcpServers.<name> 剪切到 backup，其他字段保留

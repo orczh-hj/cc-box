@@ -162,8 +162,10 @@ npm run release -- --bump patch --notes "### Features\n- Add feature"
 - **远程操作一致性**：远程（手机）操作与桌面直接操作效果一致——桌面端原生实现单点执行，远程只是触发器 + 事件同步的镜像，不另写一份执行逻辑
 - **避免重复实现**：同一逻辑只留一份（如 `spawn_pty_core`、`apply_hook_event`）；两端各自需要的状态靠事件同步（`session-renamed`、`hook-status`），不靠复制代码
 - **离散操作必广播**：用户离散操作（建/关/重命名会话）经 Rust 广播事件让对端走同一个原生函数；远程安全守卫（白名单/并发上限/独占）作为前置检查包住共用核心，不因统一而放宽
+- **用户级资源开关（skills/agents/mcp/plugins）**：后端单点 `store.rs` 的 `set_*_enabled`（桌面/远程同一函数）。skill/agent 禁用=移入 `~/.cc-box/disabled/<category>`，必须 **symlink 感知**（相对链接按目标位置重算、存在性用 `symlink_metadata`、disabled 扫描列出断链以便恢复）；前端 `state-changed` 刷新必须**静默**（`loadXxx(cwd, { silent: true })`，不切 loading 分支，否则整列表卸载重建）；**本端写回环必须抑制**（`markSelfWrite` 登记 → `applyStateSection` 消费并跳过该 section，条目原地响应；plugin 仍级联子项），后端列表按名称**稳定排序**（顺序与 enabled 解耦）；开关按 `(sourceType=user, name)` 定位，禁止裸 name
 - 每次修改后：通用规则速查更新到 CLAUDE.md，定向细节更新到 docs/development.md 或对应正本文档
 - Rust 结构体返回前端时统一使用 `#[serde(rename_all = "camelCase")]`
+- **生产构建安全**：`npm run build` 末尾自动跑 `scripts/verify-dist-safety.ts` 扫描 dist 坏产物；`scripts/lib/patch-xterm-enum.ts` 修补 xterm 死枚举 IIFE 的 esbuild 压缩缺陷（终端写队列永久卡死的根因）。**该类问题 dev 不复现**，升级 xterm/esbuild/Vite 后必须跑生产构建；整个构建零命中告警时复核补丁 → [docs/development.md](docs/development.md)「生产构建安全」
 - 添加新 Tauri Command：commands.rs 定义 → lib.rs 注册 → api/tauri.ts 封装（并完成下方检查清单登记）
 - 添加新 Tauri JS API 调用时，必须确认 `capabilities/default.json` 中有对应权限（`<plugin>:default` 不包含大部分写操作，需显式添加）→ 详见 [docs/capabilities.md](docs/capabilities.md)
 

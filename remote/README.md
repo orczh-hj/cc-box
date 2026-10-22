@@ -55,7 +55,7 @@ remote handler ──► pty.rs（tee 输出 / write 注入 / resize）
 | **事件单一出口** | `events.rs` 常量 + `emit_all`（Tauri emit + 远程广播二合一）；会话类事件 `remote_state::emit_event` / `emit_event_ex`（排除接管者）/ `emit_desktop_only` | 每个 emit 点手写两遍、事件名散落 |
 | **会话创建单一核心** | `pty::build_claude_args(resume, skip, custom_args)` 纯函数，session.create 与桌面 spawn 共用同一参数拼接规则 | 前端与 Rust 拼接规则两份漂移 |
 | **前端单一传输层** | `src/api/transport.ts` 三件套（接口 / tauri / remote），tauri.ts 与 provider.ts 导出签名不变，组件零感知环境 | 60 个 invoke 封装双轨 |
-| **Web UI 构建** | 一条 `vite build` 产出主应用 dist；静态服务收敛在共享 crate `remote/web-assets`（ServeDir 磁盘优先 + rust-embed 内嵌兜底），relay 与桌面 remote_server 共用同一实现，且支持磁盘目录热更（见 deploy.md 3.5「仅前端更新」） | 两端 UI 版本漂移、功能不对等、静态服务逻辑两份 |
+| **Web UI 构建** | 一条 `npm run build` 产出主应用 dist（含产物安全检查）；静态服务收敛在共享 crate `remote/web-assets`（ServeDir 磁盘优先 + rust-embed 内嵌兜底），relay 与桌面 remote_server 共用同一实现，且支持磁盘目录热更（见 deploy.md 3.5「仅前端更新」） | 两端 UI 版本漂移、功能不对等、静态服务逻辑两份 |
 | **接管状态机** | `active_view` 只在 Rust 一处判定，桌面遮罩/手机提示均由事件驱动渲染 | 多端状态不一致 |
 | **日志追踪** | 三端统一 `[remote]` 前缀 + conn_id + 消息 type，一眼定位断链环节 | 链路长难排查 |
 | **协议演进** | 中继不解析 payload，应用层升级只动桌面 + 手机两端，relay 二进制不用动 | 升级需全链路协同 |
@@ -77,7 +77,7 @@ remote/
 └── docs/                # protocol.md、deploy.md、manual-test-cases.md
 ```
 
-**Web UI 已统一**：不再有独立手机 Web UI（原 remote/web 删除）。浏览器访问的是主应用 UI（src/，Vue 3 + xterm.js），经 `src/api/transport.ts` 传输层自动切换到 WS 远程实现；构建即主应用 `vite build`，产物 dist 由 `remote/web-assets` crate 统一供给——环境变量指向的磁盘目录优先（`CC_BOX_RELAY_WEB_DIR` / `CC_BOX_WEB_DIR`，前端可独立 scp 更新免重编），未配置/未命中回退 rust-embed 编译期内嵌。
+**Web UI 已统一**：不再有独立手机 Web UI（原 remote/web 删除）。浏览器访问的是主应用 UI（src/，Vue 3 + xterm.js），经 `src/api/transport.ts` 传输层自动切换到 WS 远程实现；构建即主应用 `npm run build`，产物 dist 由 `remote/web-assets` crate 统一供给——环境变量指向的磁盘目录优先（`CC_BOX_RELAY_WEB_DIR` / `CC_BOX_WEB_DIR`，前端可独立 scp 更新免重编），未配置/未命中回退 rust-embed 编译期内嵌。
 
 桌面侧模块（挂 `src-tauri/src/`，依赖 protocol crate）：
 

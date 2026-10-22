@@ -2,10 +2,13 @@ import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
 import { resolve } from 'path'
 import pkg from './package.json'
+import { patchXtermDeadEnumPlugin } from './scripts/lib/patch-xterm-enum'
 
 // https://vitejs.dev/config/
 export default defineConfig({
-  plugins: [vue()],
+  // patchXtermDeadEnumPlugin：修复 esbuild 压缩 xterm 死枚举 IIFE 时
+  // 产出未声明变量赋值、导致终端写队列永久卡死的问题（见插件注释）
+  plugins: [patchXtermDeadEnumPlugin(), vue()],
   resolve: {
     alias: {
       '@': resolve(__dirname, 'src')

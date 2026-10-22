@@ -24,6 +24,9 @@
       </button>
     </div>
 
+    <!-- 开关失败反馈（乐观更新已回滚；与 SkillItem 一致） -->
+    <div v-if="toggleError" class="agent-toggle-error" :title="toggleError">{{ toggleError }}</div>
+
     <!-- Agent Details (expanded) -->
     <div v-if="isExpanded" class="agent-details">
       <div v-if="agent.description" class="agent-description-full">
@@ -41,7 +44,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, onUnmounted } from 'vue'
 import { useI18n } from 'vue-i18n'
 import type { AgentInfo } from '@/types'
 import { sendTerminalCommand } from '@/composables/useTerminalCommand'
@@ -67,13 +70,23 @@ function emitUseAgent() {
   sendTerminalCommand(props.agent.invokeFormat)
 }
 
+/** 开关失败提示（5s 自动消失）：此前只 console.error，用户看到的是"操作无效" */
+const toggleError = ref('')
+let errorTimer: ReturnType<typeof setTimeout> | undefined
+
 async function onToggle(newValue: boolean) {
   try {
     await sidebarStore.toggleAgentEnabled(props.agent.name, newValue)
+    toggleError.value = ''
   } catch (err) {
     console.error('[AgentItem] toggle failed:', err)
+    toggleError.value = String(err)
+    clearTimeout(errorTimer)
+    errorTimer = setTimeout(() => { toggleError.value = '' }, 5000)
   }
 }
+
+onUnmounted(() => clearTimeout(errorTimer))
 </script>
 
 <style scoped>
@@ -90,6 +103,15 @@ async function onToggle(newValue: boolean) {
 
 .agent-item.disabled {
   opacity: 0.55;
+}
+
+.agent-toggle-error {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--danger-color, #e5484d);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .agent-item.disabled .agent-name {

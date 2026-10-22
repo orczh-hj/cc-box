@@ -14,6 +14,14 @@
         {{ t('editCommonConfig') }}
       </button>
       <button
+        v-if="isTauriEnv"
+        class="btn-secondary"
+        :disabled="openingUserConfig"
+        @click="handleOpenUserConfig"
+      >
+        {{ t('openUserConfig') }}
+      </button>
+      <button
         v-if="providersStore.hasCcSwitchDb"
         class="btn-secondary"
         @click="handleImportCcSwitch"
@@ -63,6 +71,7 @@
     <!-- 编辑面板 -->
     <ProviderEditPanel
       v-if="editingProvider"
+      :key="editingProvider.id"
       :provider="editingProvider"
       :common-config="providersStore.commonConfig"
       @close="handleEditClose"
@@ -112,6 +121,8 @@ import CommonConfigPanel from '../providers/CommonConfigPanel.vue'
 import ProviderEditPanel from '../providers/ProviderEditPanel.vue'
 import type { Provider, ProviderPreset } from '@/types/provider'
 import { useToast } from '@/composables/useToast'
+import { openClaudeUserSettings } from '@/api/provider'
+import { isTauriEnv } from '@/api/platform'
 
 const { t } = useI18n()
 const providersStore = useProvidersStore()
@@ -128,10 +139,25 @@ const providerSourceJson = ref<Record<string, any> | null>(null)
 const deleteConfirm = ref<Provider | null>(null)
 const testingId = ref<string | null>(null)
 const testResult = ref<{ success: boolean; message: string; latencyMs: number | null } | null>(null)
+const openingUserConfig = ref(false)
 
 onMounted(() => {
   providersStore.loadProvidersConfig()
 })
+
+/** 用系统默认程序打开用户级 Claude 配置（~/.claude/settings.json 或 CLAUDE_CONFIG_DIR 下） */
+async function handleOpenUserConfig() {
+  if (openingUserConfig.value) return
+  openingUserConfig.value = true
+  try {
+    await openClaudeUserSettings()
+  } catch (err) {
+    console.error('Open user config failed:', err)
+    toast.error(t('openUserConfigFailed', { error: String(err) }), 5000)
+  } finally {
+    openingUserConfig.value = false
+  }
+}
 
 async function handleActivate(id: string) {
   try {

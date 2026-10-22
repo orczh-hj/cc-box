@@ -80,6 +80,12 @@ pub fn run(initial_dir: Option<String>) {
         .setup(|app| {
             logger::init();
 
+            // Provider 配置一次性迁移（schema v1 → v2）。
+            // 放在启动阶段，保证读命令（含远程只读 RPC）不产生隐式写盘。
+            if let Err(e) = providers::ensure_providers_schema() {
+                log::error!("[providers] schema migration failed: {}", e);
+            }
+
             // macOS: 注册原生 Copy 菜单项，使 Cmd+C 在 WebView 中生效
             #[cfg(target_os = "macos")]
             {
@@ -234,6 +240,7 @@ pub fn run(initial_dir: Option<String>) {
             installer::download_and_install_git,
             // Provider Commands
             commands::get_providers_config,
+            commands::open_claude_user_settings,
             commands::save_providers_config,
             commands::activate_provider,
             commands::create_provider,

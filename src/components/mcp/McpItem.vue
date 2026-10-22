@@ -19,6 +19,9 @@
       {{ server.name }}
     </div>
 
+    <!-- 开关失败反馈（乐观更新已回滚；与 SkillItem 一致） -->
+    <div v-if="toggleError" class="mcp-toggle-error" :title="toggleError">{{ toggleError }}</div>
+
     <!-- Server Type & Status -->
     <div v-if="server.serverType || server.status" class="server-meta">
       <span v-if="server.serverType" class="server-type">{{ server.serverType }}</span>
@@ -124,7 +127,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, inject } from 'vue'
+import { ref, computed, inject, onUnmounted } from 'vue'
 import { useI18n } from 'vue-i18n'
 import type { McpServerInfo, McpServerDetail } from '@/types'
 import { getMcpServerDetail } from '@/api/tauri'
@@ -152,13 +155,23 @@ const isDisabled = computed(() => props.server.enabled === false)
 // 缓存注入（从父组件）
 const detailCache = inject<Map<string, McpServerDetail>>('mcpDetailCache', new Map())
 
+/** 开关失败提示（5s 自动消失）：此前只 console.error，用户看到的是"操作无效" */
+const toggleError = ref('')
+let toggleErrorTimer: ReturnType<typeof setTimeout> | undefined
+
 async function onToggle(newValue: boolean) {
   try {
     await sidebarStore.toggleMcpServerEnabled(props.server.name, newValue)
+    toggleError.value = ''
   } catch (err) {
     console.error('[McpItem] toggle failed:', err)
+    toggleError.value = String(err)
+    clearTimeout(toggleErrorTimer)
+    toggleErrorTimer = setTimeout(() => { toggleError.value = '' }, 5000)
   }
 }
+
+onUnmounted(() => clearTimeout(toggleErrorTimer))
 
 // 是否已连接
 const isConnected = computed(() => props.server.status?.includes('Connected'))
@@ -220,6 +233,15 @@ async function fetchDetail(force: boolean) {
 
 .mcp-item:hover {
   background: var(--hover-bg);
+}
+
+.mcp-toggle-error {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--danger-color, #e5484d);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .mcp-item.disabled {

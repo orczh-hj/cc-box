@@ -4,45 +4,60 @@ API Provider 配置管理，支持多厂商预设、自定义配置、通用参�
 
 数据结构兼容 [cc-switch](https://github.com/area44/cc-switch)，支持从 cc-switch 数据库导入。
 
-## 响应逻辑原则
+## 响应逻辑原则（schema v2：分层存储 + 读时合成）
 
-### 一、JSON 是唯一真相源
+### 一、分层模型
 
-ProviderEditPanel 中 `jsonContent` ref 是 settingsConfig 的唯一持有者。Env 表单只是 `env` 字段的结构化视图/编辑器，不持有独立状态。修改 JSON 只影响 env 展示，保存时直接写入全部内容。
+| 层级 | 来源 | 角色 |
+|------|------|------|
+| 第 3 层（最高） | `provider.settingsConfig` | Provider 显式覆盖（只存差异） |
+| 第 2 层 | `commonConfig.settings` | 通用配置默认值 |
+| 第 1 层 | `~/.claude/settings.json` 现状 | 用户配置底座（独有键全部保留） |
 
-### 二、JSON ↔ Env 双向实时同步
+- `effective = deepMerge(通用配置, Provider 覆盖层)`，**Provider 优先**。
+- 通用配置是否生效：`commonConfig.enabled && (meta.commonConfigEnabled ?? true)`。
+- `meta.commonConfigRemoved`（JSON Pointer 数组）可显式屏蔽某条继承项。
+- Claude Code 状态字段（`enabledPlugins` 等）不参与合成，始终由用户现状保留。
 
-| 方向 | 机制 |
-|------|------|
-| JSON → Env | `parsedConfig` computed 缓存 → `getEnvValue` 读取 |
-| Env → JSON | `setEnvValue` → 修改 parsedConfig → 序列化回 `jsonContent` |
+### 二、JSON 是唯一真相源（展示 effective）
 
-所有读取走 `parsedConfig` computed 缓存，禁止在渲染路径中重复 `JSON.parse`。
+ProviderEditPanel 的 `jsonContent` 持有当前展示内容：
+- 勾选"应用通用配置"时展示 `effective`（通用默认 + 覆盖层）；
+- 取消勾选时展示覆盖层本身。
+- Env 表单只是 `env` 字段的结构化视图，所有读取走 `parsedConfig` computed 缓存。
 
-### 三、勾选"应用通用配置" → 即时合并
+### 三、保存 = effective → 覆盖层
 
-勾选时立即执行 `deepMerge(parsedConfig, commonConfig.settings)`，将合并结果写入 `jsonContent`。用户可在 JSON 编辑器中看到并编辑合并后的完整内容。**合并发生在编辑时，不是激活时。**
+保存时计算 `overrides = diffAgainstCommon(effective, common)`：
+与通用配置相同的叶子不落盘（自动继承），不同的值写入 Provider。
+用户删除的继承项记录到 `meta.commonConfigRemoved`。
 
-### 四、取消勾选"应用通用配置" → 无操作
+### 四、勾选/取消可逆
 
-Provider 保留当前配置（含之前已合并的通用配置字段）。只更新 `meta.commonConfigEnabled = false`，不回退已合并的内容。
+- 勾选：把当前覆盖层展开为 effective（重新出现继承值）；
+- 取消：把 effective 还原为覆盖层（继承值隐藏）。
+- 通用配置从未物化进 Provider，因此取消勾选**完全可逆**，再次勾选即恢复。
+- 面板 dirty 时，外部通用配置更新**不覆盖**编辑器，只显示提示。
 
-### 五、通用配置修改 → 批量同步所有已勾选 Provider
+### 五、通用配置保存不再批量改写 Provider
 
-保存通用配置时，后端将新内容 `deepMerge` 到 **所有** `meta.commonConfigEnabled === true` 的 Provider 的 `settingsConfig` 中，一并持久化到 `providers.json`，并重新激活当前活跃的 Provider。
+保存通用配置只更新 `commonConfig`；前端随后重激活当前活跃 Provider，
+让新默认值写入 `settings.json`。不再遍历 Provider 做物化合并。
 
-### 六、激活 = Deep Merge 写入 + 剥离状态字段
+### 六、激活 = 分层合成 + 用户现状合并 + 残留清理
 
-`activate_provider` 读取当前 `~/.claude/settings.json`，对 Provider 的 `settingsConfig` 执行以下处理后再 merge 写回：
+`activate_provider`：
 
-1. **剥离 Claude Code 状态字段**（`strip_cc_state_fields`）：移除 `enabledPlugins`、`disabledPlugins`、`extraKnownMarketplaces`、`hooks` 四个键，避免覆盖用户后续通过 CLI（如 `claude plugin enable/disable`）做的修改。
-2. **Deep Merge**（`deep_merge_json`）：Provider 配置作为 source 覆盖 target（磁盘现状）的同名叶值，target 独有的键保留。
-
-合并已在编辑时完成（通用配置 → Provider），activate 阶段不再做通用配置合并。
+1. `strip_cc_state_fields` 剥离状态字段；
+2. 读取用户 `settings.json`（尊重 `CLAUDE_CONFIG_DIR`）；坏 JSON 拒绝覆盖；
+3. 覆盖前备份 `settings.json.cc-box.bak`；
+4. 删除 `appliedSettings.paths` 中「本次 effective 不再包含」的残留键；
+5. `deepMerge(用户现状, effective)`：Provider/通用配置覆盖同名叶值，用户独有键保留；
+6. 原子写入，并更新 `appliedSettings`。
 
 ### 七、不自动保存
 
-所有修改仅存于本地 ref，持久化只在用户点击按钮时发生。
+所有编辑仅存于本地 ref，持久化只在用户点击保存时发生。
 
 ### 响应矩阵
 
@@ -50,12 +65,11 @@ Provider 保留当前配置（含之前已合并的通用配置字段）。只�
 |---------|---------|--------|
 | 修改 JSON | Env 表单刷新 | 否 |
 | 修改 Env 字段 | JSON 更新 | 否 |
-| **勾选**"应用通用配置" | `deepMerge(provider, common)` → 写入 `jsonContent` | 否（本地） |
-| **取消勾选**"应用通用配置" | 无操作，仅标记 `meta.commonConfigEnabled = false` | 否（本地） |
-| 保存通用配置 | 合并到所有已勾选 Provider → 保存 `providers.json` → 重新激活 | **是** |
-| 保存 | Provider 配置写入 `providers.json`，提示"请点击激活使其生效" | 是（不写 `settings.json`） |
-| 保存并激活 | 写入 `providers.json` → 直接写入 `settings.json` | 是 |
-| 激活（卡片"使用"按钮） | 直接写入 `settings.json` | 是 |
+| **勾选**"应用通用配置" | 覆盖层 → 展开 effective | 否（本地） |
+| **取消勾选**"应用通用配置" | effective → 还原覆盖层，标记 `meta.commonConfigEnabled = false` | 否（本地） |
+| 保存 Provider | `diffAgainstCommon` 得到覆盖层 + removed 路径 → 写 `providers.json` | 是（不写 `settings.json`） |
+| 保存通用配置 | 只更新 `commonConfig` → 重新激活当前 Provider | **是** |
+| 激活（"使用"按钮） | 合成 effective → 合并用户现状 → 清理残留键 | 是（写 `settings.json`） |
 
 ## 数据结构
 
@@ -67,14 +81,20 @@ Provider 保留当前配置（含之前已合并的通用配置字段）。只�
 | `~/.claude/settings.json` | Claude Code 运行时配置（激活时写入） | 写入 |
 | `~/.cc-switch/cc-switch.db` | cc-switch SQLite 数据库（导入时读取） | 只读 |
 
+> Provider 页工具栏「打开用户配置」：桌面端经 Rust 命令 `open_claude_user_settings` 直接调用系统默认程序打开
+> 用户级 `settings.json`（尊重 `CLAUDE_CONFIG_DIR`）；浏览器/手机模式不显示该按钮。
+> 注意不能走 JS `@tauri-apps/plugin-shell` 的 `open`——它只允许 http(s)/mailto/tel，本地路径会被 scope 拒绝。
+
 ### Provider 配置结构 (`providers.json`)
 
 ```jsonc
 {
+  "schemaVersion": 2,              // 1 = 旧版物化语义；2 = 分层存储
   "providers": [
     {
       "id": "uuid-123",
       "name": "我的 Anthropic",
+      // 只存覆盖层：与通用配置相同的值会自动继承，不落盘
       "settingsConfig": {
         "env": {
           "ANTHROPIC_AUTH_TOKEN": "sk-ant-xxx",
@@ -84,20 +104,16 @@ Provider 保留当前配置（含之前已合并的通用配置字段）。只�
           "ANTHROPIC_DEFAULT_SONNET_MODEL": "claude-sonnet-4-6",
           "ANTHROPIC_DEFAULT_OPUS_MODEL": "claude-opus-4-7"
         },
-        "model": "claude-sonnet-4-6",
-        "permissions": { "allow": [], "deny": [] },
-        "attribution": { "commit": "", "pr": "" },
-        "includeCoAuthoredBy": false,
-        "effortLevel": "high"
+        "model": "claude-sonnet-4-6"
       },
       "websiteUrl": "https://anthropic.com",
       "category": "official",
       "createdAt": 1715555555000,
       "sortIndex": 0,
       "notes": "我的主账号",
-      "isPartner": false,
       "meta": {
         "commonConfigEnabled": true,
+        "commonConfigRemoved": [],   // JSON Pointer，如 ["/env/FOO"]
         "apiFormat": "anthropic",
         "apiKeyField": "ANTHROPIC_AUTH_TOKEN"
       },
@@ -109,14 +125,16 @@ Provider 保留当前配置（含之前已合并的通用配置字段）。只�
   "commonConfig": {
     "enabled": true,
     "settings": {
-      "env": {
-        "CLAUDE_CODE_SCROLL_SPEED": "5"
-      },
+      "env": { "CLAUDE_CODE_SCROLL_SPEED": "5" },
       "attribution": { "commit": "", "pr": "" },
       "includeCoAuthoredBy": false
     }
   },
-  "activeProviderId": "uuid-123"
+  "activeProviderId": "uuid-123",
+  "appliedSettings": {
+    "providerId": "uuid-123",
+    "paths": ["/env/ANTHROPIC_AUTH_TOKEN", "/env/ANTHROPIC_BASE_URL", "/model"]
+  }
 }
 ```
 
@@ -126,7 +144,7 @@ Provider 保留当前配置（含之前已合并的通用配置字段）。只�
 |------|------|------|
 | `id` | string | UUID，唯一标识 |
 | `name` | string | 显示名称 |
-| `settingsConfig` | object | 完整配置（含 env、model、permissions 等） |
+| `settingsConfig` | object | **覆盖层**：Provider 显式值（通用配置相同的值不落盘；激活时合成） |
 | `websiteUrl` | string? | 厂商官网 |
 | `category` | string? | 分类（official / cn_official / aggregator / cloud_provider / third_party / custom / omo / omo-slim） |
 | `createdAt` | number? | 创建时间戳（毫秒） |
@@ -139,7 +157,7 @@ Provider 保留当前配置（含之前已合并的通用配置字段）。只�
 
 ### settingsConfig 结构
 
-`settingsConfig` 直接对应 `~/.claude/settings.json` 的完整结构。核心字段：
+`settingsConfig` 对应 `~/.claude/settings.json` 的结构，但只保存 Provider 的显式覆盖（与通用配置相同的值自动继承）。核心字段：
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
@@ -166,6 +184,7 @@ Provider 保留当前配置（含之前已合并的通用配置字段）。只�
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `commonConfigEnabled` | bool? | 是否应用通用配置（默认 true） |
+| `commonConfigRemoved` | string[]? | 显式屏蔽的通用配置继承路径（JSON Pointer，如 `/env/FOO`） |
 | `endpointAutoSelect` | bool? | 自动选择最佳端点 |
 | `apiFormat` | string? | API 格式：anthropic / openai_chat / openai_responses / gemini_native |
 | `apiKeyField` | string? | API Key 字段名 |
@@ -188,26 +207,38 @@ Provider 保留当前配置（含之前已合并的通用配置字段）。只�
 
 ## 激活流程
 
-用户点击"使用"按钮激活 Provider，流程如下：
+用户点击"使用"按钮激活 Provider：
 
 ```
 前端 providersStore.activate(id)
-  → API activateProvider(id)
-    → Rust activate_provider(provider_id)
-        ├── 1) 读取 providers.json
-        ├── 2) 查找 Provider
-        ├── 3) 读取当前 ~/.claude/settings.json（不存在视为 {}）
-        ├── 4) strip_cc_state_fields(provider.settings_config) 剥离状态字段
-        ├── 5) merge_provider_into_settings(current, stripped) deep merge
-        ├── 6) 写回 ~/.claude/settings.json
-        └── 7) 更新 activeProviderId，保存 providers.json
+  → Rust activate_provider(provider_id)
+      ├── 1) 读取 providers.json（legacy 在内存中按 v2 解释；落盘迁移在应用启动时完成）
+      ├── 2) effective = resolve_effective(common, provider)   // Provider 优先
+      ├── 3) 读取 CLAUDE_CONFIG_DIR 下的 settings.json（不存在视为 {}）
+      │      └── 坏 JSON / 非对象根节点 → 报错退出，不覆盖
+      ├── 4) 备份 settings.json → settings.json.cc-box.bak
+      ├── 5) 删除 appliedSettings.paths 中本次 effective 不再包含的残留键
+      ├── 6) deepMerge(用户现状, effective)   // 用户独有键保留
+      ├── 7) 原子写入 settings.json
+      └── 8) 更新 activeProviderId + appliedSettings，保存 providers.json
 ```
 
 **关键规则**：
-- 激活 = Deep Merge 写入（保留 settings.json 现有字段，Provider 字段覆盖同名叶值）
+- 优先级：`Provider 覆盖层 > 通用默认层 > 用户 settings.json 现状`
 - 状态字段（`enabledPlugins` 等）不会被 Provider 快照覆盖，避免回滚 CLI 修改
-- 新启动的终端会话使用新配置
-- 已运行的终端不受影响
+- `appliedSettings` 只记录上次由 cc-box 写入的叶子路径，清理时不误删用户自己加的键
+- 新启动的终端会话使用新配置；已运行终端不受影响
+
+### 与用户 settings.json 的合并规则
+
+| 类型 | 行为 |
+|------|------|
+| 对象 | 递归合并 |
+| 数组 | 整体替换（不并集）；数组路径按整段叶子管理 |
+| 标量 | 高层覆盖 |
+| 用户独有键 | 保留 |
+| 旧 Provider 遗留键 | 通过 `appliedSettings.paths` 差值删除 |
+| 项目级/本地级 settings | 完全不碰（Claude Code 运行时自行分层优先） |
 
 ### 被剥离的字段（CC_STATE_KEYS）
 
@@ -218,61 +249,79 @@ Provider 保留当前配置（含之前已合并的通用配置字段）。只�
 | `extraKnownMarketplaces` | 由 `claude plugin marketplace add/remove` 维护 |
 | `hooks` | Claude Code 运行时 hook 配置，独立于 Provider |
 
-剥离发生在三个位置：
-- `activate_provider`：写 settings.json 前剥离 Provider settingsConfig（运行时净化）
-- `update_common_config`：保存通用配置前剥离（防止用户在 commonConfig 误填污染所有 Provider）
-- `import_from_cc_switch`：导入 cc-switch 通用配置时串联剥离（与 `strip_core_env` 配合）
+剥离位置：
+- `resolve_effective`：合成 effective 时剥离（Provider 与通用配置两侧）
+- `update_common_config`：保存通用配置前剥离
+- `import_from_cc_switch`：导入时剥离（并与 `strip_core_env` 配合，核心 env 不作为通用默认值）
 
-`create_provider` / `update_provider` 不剥离，保留用户编辑器中的原始输入。
+## 通用配置分层合并
 
-## 通用配置合并
+### 合成规则
 
-### 合并策略
+```
+effective = deepMerge(
+  通用配置 - meta.commonConfigRemoved,
+  Provider 覆盖层
+)   // Provider 覆盖层赢
+```
 
-`deep_merge_json(target, source)` — source 覆盖 target：
+`deep_merge_json(target, source)`：
 
 | 类型组合 | 行为 |
 |----------|------|
 | Object + Object | 递归深度合并 |
-| Object + 其他 | source 替换 target |
-| 其他 + 其他 | source 替换 target |
+| Array / 标量 | source 整体替换 |
 
 **示例**：
 
 ```jsonc
-// Provider settingsConfig
-{ "env": { "A": "1", "B": "2" }, "model": "claude-sonnet-4-6", "permissions": { "allow": ["tool1"] } }
-
-// 通用配置
+// 通用配置（默认层）
 { "env": { "B": "99", "C": "3" }, "attribution": { "commit": "", "pr": "" } }
 
-// 合并结果（通用配置覆盖同名字段）
-{ "env": { "A": "1", "B": "99", "C": "3" }, "model": "claude-sonnet-4-6", "permissions": { "allow": ["tool1"] }, "attribution": { "commit": "", "pr": "" } }
+// Provider 覆盖层
+{ "env": { "A": "1", "B": "2" }, "model": "claude-sonnet-4-6" }
+
+// effective（Provider 的 B 优先）
+{ "env": { "A": "1", "B": "2", "C": "3" }, "model": "claude-sonnet-4-6", "attribution": { "commit": "", "pr": "" } }
 ```
 
 ### 合并时机
 
-通用配置的合并不在激活时发生，而在以下时机：
+| 操作 | 行为 |
+|------|------|
+| 勾选"应用通用配置" | 前端在编辑器中展开 effective（不落盘） |
+| 取消勾选 | 前端还原为覆盖层（不落盘，完全可逆） |
+| 修改通用配置（保存） | 后端只更新 `commonConfig`；前端重激活当前 Provider |
+| 编辑 Provider（保存） | 前端 `diffAgainstCommon` → 只保存覆盖层 + removed |
+| 创建 Provider | 预设配置直接作为覆盖层保存（不合并通用配置） |
+| 删除 Provider | 清除 activeProviderId（若删除的是当前激活的） |
+| 激活 Provider | 合成 effective → 合并用户现状 |
 
-| 操作 | 是否触发合并 | 说明 |
-|------|:---:|------|
-| 勾选"应用通用配置" | 是（前端） | 即时合并到 JSON 编辑器内容，用户可编辑 |
-| 取消勾选"应用通用配置" | 否 | 保留当前配置不回退 |
-| 修改通用配置（保存） | 是（后端） | 批量合并到所有 `commonConfigEnabled === true` 的 Provider |
-| 编辑 Provider（保存） | 否 | 只保存到 providers.json |
-| 创建 Provider | 否 | 只保存到 providers.json |
-| 删除 Provider | 否 | 如果删除的是当前激活的，清除 activeProviderId |
-| 激活 Provider | 否 | 直接写入 settings.json，不执行合并 |
-
-### commonConfigEnabled 决策
+### enabled 决策
 
 ```
-批量合并条件 = meta.commonConfigEnabled === Some(true)
+通用配置生效 = commonConfig.enabled && (meta.commonConfigEnabled ?? true)
 ```
 
-- `commonConfigEnabled: true`：参与通用配置的批量合并
-- `commonConfigEnabled: false` 或 `undefined`：不参与批量合并
-- 前端编辑面板中勾选框默认值：`provider.meta?.commonConfigEnabled ?? true`
+- 缺省统一为 `true`（迁移时显式写入），不再有前端 true / 后端 false 的歧义。
+- `commonConfigRemoved` 中的路径只抑制继承，不删除 Provider 显式覆盖值。
+
+### 迁移（schema v1 → v2）
+
+应用启动时 `ensure_providers_schema()` 一次性执行（读命令保持纯读，
+legacy 文件在内存中按 v2 解释；写命令保存时会持久化迁移结果）：
+
+1. 备份 `providers.json.cc-box.bak`；
+2. 对每个启用通用配置的 Provider：移除与 `commonConfig.settings` 相同的叶子
+   （这些值本来就是旧版物化写入的，移除后由通用层补回，已物化部分 effective 不变）；
+3. 显式写入 `meta.commonConfigEnabled`，补齐 `commonConfigRemoved: []`；
+4. `schemaVersion = 2`，原子写入。
+
+**升级后的预期变化**：
+- 旧版中 `commonConfig` 保存之后才创建的 Provider（旧 `create_provider` 不物化），
+  升级后会开始继承 common 中原本未写入它的叶子——这是分层语义的预期结果；
+- Provider 显式值恰好等于 common 时会被归一化为「继承」，common 日后变化会影响该值；
+- 旧版中被通用配置覆盖掉的 Provider 原值已丢失，无法恢复（发布说明需注明）。
 
 ### 通用配置修改流程
 
@@ -280,18 +329,21 @@ Provider 保留当前配置（含之前已合并的通用配置字段）。只�
 用户修改通用配置并保存
   → providersStore.updateCommon(settings)
     → Rust update_common_config(enabled, settings)
-        ├── 1) strip_cc_state_fields(settings) 剥离状态字段
-        ├── 2) 保存剥离后的通用配置到 providers.json
-        ├── 3) 遍历所有 providers
-        ├── 4) 若 meta.commonConfigEnabled === true
-        │     → deep_merge_json(provider.settings_config, stripped_settings)
-        │     → 更新 provider.settings_config
-        ├── 5) 保存 providers.json（含所有已更新的 Provider）
-        └── 6) 返回
-  → Store 重载 providers（获取后端批量合并后的最新数据）
-  → Store 重新激活当前活跃的 Provider（写入 settings.json）
-  → ProviderEditPanel watch props.commonConfig → 重复合并到编辑内容
+        ├── 1) 校验 settings 是对象
+        ├── 2) strip_cc_state_fields(settings)
+        ├── 3) 保存 commonConfig（不改写任何 Provider）
+        └── 4) 返回
+  → Store 重载配置（providers 不变，appliedSettings 可能更新）
+  → Store 重新激活当前活跃 Provider
+  → ProviderEditPanel 若已打开且无未保存修改 → 按新 common 重新展开；有修改 → 仅提示
 ```
+
+## 一致性契约
+
+- Rust `src-tauri/src/providers.rs` 与前端 `src/utils/provider-config.ts` 实现同一套
+  resolve / diff / removed 算法；
+- 共享样例：`tests/fixtures/provider-merge/cases.json`，Rust 与 Vitest 各跑一遍；
+- 修改合并语义时必须同时更新两端与 fixture。
 
 ## CRUD 操作
 
@@ -299,7 +351,7 @@ Provider 保留当前配置（含之前已合并的通用配置字段）。只�
 
 ```
 用户选择预设模板 → ProviderPresetPanel
-  → providersStore.createFromPreset(preset)
+  → providersStore.createLocalFromPreset(preset)
     → 处理 templateValues（替换占位符）
     → API createProvider(name, settingsConfig, ...)
       → Rust create_provider()
@@ -314,18 +366,17 @@ Provider 保留当前配置（含之前已合并的通用配置字段）。只�
   编辑内容：
     - 基本信息：名称、备注
     - 环境变量：6 个必需 + 自定义变量（可折叠），双向同步 JSON
-    - 配置 JSON 编辑器：完整 settingsConfig（含 env），可编辑
-    - 通用配置：勾选时即时合并到 JSON，取消勾选无操作
+    - 配置 JSON 编辑器：展示 effective（通用默认 + 覆盖层），可编辑
+    - 通用配置：勾选展开/取消还原，完全可逆；保存时自动差分成覆盖层
 
   保存 → providersStore.update(id, { name, settingsConfig, notes, meta })
     → API updateProvider(id, ...)
       → Rust update_provider()
         → 更新 providers.json（不触发激活）
     → 弹窗提示"保存成功，请点击激活使其生效"
-
-  保存并激活 → providersStore.update + providersStore.activate
-    → 更新 providers.json → 直接写入 settings.json
 ```
+
+> 编辑面板只有「保存」；激活需在 Provider 卡片点击「使用」。
 
 ### 删除 Provider
 
@@ -458,12 +509,13 @@ ProvidersSection.vue          # 主面板容器
 |------|------|------|------|
 | `get_providers_config` | — | ProvidersConfig | 读取 providers.json |
 | `save_providers_config` | config: ProvidersConfig | void | 保存 providers.json |
-| `activate_provider` | providerId: string | void | 激活 Provider（直接写入 settings.json，不合并） |
+| `activate_provider` | providerId: string | void | 合成 effective → 合并用户 settings.json → 清理残留托管键 |
 | `create_provider` | name, settingsConfig, ... | Provider | 创建 Provider |
 | `update_provider` | id, name?, settingsConfig?, notes?, meta? | Provider | 更新 Provider |
 | `delete_provider` | id: string | void | 删除 Provider |
 | `update_provider_sort_order` | providerIds: string[] | void | 更新排序 |
-| `update_common_config` | enabled, settings | void | 更新通用配置 + 批量合并到所有 commonConfigEnabled 的 Provider |
+| `update_common_config` | enabled, settings | void | 只更新通用配置默认层（不改写 Provider） |
+| `open_claude_user_settings` | — | void | 桌面端用系统默认程序打开用户 settings.json（尊重 CLAUDE_CONFIG_DIR；远程不可调用） |
 | `check_cc_switch_db_exists` | — | bool | 检测 cc-switch 数据库 |
 | `import_from_cc_switch` | — | ImportResult | 从 cc-switch 导入 |
 

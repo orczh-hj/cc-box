@@ -5,7 +5,7 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import { uuid } from '@/utils/uuid'
-import type { Provider, ProvidersConfig, CommonConfig, ImportResult, TestConnectionResult } from '@/types/provider'
+import type { Provider, ProvidersConfig, CommonConfig, AppliedSettings, ImportResult, TestConnectionResult, ProviderMeta } from '@/types/provider'
 import {
   getProvidersConfig,
   saveProvidersConfig,
@@ -21,7 +21,8 @@ import {
 } from '@/api/provider'
 import { providerPresets } from '@/config/providerPresets'
 import type { ProviderPreset } from '@/types/provider'
-import { deepMergeSettings, replaceInSettings } from '@/utils/json'
+import { replaceInSettings } from '@/utils/json'
+import { stripEmptyCoreEnv } from '@/utils/provider-config'
 
 export const useProvidersStore = defineStore('providers', () => {
   const providers = ref<Provider[]>([])
@@ -30,6 +31,8 @@ export const useProvidersStore = defineStore('providers', () => {
     settings: {}
   })
   const activeProviderId = ref<string | null>(null)
+  const schemaVersion = ref<number>(2)
+  const appliedSettings = ref<AppliedSettings>({ providerId: null, paths: [] })
   const isLoading = ref(false)
   const hasCcSwitchDb = ref(false)
   const presets = ref<ProviderPreset[]>(providerPresets)
@@ -58,6 +61,8 @@ export const useProvidersStore = defineStore('providers', () => {
       providers.value = config.providers
       commonConfig.value = config.commonConfig
       activeProviderId.value = config.activeProviderId
+      schemaVersion.value = config.schemaVersion ?? 2
+      appliedSettings.value = config.appliedSettings ?? { providerId: null, paths: [] }
 
       // 检测 cc-switch 数据库
       hasCcSwitchDb.value = await checkCcSwitchDbExists()
@@ -71,9 +76,11 @@ export const useProvidersStore = defineStore('providers', () => {
   async function saveConfig() {
     try {
       const config: ProvidersConfig = {
+        schemaVersion: schemaVersion.value,
         providers: providers.value,
         commonConfig: commonConfig.value,
-        activeProviderId: activeProviderId.value
+        activeProviderId: activeProviderId.value,
+        appliedSettings: appliedSettings.value
       }
       await saveProvidersConfig(config)
     } catch (err) {
@@ -106,17 +113,14 @@ export const useProvidersStore = defineStore('providers', () => {
       }
     }
 
-    // 若勾选了应用通用配置，合并通用配置到 settingsConfig
-    if (commonConfigEnabled && commonConfig.value.enabled &&
-        commonConfig.value.settings && Object.keys(commonConfig.value.settings).length > 0) {
-      const merged = deepMergeSettings(settingsConfig, commonConfig.value.settings)
-      Object.keys(merged).forEach(k => { settingsConfig[k] = merged[k] })
-    }
+    // 分层语义：通用配置不物化，激活时再与覆盖层合成（Provider 优先）。
+    // 预设里的空 token/baseUrl 视为未设置，避免激活时覆盖用户现有值。
+    const cleanConfig = stripEmptyCoreEnv(settingsConfig)
 
     return {
       id: uuid(),
       name,
-      settingsConfig,
+      settingsConfig: cleanConfig,
       websiteUrl: preset.websiteUrl,
       category: preset.category,
       createdAt: Date.now(),
@@ -148,7 +152,7 @@ export const useProvidersStore = defineStore('providers', () => {
     name?: string
     settingsConfig?: Record<string, any>
     notes?: string
-    meta?: { commonConfigEnabled?: boolean }
+    meta?: Partial<ProviderMeta>
   }): Promise<Provider> {
     try {
       const provider = await updateProvider(
@@ -215,12 +219,19 @@ export const useProvidersStore = defineStore('providers', () => {
     try {
       await updateCommonConfig(true, settings)
       commonConfig.value = { enabled: true, settings }
-      // 后端已批量合并到所有 commonConfigEnabled 的 Provider，重载最新数据
+      // 后端只保存默认层，不改写 Provider；重载以获取最新 common/托管路径
       const config = await getProvidersConfig()
       providers.value = config.providers
-      // 重新激活当前活跃的 Provider（settingsConfig 已包含最新通用配置）
+      appliedSettings.value = config.appliedSettings ?? { providerId: null, paths: [] }
+      // 重新激活当前活跃 Provider，让新的默认值写入 settings.json
       if (activeProviderId.value) {
         await activateProvider(activeProviderId.value)
+        // 激活会更新 appliedSettings（托管路径）；再拉一次避免前端状态漂移
+        const latest = await getProvidersConfig()
+        providers.value = latest.providers
+        commonConfig.value = latest.commonConfig
+        appliedSettings.value = latest.appliedSettings ?? { providerId: null, paths: [] }
+        schemaVersion.value = latest.schemaVersion ?? 2
       }
     } catch (err) {
       console.error('Failed to update common config:', err)

@@ -42,8 +42,9 @@ pub const EXCLUDED: &[&str] = &[
     "pty_claim",
     // 桌面专属接管（远程走 controller.takeover 协议消息）
     "controller_takeover",
-    // 桌面级
+    // 桌面级（打开本地文件/文件夹）
     "open_in_file_manager",
+    "open_claude_user_settings",
     "spawn_new_instance",
     "get_app_path",
     // 安全：中继重定向=窃取 device_key 的通道（详见 rpc_table 尾注释）

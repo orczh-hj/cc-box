@@ -23,6 +23,8 @@ export type ClaudeApiFormat =
 /** Provider 元数据（完全兼容 cc-switch ProviderMeta，22 个字段） */
 export interface ProviderMeta {
   commonConfigEnabled?: boolean
+  /** 显式屏蔽的通用配置继承路径（JSON Pointer，如 /env/FOO） */
+  commonConfigRemoved?: string[]
   endpointAutoSelect?: boolean
   apiFormat?: string
   apiKeyField?: string
@@ -97,11 +99,20 @@ export interface CommonConfig {
   settings: Record<string, any>
 }
 
+/** 上次激活写入 settings.json 的托管路径 */
+export interface AppliedSettings {
+  providerId: string | null
+  paths: string[]
+}
+
 /** Provider 配置文件结构 */
 export interface ProvidersConfig {
+  /** 1 = 旧版物化语义；2 = 分层存储（通用默认 + Provider 覆盖） */
+  schemaVersion?: number
   providers: Provider[]
   commonConfig: CommonConfig
   activeProviderId: string | null
+  appliedSettings?: AppliedSettings
 }
 
 /** 导入结果 */

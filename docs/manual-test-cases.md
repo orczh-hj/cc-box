@@ -1151,6 +1151,24 @@
 - 步骤 3：`env.ANTHROPIC_BASE_URL` 已切换为 Provider B 的值
 - A 独有的 env 子键（如有）保留，不被整体清空
 
+### Provider_OpenUserConfig_001 — 打开用户配置按钮
+
+**目标**：验证 Provider 页面可以一键打开用户级 Claude 配置
+
+**前置条件**：
+- 桌面端（非浏览器远程模式）
+- 已存在 `~/.claude/settings.json`（或设置了 `CLAUDE_CONFIG_DIR`）
+
+**操作步骤**：
+1. 进入 Settings → Providers
+2. 点击工具栏「打开用户配置」
+3. 若设置了 `CLAUDE_CONFIG_DIR`，重复上述步骤验证打开的是该目录下的 `settings.json`
+
+**预期结果**：
+- 系统默认程序打开用户级 `settings.json`（内容与 CLI 实际读取的一致）
+- 浏览器/手机模式下按钮不显示
+- 文件不存在或路径不可用时显示错误 toast，不静默失败
+
 ## Undo 快捷键映射
 
 ### Undo_Shortcut_BasicUndo_001 — 输入过程中触发 undo 擦除字符

@@ -763,6 +763,20 @@ pub async fn get_providers_config() -> Result<ProvidersConfig, String> {
     crate::providers::get_providers_config().map_err(|e| e.to_string())
 }
 
+/// 打开用户级 Claude settings.json（「打开用户配置」按钮，桌面专属）。
+///
+/// 必须走 Rust 侧 `Shell::open`：JS 侧 `@tauri-apps/plugin-shell` 的 open
+/// 受 scope 正则限制，只允许 http(s)/mailto/tel，本地路径会被拒绝。
+#[tauri::command]
+pub async fn open_claude_user_settings(app: tauri::AppHandle) -> Result<(), String> {
+    use tauri_plugin_shell::ShellExt;
+
+    let path = crate::providers::claude_user_settings_path().map_err(|e| e.to_string())?;
+    app.shell()
+        .open(path, None)
+        .map_err(|e| format!("Failed to open user settings: {}", e))
+}
+
 /// 保存 Provider 配置（state-changed 广播：providers section，#[cc_command] 自动）
 #[cc_command(write = "providers")]
 #[tauri::command]

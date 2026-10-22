@@ -73,6 +73,66 @@ describe('状态同步中心（sections registry）', () => {
     expect(mockGetAllPlugins).not.toHaveBeenCalled()
   })
 
+  // 回环刷新必须静默：置 loading 会让面板卸载重建（展开态/滚动位置丢失）
+  it('ApplyStateSection_SidebarRefreshIsSilent_001', async () => {
+    const sidebar = useSidebarStore()
+    ;(sidebar as unknown as { loadedCwd: string }).loadedCwd = '/proj'
+    sidebar.skills = [
+      { name: 'deploy', displayName: 'deploy', sourceType: 'user', sourceLabel: 'User', invokeFormat: '/deploy', enabled: true },
+    ]
+    let resolveFetch: (v: unknown[]) => void = () => {}
+    mockGetAllSkills.mockReturnValue(new Promise(resolve => { resolveFetch = resolve }))
+
+    applyStateSection('skills')
+    await new Promise(r => setTimeout(r, 0))
+
+    expect(sidebar.skillsLoading).toBe(false)
+    expect(sidebar.skills[0].name).toBe('deploy') // 刷新期间保留旧数据
+
+    resolveFetch([])
+    await new Promise(r => setTimeout(r, 0))
+  })
+
+  // 本端写回环：不刷新该 section（条目原地响应、列表顺序不变）
+  it('ApplyStateSection_SelfEchoSkipsSection_001', async () => {
+    const sidebar = useSidebarStore()
+    ;(sidebar as unknown as { loadedCwd: string }).loadedCwd = '/proj'
+    sidebar.markSelfWrite('skills')
+
+    applyStateSection('skills')
+    await new Promise(r => setTimeout(r, 0))
+
+    expect(mockGetAllSkills).not.toHaveBeenCalled()
+  })
+
+  // plugin 本端回环：plugin 自身不刷新（卡片原地翻转），级联子项照常刷新
+  it('ApplyStateSection_SelfEchoPluginCascades_001', async () => {
+    const sidebar = useSidebarStore()
+    ;(sidebar as unknown as { loadedCwd: string }).loadedCwd = '/proj'
+    sidebar.markSelfWrite('plugins')
+
+    applyStateSection('plugins')
+    await new Promise(r => setTimeout(r, 0))
+
+    expect(mockGetAllPlugins).not.toHaveBeenCalled()
+    expect(mockGetAllSkills).toHaveBeenCalledWith('/proj')
+    expect(mockGetAllAgents).toHaveBeenCalledWith('/proj')
+    expect(mockGetAllMcpServers).toHaveBeenCalledWith('/proj')
+  })
+
+  // 权威全量重拉（revision 跳变）必须绕过回环抑制，并清掉待消费登记
+  it('ApplyStateSection_ResyncBypassesSelfEcho_001', async () => {
+    const sidebar = useSidebarStore()
+    ;(sidebar as unknown as { loadedCwd: string }).loadedCwd = '/proj'
+    sidebar.markSelfWrite('skills')
+
+    applyStateSection('skills', { resync: true })
+    await new Promise(r => setTimeout(r, 0))
+
+    expect(mockGetAllSkills).toHaveBeenCalledWith('/proj')
+    expect(sidebar.consumeSelfWrite('skills')).toBe(false) // 登记已清除，不会吞下一次事件
+  })
+
   // providers/config 查表分发到对应 store loader
   it('ApplyStateSection_StoresDistributed_001', async () => {
     applyStateSection('providers')

@@ -248,6 +248,199 @@ describe('sidebar store', () => {
     })
   })
 
+  describe('加载：静默刷新与同名精确定位', () => {
+    // 静默刷新（state-changed 回环/级联）不切换 loading，避免面板卸载重建
+    it('LoadSkills_Silent_KeepsLoadingFalse_001', async () => {
+      const store = useSidebarStore()
+      store.skills = [
+        { name: 'deploy', displayName: 'deploy', sourceType: 'user', sourceLabel: 'User', invokeFormat: '/deploy', enabled: true },
+      ]
+      let resolveFetch: (v: unknown[]) => void = () => {}
+      mockGetAllSkills.mockReturnValue(new Promise(resolve => { resolveFetch = resolve }))
+
+      const pending = store.loadSkills('/proj', { silent: true })
+      await Promise.resolve()
+
+      expect(store.skillsLoading).toBe(false)
+      expect(store.skills[0].name).toBe('deploy') // 旧数据保留
+
+      resolveFetch([])
+      await pending
+      expect(store.skillsLoading).toBe(false)
+      expect(store.skills).toEqual([])
+    })
+
+    // 首屏/切项目（非 silent）才显示 loading
+    it('LoadSkills_NonSilent_SetsLoading_001', async () => {
+      const store = useSidebarStore()
+      let resolveFetch: (v: unknown[]) => void = () => {}
+      mockGetAllSkills.mockReturnValue(new Promise(resolve => { resolveFetch = resolve }))
+
+      const pending = store.loadSkills('/proj')
+      await Promise.resolve()
+      expect(store.skillsLoading).toBe(true)
+
+      resolveFetch([])
+      await pending
+      expect(store.skillsLoading).toBe(false)
+    })
+
+    // 并发刷新乱序响应：旧请求不得覆盖新数据
+    it('LoadSkills_OutOfOrderResponse_Discarded_001', async () => {
+      const store = useSidebarStore()
+      let resolveOld: (v: unknown[]) => void = () => {}
+      let resolveNew: (v: unknown[]) => void = () => {}
+      mockGetAllSkills
+        .mockReturnValueOnce(new Promise(resolve => { resolveOld = resolve }))
+        .mockReturnValueOnce(new Promise(resolve => { resolveNew = resolve }))
+      const oldSkill = { name: 'old', displayName: 'old', sourceType: 'user', sourceLabel: 'User', invokeFormat: '/old', enabled: true }
+      const newSkill = { name: 'new', displayName: 'new', sourceType: 'user', sourceLabel: 'User', invokeFormat: '/new', enabled: true }
+
+      const first = store.loadSkills('/proj', { silent: true })
+      const second = store.loadSkills('/proj', { silent: true })
+      resolveNew([newSkill])
+      await second
+      resolveOld([oldSkill])
+      await first
+
+      expect(store.skills.map(s => s.name)).toEqual(['new'])
+    })
+
+    // 同名 project/user 并存：开关只能改 user 项（project 项没有开关，后端也只移动用户级）
+    it('ToggleSkill_SameNameProjectAndUser_TargetsUser_001', async () => {
+      const store = useSidebarStore()
+      store.skills = [
+        { name: 'deploy', displayName: 'deploy', sourceType: 'project', sourceLabel: 'Project', invokeFormat: '/deploy', enabled: true },
+        { name: 'deploy', displayName: 'deploy', sourceType: 'user', sourceLabel: 'User', invokeFormat: '/deploy', enabled: true },
+      ]
+      mockSetSkillEnabled.mockResolvedValue(undefined)
+
+      await store.toggleSkillEnabled('deploy', false)
+
+      expect(store.skills[0].enabled).toBe(true) // project 项不动
+      expect(store.skills[1].enabled).toBe(false) // user 项被关闭
+    })
+
+    // active/disabled 同名共存：开启操作选中禁用项，关闭操作选中启用项
+    it('ToggleSkill_SameNameActiveAndDisabled_TargetsCorrect_001', async () => {
+      const store = useSidebarStore()
+      store.skills = [
+        { name: 'deploy', displayName: 'deploy', sourceType: 'user', sourceLabel: 'User (Disabled)', invokeFormat: '/deploy', enabled: false },
+      ]
+      mockSetSkillEnabled.mockResolvedValue(undefined)
+
+      await store.toggleSkillEnabled('deploy', true)
+
+      expect(store.skills[0].enabled).toBe(true)
+    })
+
+    // agent 同理：plugin 同名项不可被误改
+    it('ToggleAgent_SameNamePluginAndUser_TargetsUser_001', async () => {
+      const store = useSidebarStore()
+      store.agents = [
+        { name: 'reviewer', displayName: 'reviewer', sourceType: 'plugin', sourceLabel: 'Plugin', invokeFormat: '@"reviewer (agent)"', enabled: true },
+        { name: 'reviewer', displayName: 'reviewer', sourceType: 'user', sourceLabel: 'User', invokeFormat: '@"reviewer (agent)"', enabled: true },
+      ]
+      mockSetAgentEnabled.mockResolvedValue(undefined)
+
+      await store.toggleAgentEnabled('reviewer', false)
+
+      expect(store.agents[0].enabled).toBe(true)
+      expect(store.agents[1].enabled).toBe(false)
+    })
+
+    // 开关成功登记本端写：事件回来时被消费一次，不触发列表刷新
+    it('ToggleSkill_Success_MarksSelfWrite_001', async () => {
+      const store = useSidebarStore()
+      store.skills = [
+        { name: 'deploy', displayName: 'deploy', sourceType: 'user', sourceLabel: 'User', invokeFormat: '/deploy', enabled: true },
+      ]
+      mockSetSkillEnabled.mockResolvedValue(undefined)
+
+      await store.toggleSkillEnabled('deploy', false)
+
+      expect(store.consumeSelfWrite('skills')).toBe(true)
+      expect(store.consumeSelfWrite('skills')).toBe(false) // 只消费一次
+    })
+
+    // 开关失败撤销登记：后续别的设备的事件不能被误吞
+    it('ToggleSkill_Failure_CancelsSelfWrite_001', async () => {
+      const store = useSidebarStore()
+      store.skills = [
+        { name: 'deploy', displayName: 'deploy', sourceType: 'user', sourceLabel: 'User', invokeFormat: '/deploy', enabled: true },
+      ]
+      mockSetSkillEnabled.mockRejectedValue(new Error('boom'))
+
+      await expect(store.toggleSkillEnabled('deploy', false)).rejects.toThrow('boom')
+
+      expect(store.consumeSelfWrite('skills')).toBe(false)
+      expect(store.skills[0].enabled).toBe(true) // 已回滚
+    })
+
+    // 失败回滚必须按 sourceLabel 区分 active/disabled 同名项（不能翻错行）
+    it('ToggleAgent_Failure_SameNameRevertsClickedRow_001', async () => {
+      const store = useSidebarStore()
+      store.agents = [
+        { name: 'reviewer', displayName: 'reviewer', sourceType: 'user', sourceLabel: 'User', invokeFormat: '@"reviewer (agent)"', enabled: true },
+        { name: 'reviewer', displayName: 'reviewer', sourceType: 'user', sourceLabel: 'User (Disabled)', invokeFormat: '@"reviewer (agent)"', enabled: false },
+      ]
+      mockSetAgentEnabled.mockRejectedValue(new Error('conflict'))
+
+      // 点 disabled 行（启用）→ 后端冲突 → 只回滚该行
+      await expect(store.toggleAgentEnabled('reviewer', true)).rejects.toThrow('conflict')
+
+      expect(store.agents[0].enabled).toBe(true) // active 行未被误改
+      expect(store.agents[1].enabled).toBe(false) // 被点的 disabled 行已回滚
+    })
+
+    // 并发静默刷新已把数组换成权威状态时，失败回滚只能 no-op，不能翻同名行
+    it('ToggleAgent_Failure_AfterRefresh_NoWrongRow_001', async () => {
+      const store = useSidebarStore()
+      const activeRow = { name: 'reviewer', displayName: 'reviewer', sourceType: 'user' as const, sourceLabel: 'User', invokeFormat: '@"reviewer (agent)"', enabled: true }
+      const disabledRow = { name: 'reviewer', displayName: 'reviewer', sourceType: 'user' as const, sourceLabel: 'User (Disabled)', invokeFormat: '@"reviewer (agent)"', enabled: false }
+      store.agents = [{ ...activeRow }, { ...disabledRow }]
+      mockSetAgentEnabled.mockImplementation(async () => {
+        // 模拟请求期间到达的权威刷新（disabled 行仍为 false）
+        store.agents = [{ ...activeRow }, { ...disabledRow }]
+        throw new Error('conflict')
+      })
+
+      await expect(store.toggleAgentEnabled('reviewer', true)).rejects.toThrow('conflict')
+
+      expect(store.agents[0].enabled).toBe(true)
+      expect(store.agents[1].enabled).toBe(false)
+    })
+
+    // 切项目先清空旧数据：新项目加载全部失败时不残留上一个项目的内容
+    it('LoadAllSidebarData_ProjectSwitch_ClearsOldData_001', async () => {
+      const store = useSidebarStore()
+      store.skills = [
+        { name: 'old', displayName: 'old', sourceType: 'user', sourceLabel: 'User', invokeFormat: '/old', enabled: true },
+      ]
+      store.agents = [
+        { name: 'old', displayName: 'old', sourceType: 'user', sourceLabel: 'User', invokeFormat: '@"old (agent)"', enabled: true },
+      ]
+      store.mcpServers = [
+        { name: 'old', displayName: 'old', sourceType: 'user', sourceLabel: 'User', prompts: [], enabled: true },
+      ]
+      store.plugins = [
+        { id: 'old@x', name: 'old', version: '1', scope: 'user', enabled: true, installPath: '/x' },
+      ]
+      ;(store as unknown as { loadedCwd: string }).loadedCwd = '/old-proj'
+      mockGetAllSkills.mockRejectedValue(new Error('cli failed'))
+      mockGetAllAgents.mockRejectedValue(new Error('cli failed'))
+      mockGetAllMcpServers.mockRejectedValue(new Error('cli failed'))
+      mockGetAllPlugins.mockRejectedValue(new Error('cli failed'))
+
+      await store.loadAllSidebarData('/new-proj')
+
+      expect(store.skills).toEqual([])
+      expect(store.agents).toEqual([])
+      expect(store.mcpServers).toEqual([])
+      expect(store.plugins).toEqual([])
+    })
+  })
+
   // state-changed 权威刷新的 section 分发/级联/暂存逻辑已迁移到状态中心，
   // 对应测试见 tests/state/sections.test.ts
 })

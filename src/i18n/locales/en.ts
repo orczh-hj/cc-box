@@ -401,6 +401,8 @@ export default {
   providersDesc: 'Manage Claude API provider configurations, supports preset vendors and custom configs',
   addProvider: 'Add Provider',
   editCommonConfig: 'Edit Common Config',
+  openUserConfig: 'Open User Config',
+  openUserConfigFailed: 'Failed to open user config: {error}',
   importFromCcSwitch: 'Import from cc-switch',
   noProviders: 'No Provider configurations',
   noProvidersHint: 'Click "Add Provider" to create from preset template',
@@ -438,6 +440,7 @@ export default {
   applyCommonConfig: 'Apply common config',
   format: 'Format',
   jsonFormatError: 'Invalid JSON format',
+  configRootMustBeObject: 'Config root must be a JSON object ({ })',
   jsonParseError: 'Failed to parse JSON',
   ignoredFieldsHint: 'The following fields will not be applied (managed by Claude Code): enabledPlugins, disabledPlugins, extraKnownMarketplaces, hooks',
 
@@ -457,7 +460,9 @@ export default {
 
   // Common config panel
   commonConfigTitle: 'Common Config',
-  commonConfigDesc: 'Providers with "Apply common config" checked will have this config merged during activation. Suitable for shared parameters (permissions, attribution, etc.).',
+  commonConfigDesc: 'Common config acts as defaults: only providers with "Apply common config" inherit it, and provider values take precedence. Missing fields are filled in on activation.',
+  commonConfigMergeHint: 'Showing the merged result. Edited values are saved as provider overrides; values equal to common config are inherited automatically.',
+  commonConfigChangedWhileEditing: 'Common config changed, but you have unsaved edits; the editor was not overwritten.',
   configContentJson: 'Config Content (JSON)',
   extractFromEdit: 'Extract from edit content',
 

@@ -310,7 +310,9 @@ export const setMcpServerEnabled = (name: string, enabled: boolean): Promise<voi
   invoke<void>('set_mcp_server_enabled', { name, enabled });
 
 export const setPluginEnabled = (pluginId: string, enabled: boolean): Promise<void> =>
-  invoke<void>('set_plugin_enabled', { pluginId, enabled });
+  // 后端同步执行 `claude plugin enable/disable` 子进程，可能超过远程 rpc 默认 15s；
+  // 桌面实现忽略 timeoutMs（本地 IPC 无超时）。超时会让远程先报错回滚、桌面最终成功。
+  invoke<void>('set_plugin_enabled', { pluginId, enabled }, { timeoutMs: 60000 });
 
 export const getMcpServerDetail = (
   projectPath: string,

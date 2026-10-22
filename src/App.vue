@@ -325,7 +325,8 @@ async function setupStateSync() {
   // 桌面经 Tauri emit 直达无过滤，不触发）
   void transport.listen('state-resync-needed', () => {
     for (const s of registeredSections()) {
-      applyStateSection(s)
+      // resync 是权威兜底：必须绕过本端写回环抑制
+      applyStateSection(s, { resync: true })
     }
   })
 }

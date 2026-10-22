@@ -1,0 +1,146 @@
+{
+  "_comment": "Provider 分层合并契约样例。Rust(src-tauri/src/tests/providers.rs) 与前端(tests/utils/provider-config.test.ts) 共用，改语义必须两端同时通过。",
+  "resolve": [
+    {
+      "name": "provider-wins-over-common",
+      "commonEnabled": true,
+      "common": {
+        "env": { "ANTHROPIC_MODEL": "common-model", "SHARED": "1" },
+        "effortLevel": "high"
+      },
+      "overrides": {
+        "env": { "ANTHROPIC_AUTH_TOKEN": "sk", "ANTHROPIC_MODEL": "prov-model" }
+      },
+      "meta": { "commonConfigEnabled": true },
+      "effective": {
+        "env": { "ANTHROPIC_MODEL": "prov-model", "SHARED": "1", "ANTHROPIC_AUTH_TOKEN": "sk" },
+        "effortLevel": "high"
+      }
+    },
+    {
+      "name": "provider-disables-common",
+      "commonEnabled": true,
+      "common": { "env": { "X": "1" } },
+      "overrides": { "env": { "Y": "2" } },
+      "meta": { "commonConfigEnabled": false },
+      "effective": { "env": { "Y": "2" } }
+    },
+    {
+      "name": "global-common-disabled",
+      "commonEnabled": false,
+      "common": { "env": { "X": "1" } },
+      "overrides": { "env": { "Y": "2" } },
+      "meta": { "commonConfigEnabled": true },
+      "effective": { "env": { "Y": "2" } }
+    },
+    {
+      "name": "removed-path-with-override",
+      "commonEnabled": true,
+      "common": { "env": { "FOO": "1", "BAR": "2" } },
+      "overrides": { "env": { "FOO": "local" } },
+      "meta": { "commonConfigEnabled": true, "commonConfigRemoved": ["/env/BAR"] },
+      "effective": { "env": { "FOO": "local" } }
+    },
+    {
+      "name": "removed-path-without-override",
+      "commonEnabled": true,
+      "common": { "env": { "FOO": "1", "BAR": "2" } },
+      "overrides": {},
+      "meta": { "commonConfigEnabled": true, "commonConfigRemoved": ["/env/FOO"] },
+      "effective": { "env": { "BAR": "2" } }
+    },
+    {
+      "name": "arrays-replace-wholesale",
+      "commonEnabled": true,
+      "common": { "permissions": { "allow": ["a", "b"], "deny": [] } },
+      "overrides": { "permissions": { "allow": ["c"] } },
+      "meta": { "commonConfigEnabled": true },
+      "effective": { "permissions": { "allow": ["c"], "deny": [] } }
+    },
+    {
+      "name": "type-mismatch-high-layer-wins",
+      "commonEnabled": true,
+      "common": { "model": { "x": 1 }, "z": 1 },
+      "overrides": { "model": "m" },
+      "meta": { "commonConfigEnabled": true },
+      "effective": { "model": "m", "z": 1 }
+    },
+    {
+      "name": "nested-object-deep-merge",
+      "commonEnabled": true,
+      "common": { "a": { "b": { "c": 1, "d": 2 } } },
+      "overrides": { "a": { "b": { "c": 9 } } },
+      "meta": { "commonConfigEnabled": true },
+      "effective": { "a": { "b": { "c": 9, "d": 2 } } }
+    }
+  ],
+  "diff": [
+    {
+      "name": "remove-equal-keep-different",
+      "common": { "env": { "A": "1", "B": "2" }, "effortLevel": "high" },
+      "effective": { "env": { "A": "1", "B": "9" }, "effortLevel": "high" },
+      "expected": { "env": { "B": "9" } }
+    },
+    {
+      "name": "fully-equal-becomes-empty",
+      "common": { "env": { "A": "1" } },
+      "effective": { "env": { "A": "1" } },
+      "expected": {}
+    },
+    {
+      "name": "arrays-equal-removed-different-kept",
+      "common": { "permissions": { "allow": ["a"], "deny": ["x"] } },
+      "effective": { "permissions": { "allow": ["a"], "deny": ["x", "y"] } },
+      "expected": { "permissions": { "deny": ["x", "y"] } }
+    },
+    {
+      "name": "nested-object-diff",
+      "common": { "a": { "b": { "c": 1, "d": 2 } } },
+      "effective": { "a": { "b": { "c": 1, "d": 9 } } },
+      "expected": { "a": { "b": { "d": 9 } } }
+    }
+  ],
+  "migration": [
+    {
+      "name": "remove-materialized-common-values",
+      "commonEnabled": true,
+      "common": {
+        "env": { "M": "common", "S": "1" },
+        "effortLevel": "high"
+      },
+      "legacy": {
+        "env": { "ANTHROPIC_AUTH_TOKEN": "sk", "M": "common", "S": "1" },
+        "effortLevel": "high"
+      },
+      "expected": { "env": { "ANTHROPIC_AUTH_TOKEN": "sk" } }
+    },
+    {
+      "name": "keep-different-values-as-overrides",
+      "commonEnabled": true,
+      "common": { "env": { "M": "common", "S": "1" } },
+      "legacy": { "env": { "M": "prov", "S": "1" } },
+      "expected": { "env": { "M": "prov" } }
+    },
+    {
+      "name": "fully-inherited-becomes-empty",
+      "commonEnabled": true,
+      "common": { "env": { "M": "common" }, "effortLevel": "high" },
+      "legacy": { "env": { "M": "common" }, "effortLevel": "high" },
+      "expected": {}
+    },
+    {
+      "name": "arrays-different-kept",
+      "commonEnabled": true,
+      "common": { "permissions": { "allow": ["a"] } },
+      "legacy": { "permissions": { "allow": ["a", "b"] } },
+      "expected": { "permissions": { "allow": ["a", "b"] } }
+    },
+    {
+      "name": "common-disabled-keeps-legacy-config",
+      "commonEnabled": false,
+      "common": { "env": { "M": "common" } },
+      "legacy": { "env": { "M": "common" } },
+      "expected": { "env": { "M": "common" } }
+    }
+  ]
+}
