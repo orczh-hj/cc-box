@@ -1,10 +1,20 @@
 <template>
-  <div class="quick-key-bar">
+  <!-- mousedown.prevent：点击按键不转移焦点——键盘开着保持开（终端 textarea
+       不被 blur），关着不弹（按钮不获焦，click 仍正常触发）。:active 会被
+       preventDefault 吞掉，按压高亮由 pointer 事件模拟（pressedLabel） -->
+  <div
+    class="quick-key-bar"
+    @mousedown.prevent
+    @pointerdown="onPointerDown"
+    @pointerup="pressedLabel = ''"
+    @pointercancel="pressedLabel = ''"
+    @pointerleave="pressedLabel = ''"
+  >
     <button
       v-for="k in keys"
       :key="k.label"
       class="qk-btn"
-      :class="{ 'qk-action': !!k.action }"
+      :class="{ 'qk-action': !!k.action, pressing: pressedLabel === k.label }"
       :title="k.hint"
       @click="k.action === 'select' ? $emit('select') : $emit('send', k.bytes!)"
     >{{ k.label }}</button>
@@ -18,12 +28,20 @@
  * xterm selection）；Enter 提交，Shift+Tab 模式切换，Ctrl+J 换行不提交，
  * Ctrl+U 清行，Home/End 行首/行尾。action 按钮不发字节，经 TerminalView 转发。
  */
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 
 defineEmits<{ send: [bytes: string]; select: [] }>()
 
 const { t } = useI18n()
+
+/** 按压中的按键 label（补偿 :active 被 mousedown.prevent 吞掉的高亮反馈） */
+const pressedLabel = ref('')
+
+function onPointerDown(e: PointerEvent) {
+  const btn = (e.target as HTMLElement).closest('.qk-btn')
+  pressedLabel.value = btn?.textContent ?? ''
+}
 
 interface QuickKey {
   label: string
@@ -82,7 +100,8 @@ const keys = computed<QuickKey[]>(() => [
   -webkit-tap-highlight-color: transparent;
 }
 
-.qk-btn:active {
+.qk-btn:active,
+.qk-btn.pressing {
   background: var(--selected-bg);
   color: var(--accent-gold);
 }

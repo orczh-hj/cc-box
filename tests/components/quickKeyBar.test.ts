@@ -61,4 +61,31 @@ describe('QuickKeyBar（手机快捷键工具条）', () => {
     expect(wrapper.emitted('select')).toHaveLength(1)
     expect(wrapper.emitted('send')).toBeUndefined()
   })
+
+  // 点击按键不动键盘状态：容器 mousedown preventDefault（不把焦点从终端
+  // textarea 移走——移走即 blur 收起软键盘），click 仍正常派发字节
+  it('QuickKeyBar_MousedownPrevented_KeyboardStateKept_004', async () => {
+    const wrapper = mount(QuickKeyBar)
+    // trigger 不执行浏览器默认行为，preventDefault 效果经监听观察
+    let prevented = false
+    wrapper.find('.quick-key-bar').element.addEventListener('mousedown', (e) => {
+      prevented = e.defaultPrevented
+    })
+    const btn = wrapper.find('.qk-btn:not(.qk-action)')
+    await btn.trigger('mousedown')
+    expect(prevented).toBe(true)
+    await btn.trigger('click')
+    expect(wrapper.emitted('send')).toHaveLength(1)
+  })
+
+  // 按压高亮（:active 被 mousedown.prevent 吞掉后由 pointer 事件模拟）：
+  // pointerdown 落在按键上加 pressing，抬起/离开清除
+  it('QuickKeyBar_PressingHighlight_005', async () => {
+    const wrapper = mount(QuickKeyBar)
+    const btn = wrapper.findAll('.qk-btn:not(.qk-action)')[0]
+    await btn.trigger('pointerdown')
+    expect(btn.classes()).toContain('pressing')
+    await btn.trigger('pointerup')
+    expect(btn.classes()).not.toContain('pressing')
+  })
 })

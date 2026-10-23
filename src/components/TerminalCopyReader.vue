@@ -31,7 +31,7 @@
 
     <!-- 正文：单文本节点 pre，系统原生长按选择手柄接管 -->
     <div ref="scrollRef" class="cr-content">
-      <pre>{{ currentText }}</pre>
+      <pre>{{ displayText }}</pre>
     </div>
   </div>
 </template>
@@ -40,6 +40,7 @@
 import { ref, computed, watch, nextTick, onBeforeUnmount } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { copyText } from '@/api/platform'
+import { squeezeDisplaySpaces } from '@/utils/terminal-reflow'
 
 const props = defineProps<{
   visible: boolean
@@ -58,7 +59,10 @@ const copiedKind = ref<'' | 'selected' | 'all'>('')
 const scrollRef = ref<HTMLElement | null>(null)
 let copiedTimer: number | null = null
 
-const currentText = computed(() => (mode.value === 'smart' ? props.smart : props.raw))
+/** 展示文本：smart 压缩终端帧的对齐/填充空格（窄屏换行后大片空隙不可读） */
+const displayText = computed(() =>
+  mode.value === 'smart' ? squeezeDisplaySpaces(props.smart) : props.raw,
+)
 
 /** 选区实时跟踪（顶栏禁用态） */
 function refreshSelection() {
@@ -79,7 +83,7 @@ async function copySelected() {
 }
 
 async function copyAll() {
-  await copyText(currentText.value)
+  await copyText(displayText.value)
   flashCopied('all')
 }
 
@@ -212,7 +216,9 @@ onBeforeUnmount(() => {
   font-family: 'Cascadia Code', 'Cascadia Mono', Consolas, 'Courier New', monospace;
   font-size: 13px;
   line-height: 1.45;
-  white-space: pre; /* 保横向滚动，勿 word-wrap */
+  /* 在已有宽度内自动换行（不横向滚动）；长 token（URL/路径）强制断行防撑宽 */
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
   /* 系统原生选择手柄（iOS 放大镜 / Android 双锚点） */
   -webkit-user-select: text;
   user-select: text;

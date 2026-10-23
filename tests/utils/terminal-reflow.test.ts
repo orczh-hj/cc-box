@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { reflowSnapshot, type SnapshotData } from '@/utils/terminal-reflow'
+import { reflowSnapshot, squeezeDisplaySpaces, type SnapshotData } from '@/utils/terminal-reflow'
 
 /** 便捷构造：全部行非 isWrapped、cols=80、未截断 */
 function snap(lines: string[], opts?: Partial<SnapshotData>): SnapshotData {
@@ -133,5 +133,21 @@ describe('terminal-reflow 反渲染', () => {
     const p2b = '继续内容'
     const r = reflowSnapshot(snap([p1a, p1b, '', p2a, p2b], { cols: 19 }))
     expect(r.smart).toBe(`${p1a} ${p1b}\n\n${p2a}${p2b}`)
+  })
+})
+
+describe('squeezeDisplaySpaces 阅读器展示清洗', () => {
+  it('SqueezeDisplay_TrailingAndRuns_001：行尾空格剥离、行内连续空格压单个', () => {
+    expect(squeezeDisplaySpaces('发布过程两个插曲（均已处理）：   ')).toBe('发布过程两个插曲（均已处理）：')
+    expect(squeezeDisplaySpaces('  1.  首跑因代理   TUN 劫持')).toBe(' 1. 首跑因代理 TUN 劫持')
+  })
+
+  it('SqueezeDisplay_KeepSingleAndEmpty_002：单个空格与空行保持不变', () => {
+    expect(squeezeDisplaySpaces('a b c\n\nd e')).toBe('a b c\n\nd e')
+  })
+
+  it('SqueezeDisplay_TabPreserved_003：制表符不做压缩（只压空格）；行尾空白剥离', () => {
+    expect(squeezeDisplaySpaces('a\t\tb')).toBe('a\t\tb')
+    expect(squeezeDisplaySpaces('end \t ')).toBe('end')
   })
 })

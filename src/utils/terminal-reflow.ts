@@ -111,3 +111,15 @@ export function reflowSnapshot(snap: SnapshotData): ReflowResult {
   }
   return { smart: out, raw }
 }
+
+/**
+ * 阅读器展示清洗：行尾空白（空格/tab）剥离、行内连续空格压成单个（tab 不动）。
+ * 终端帧里的对齐/填充空格（表格列补位、wrap-ansi 缩进）在窄屏自动换行后
+ * 只会留下大片空隙——压缩后紧凑可读；raw 模式不清洗（保真兜底）。
+ */
+export function squeezeDisplaySpaces(s: string): string {
+  return s
+    .split('\n')
+    .map(line => line.replace(/\s+$/, '').replace(/ {2,}/g, ' '))
+    .join('\n')
+}
