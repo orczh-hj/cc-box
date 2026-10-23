@@ -4,8 +4,6 @@
     class="xterm-container"
     :class="{ 'drag-over': isDragOver }"
     :style="termBgStyle"
-    @touchstart.capture="handleTouchStartCapture"
-    @touchmove.capture="handleTouchMoveCapture"
   >
     <!-- 动态渲染每个 Tab 的终端容器 -->
     <div
@@ -441,9 +439,17 @@ function createTerminal(tabId: string): Terminal {
   return term
 }
 
+// Gesture 监听的宿主元素：onUnmounted 时模板 ref 已被 Vue 置 null，
+// 必须在 onMounted 持有引用才能完成 removeEventListener
+let gestureHostEl: HTMLElement | undefined
+
 onMounted(async () => {
   await setupEventListeners()
   window.addEventListener('copy', handleNativeCopy)
+  // capture：手势事件 bubbles=false，dispatch 在 .xterm-screen 上，仅捕获链可达容器
+  gestureHostEl = containerRef.value
+  gestureHostEl?.addEventListener(GESTURE_CHANGE, handleGestureChange, true)
+  gestureHostEl?.addEventListener(GESTURE_TAP, handleGestureTap, true)
 
   // webfont 迟到兜底：Cascadia Code woff2 加载完成晚于 term.open 时，
   // 清掉按 fallback 字体缓存的 glyph atlas 并重新测量/重绘
@@ -971,26 +977,17 @@ async function cleanup() {
   await sessionStore.cleanupAll()
 }
 
-// 向活跃终端发送文字并聚焦
-function sendText(text: string) {
+// 向活跃终端发送文字。移动端一律不聚焦：软键盘只由用户 tap 终端唤出
+// （gesturetap 兜底），侧边栏插入/工具条按键/拖放等程序化路径聚焦会突然弹出
+// 键盘打断操作；桌面无软键盘问题，保持聚焦（接管/插入后键盘输入立即可用）
+function sendText(text: string, focusAfter = true) {
   const tabId = currentDisplayTabId.value
   if (!tabId) return
   const instance = terminalInstances.get(tabId)
   if (instance?.ptyId) {
     ptyInput(instance.ptyId, text)
-    instance.term.focus()
+    if (focusAfter && !isMobile.value) instance.term.focus()
   }
-}
-
-// 聚焦活跃终端（唤起软键盘）：iOS/Android 对 xterm 内部 focus
-// （preventScroll:true）不弹键盘——直接聚焦裸 textarea（工具栏
-// 「键盘」按钮手势内调用，属于用户激活态，键盘可靠唤出）
-function focus() {
-  const instance = currentInstance()
-  if (!instance) return
-  const ta = instance.term.textarea
-  if (ta) ta.focus()
-  else instance.term.focus()
 }
 
 // 浏览器远程模式：确保 Tab 已 attach（输出流 + 控制权；后 attach 优先抢占，
@@ -1049,80 +1046,61 @@ function captureSnapshot(): SnapshotData {
   return { lines, wrapped, cols: instance.term.cols, truncated: start > 0 }
 }
 
-/** 终端渲染区（.xterm-screen）矩形 */
-function screenRect(): DOMRect | null {
-  const instance = currentInstance()
-  const el = instance?.term.element?.querySelector('.xterm-screen')
-  return el?.getBoundingClientRect() ?? null
-}
+// ===== 触摸：滚动交给 xterm 6 内置 Gesture 系统 =====
+// 旧的 capture stopPropagation 自管层已删——它阻断了 Gesture 的 document 级
+// touch 监听，且在 iOS 上因首个 touchmove（10px 阈值前）未 preventDefault 被
+// WebKit 手势接管发 touchcancel，导致 iPhone 完全无法滚动；整行步进合成 wheel
+// 也无跟手性与惯性。xterm 6 Gesture 自带：像素跟手滚动 + 惯性衰减，且按
+// mouse-reporting→滚轮序列 / 有 scrollback→viewport 滚动 / 否则→方向键三通道
+// 分发。GUI 侧只补两件 Gesture 不管的事：
+// ① 滚动手势收起已弹出的软键盘；② tap 兜底聚焦（Gesture 对触点在
+// .xterm-screen 内的 touchstart preventDefault，合成 mousedown 被杀，而 xterm
+// lib 内无 TAP 消费者，不兜底则软键盘无法弹出）。
+//
+// 手势事件 dispatch 在 .xterm-screen 上且 bubbles=false，但容器是祖先，
+// capture 监听可达，一份监听覆盖所有 tab 实例。
+const GESTURE_CHANGE = '-xterm-gesturechange'
+const GESTURE_TAP = '-xterm-gesturetap'
 
-function cellHeight(): number {
-  const r = screenRect()
-  const instance = currentInstance()
-  if (!r || !instance || instance.term.rows <= 0) return 20
-  return r.height / instance.term.rows
-}
+// 惯性事件坐标修复：xterm 6 beta 的 _inertia（抬手惯性）派发的 CHANGE 不带
+// clientX/clientY，mouse reporting 下 getMouseReportCoords 用缺失坐标换算出 NaN，
+// 编码出 "aN;NaNM" 垃圾序列（加速滑动抬起后必现）。capture 链上先于 xterm 处理，
+// 用手指抬起前最后一次有效坐标补齐
+let lastGestureX = 0
+let lastGestureY = 0
 
-// ===== 普通模式触摸：滚动自管（capture 阶段接管） =====
-// stopPropagation 断开 xterm 内部 touch 处理（其 touchmove 在应用鼠标模式
-// 下转序列时坐标异常，产生 "aN;NaNM" 垃圾输入——根因）。滚动的正确通道是
-// 合成 wheel 派发给 xterm：CLI 开 mouse reporting 时 xterm 编码滚轮序列发给
-// CLI（TUI 内部滚动）；未开时 xterm 滚 scrollback——两条路都通，坐标由我们
-// 提供永不为 NaN。tap（位移 <10px）不 preventDefault，合成 click/mousedown
-// 照常透传给 xterm（光标跳转等原生响应）
-let touchStartY = 0
-let touchLastY = 0
-let touchScrolling = false
-let wheelAccum = 0
-
-/** 拖动量转为合成 wheel 派发给 xterm（deltaY 像素，触点为有效坐标） */
-function dispatchWheelToXterm(deltaY: number, x: number, y: number) {
-  const instance = currentInstance()
-  const el = instance?.term.element
-  if (!el) return
-  el.dispatchEvent(new WheelEvent('wheel', {
-    bubbles: true,
-    cancelable: true,
-    clientX: x,
-    clientY: y,
-    deltaX: 0,
-    deltaY,
-    deltaZ: 0,
-    deltaMode: WheelEvent.DOM_DELTA_PIXEL,
-  }))
-}
-
-function handleTouchStartCapture(e: TouchEvent) {
-  if (!isMobile.value) return
-  e.stopPropagation()
-  touchStartY = touchLastY = e.touches[0].clientY
-  touchScrolling = false
-  wheelAccum = 0
-}
-function handleTouchMoveCapture(e: TouchEvent) {
-  if (!isMobile.value) return
-  e.stopPropagation()
-  const t = e.touches[0]
-  const y = t.clientY
-  if (!touchScrolling && Math.abs(y - touchStartY) >= 10) {
-    touchScrolling = true
-    // 滚动手势：收起已弹出的软键盘（键盘不挡翻阅；高度回升只 fit 不滚底）
-    const ta = currentInstance()?.term.textarea
-    if (ta && document.activeElement === ta) ta.blur()
+/** 滚动手势收起已弹出的软键盘（沿用旧版 10px 阈值语义，防 tap 抖动误收） */
+function handleGestureChange(e: Event) {
+  const ev = e as Event & { clientX?: number; clientY?: number; pageX?: number; pageY?: number }
+  if (Number.isFinite(ev.clientX) && Number.isFinite(ev.clientY)) {
+    lastGestureX = ev.clientX!
+    lastGestureY = ev.clientY!
+  } else {
+    // 事件坐标是原型只读 getter，须以实例属性覆盖（直接赋值在 strict mode 下无效）
+    Object.defineProperty(ev, 'clientX', { value: lastGestureX })
+    Object.defineProperty(ev, 'clientY', { value: lastGestureY })
+    Object.defineProperty(ev, 'pageX', { value: lastGestureX })
+    Object.defineProperty(ev, 'pageY', { value: lastGestureY })
   }
-  if (touchScrolling) {
-    e.preventDefault()
-    // 手指上滑（y 减小）→ 内容上移看新内容 → wheel deltaY 为正（下滚方向）
-    const dy = touchLastY - y
-    touchLastY = y
-    wheelAccum += dy
-    const ch = cellHeight()
-    const steps = Math.trunc(wheelAccum / ch)
-    if (steps !== 0) {
-      wheelAccum -= steps * ch
-      dispatchWheelToXterm(steps * ch, t.clientX, t.clientY)
-    }
-  }
+
+  if (!isMobile.value) return
+  const dy = (ev as Event & { translationY?: number }).translationY ?? 0
+  if (Math.abs(dy) < 10) return
+  const ta = currentInstance()?.term.textarea
+  if (ta && document.activeElement === ta) ta.blur()
+}
+
+/** tap 兜底聚焦：Gesture preventDefault touchstart 杀死合成 mousedown，
+ *  xterm 内部无 TAP 消费者，不兜底则软键盘无法弹出。iOS/Android 对
+ *  xterm 内部 focus（preventScroll:true）不弹键盘——直接聚焦裸 textarea
+ *  才在用户激活态（tap 手势）可靠唤出 */
+function handleGestureTap() {
+  if (!isMobile.value) return
+  const instance = currentInstance()
+  if (!instance) return
+  const ta = instance.term.textarea
+  if (ta) ta.focus()
+  else instance.term.focus()
 }
 
 // 兼容：重启当前活跃 Tab
@@ -1136,6 +1114,9 @@ onUnmounted(() => {
   fitCurrentTerminal.cancel()
   resizeObserver?.disconnect()
   window.removeEventListener('copy', handleNativeCopy)
+  gestureHostEl?.removeEventListener(GESTURE_CHANGE, handleGestureChange, true)
+  gestureHostEl?.removeEventListener(GESTURE_TAP, handleGestureTap, true)
+  gestureHostEl = undefined
   unlistenPtyOutput?.()
   unlistenPtyExit?.()
   unlistenPtyError?.()
@@ -1162,7 +1143,8 @@ async function handleClaim(tabId: string) {
     const tab = sessionStore.getTabByPtyId(instance.ptyId)
     if (tab) tab.takenOver = false
     instance.fitAddon.fit()
-    instance.term.focus()
+    // 移动端不聚焦：接管是点按钮触发的，聚焦会突然弹出软键盘（键盘只由 tap 终端唤出）
+    if (!isMobile.value) instance.term.focus()
   }
 }
 
@@ -1178,7 +1160,6 @@ defineExpose({
   restartCurrentPty,
   cleanup,
   sendText,
-  focus,
   fitCurrentTerminal,
   refreshRemoteSessions,
   captureSnapshot,

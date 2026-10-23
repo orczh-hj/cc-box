@@ -120,7 +120,8 @@ const isMobile = useIsMobile()
 // 复制阅读器数据（null = 关闭；v-if 挂载即新快照，不常驻 DOM）
 const copyReaderData = ref<{ smart: string; raw: string; truncated: boolean } | null>(null)
 
-/** 快捷键工具条：直发控制序列到当前显示终端（sendText 含重新聚焦） */
+/** 快捷键工具条：直发控制序列到当前显示终端（移动端不聚焦由 sendText
+ *  内部 isMobile 守卫处理——点按键不召唤软键盘；桌面回焦让键盘输入立即可用） */
 function handleQuickKey(bytes: string) {
   terminalRef.value?.sendText(bytes)
 }

@@ -1316,6 +1316,23 @@
 - `Ctrl+←/→` 按词跳转正常（CLI 自身行为）
 - `Alt+←/→` 行为与升级前一致（如 CLI 无绑定则无反应），不出现异常字符注入
 
+### TerminalRender_TouchGesture_001 — 触屏触摸滚动回归（xterm 6 Gesture）
+
+**目标**：验证触摸滚动已回归 xterm 6 内置 Gesture 系统（旧 capture 自管层已删除），iPhone 不再完全失效、其他触屏设备不再整行顿挫
+
+**前置条件**：触屏设备（iPhone Safari 为主，Android Chrome 对照）经浏览器远程模式访问，进入会话并有足够历史输出
+
+**操作步骤**：
+1. 轻扫终端上下滚动（慢速拖动 + 快速甩动）
+2. tap 终端 → 软键盘弹出并输入；再轻扫滚动
+3. 打开 vim/htop（mouse reporting），上下轻扫并 tap 界面元素
+4. 手机端详细清单 → [remote/docs/manual-test-cases.md](../remote/docs/manual-test-cases.md) U-13 / U-15
+
+**预期结果**：
+- 滚动像素级跟手、快速甩动有惯性滑行衰减；iPhone 上不再无效（旧实现首个 touchmove 未 preventDefault 被 WebKit 手势接管发 touchcancel）
+- tap 唤出软键盘（Gesture preventDefault 杀死合成 mousedown 后由 gesturetap 兜底聚焦）、滚动即收键盘且轻点不误收
+- vim/htop 滚动走 TUI 内部，输入行无 `aN;NaNM` 垃圾序列
+
 ## 输入法候选框定位
 
 > 背景：xterm 默认把 helper textarea 放在屏幕外（`left: -9999em`），IME 候选框跟随 textarea 的 caret 定位，导致候选框远离终端光标。修复方式为每次渲染/缩放后把 textarea 同步到光标像素位置（`src/utils/ime.ts`）。
