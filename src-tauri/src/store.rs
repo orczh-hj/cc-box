@@ -440,6 +440,9 @@ pub fn get_home_data(project_limit: usize, session_limit: usize) -> Result<HomeD
     let mut projects = Vec::new();
     let mut all_sessions = Vec::new();
 
+    // 隐藏项目不展示（其历史会话也一并在近期会话中过滤）
+    let hidden = hidden_project_keys();
+
     for entry in fs::read_dir(&projects_dir)? {
         let entry = entry?;
         let path = entry.path();
@@ -455,6 +458,11 @@ pub fn get_home_data(project_limit: usize, session_limit: usize) -> Result<HomeD
 
         // 跳过原始路径已不存在的项目
         if !Path::new(&real_path).exists() {
+            continue;
+        }
+
+        // 隐藏项目跳过（会话收集在同一循环内，连带跳过）
+        if is_hidden_project(&hidden, &real_path) {
             continue;
         }
 
@@ -509,6 +517,9 @@ pub fn get_projects(limit: Option<usize>, offset: Option<usize>) -> Result<Vec<P
 
     let mut projects = Vec::new();
 
+    // 隐藏项目不展示（get_all_recent_sessions 等也经此过滤）
+    let hidden = hidden_project_keys();
+
     for entry in fs::read_dir(&projects_dir)? {
         let entry = entry?;
         let path = entry.path();
@@ -525,6 +536,11 @@ pub fn get_projects(limit: Option<usize>, offset: Option<usize>) -> Result<Vec<P
 
         // 跳过原始路径已不存在的项目
         if !Path::new(&real_path).exists() {
+            continue;
+        }
+
+        // 隐藏项目跳过
+        if is_hidden_project(&hidden, &real_path) {
             continue;
         }
 
@@ -565,6 +581,55 @@ pub fn get_projects(limit: Option<usize>, offset: Option<usize>) -> Result<Vec<P
 pub fn get_project_info(path: &str) -> Result<Option<Project>> {
     let projects = get_projects(None, None)?;
     Ok(projects.iter().find(|p| p.path == path).cloned())
+}
+
+// ==================== 隐藏项目 ====================
+
+/// 项目路径归一化（比对键）：统一分隔符、去尾斜杠、小写。
+/// 隐藏记录与列表路径来自不同来源（用户隐藏时的列表路径 / 重新添加时的
+/// 选择器路径），Windows 大小写与分隔符差异必须归一后比对
+pub(crate) fn normalize_project_key(path: &str) -> String {
+    path.replace('\\', "/").trim_end_matches('/').to_lowercase()
+}
+
+/// 隐藏项目键集合（config.hiddenProjects → 归一化）
+fn hidden_project_keys() -> std::collections::HashSet<String> {
+    get_app_config()
+        .ok()
+        .and_then(|c| c.hidden_projects)
+        .unwrap_or_default()
+        .iter()
+        .map(|p| normalize_project_key(p))
+        .collect()
+}
+
+/// 项目是否隐藏（路径归一化后比对）
+pub(crate) fn is_hidden_project(keys: &std::collections::HashSet<String>, path: &str) -> bool {
+    keys.contains(&normalize_project_key(path))
+}
+
+/// 隐藏项目：记录路径，首页项目列表/近期会话不再主动展示
+/// （用户重新添加该项目时经 unhide_project 解除）
+pub fn hide_project(path: &str) -> Result<()> {
+    let hidden = get_app_config()?.hidden_projects.unwrap_or_default();
+    let key = normalize_project_key(path);
+    if hidden.iter().any(|p| normalize_project_key(p) == key) {
+        return Ok(());
+    }
+    let mut next = hidden;
+    next.push(path.to_string());
+    update_app_config(serde_json::json!({ "hiddenProjects": next }))
+}
+
+/// 取消隐藏项目（新增项目再次打开时调用）
+pub fn unhide_project(path: &str) -> Result<()> {
+    let hidden = get_app_config()?.hidden_projects.unwrap_or_default();
+    let key = normalize_project_key(path);
+    let next: Vec<String> = hidden
+        .into_iter()
+        .filter(|p| normalize_project_key(p) != key)
+        .collect();
+    update_app_config(serde_json::json!({ "hiddenProjects": next }))
 }
 
 /// 从 JSONL 提取会话名称

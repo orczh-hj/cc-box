@@ -214,6 +214,14 @@ export const getHomeData = (projectLimit?: number, sessionLimit?: number): Promi
 export const getProjects = (limit?: number, offset?: number): Promise<Project[]> =>
   invoke<Project[]>('get_projects', { limit, offset });
 
+/** 隐藏项目（首页不再主动展示；写命令，广播 state-changed(projects)） */
+export const hideProject = (path: string): Promise<void> =>
+  invoke<void>('hide_project', { path });
+
+/** 取消隐藏项目（重新添加该项目时恢复展示） */
+export const unhideProject = (path: string): Promise<void> =>
+  invoke<void>('unhide_project', { path });
+
 /** 目录浏览条目（远程端"添加项目"的目录选择器；仅子目录） */
 export interface DirEntryLite {
   name: string

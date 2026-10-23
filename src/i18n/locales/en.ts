@@ -261,6 +261,7 @@ export default {
   noMatchingProjects: 'No matching projects',
   noProjectsYet: 'No projects yet',
   addProject: 'Add Project',
+  hideProject: 'Hide project (removed from list; re-adding restores it)',
 
   // Terminal
   startNewSession: 'Start a new Claude session',

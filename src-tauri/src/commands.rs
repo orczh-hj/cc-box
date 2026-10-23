@@ -211,6 +211,20 @@ pub async fn get_projects(
     crate::store::get_projects(limit, offset).map_err(|e| e.to_string())
 }
 
+/// 隐藏项目（首页不再主动展示；state-changed(projects) 广播全端刷新）
+#[cc_command(write = "projects")]
+#[tauri::command]
+pub async fn hide_project(path: String) -> Result<(), String> {
+    crate::store::hide_project(&path).map_err(|e| e.to_string())
+}
+
+/// 取消隐藏项目（用户重新添加该项目时恢复展示）
+#[cc_command(write = "projects")]
+#[tauri::command]
+pub async fn unhide_project(path: String) -> Result<(), String> {
+    crate::store::unhide_project(&path).map_err(|e| e.to_string())
+}
+
 /// 目录浏览条目（远程端"添加项目"的电脑目录选择器用）
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]

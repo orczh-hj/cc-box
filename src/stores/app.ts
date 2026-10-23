@@ -11,8 +11,11 @@ import {
   getCheckResults,
   runChecks,
   getSystemLocale,
+  hideProject as hideProjectApi,
+  unhideProject as unhideProjectApi,
 } from '@/api/tauri'
 import i18n from '@/i18n'
+import { useSidebarStore } from '@/stores/sidebar'
 
 import type { ClaudeOptions, DefaultClaudeOptions, CheckResult, Project, SessionInfo } from '@/types'
 
@@ -70,6 +73,9 @@ export const useAppStore = defineStore('app', () => {
   const hasMoreProjects = ref(true)
   const isLoadingProjects = ref(false)
 
+  // 隐藏项目路径（config.hiddenProjects 镜像；判断"重新添加时解除隐藏"用）
+  const hiddenProjects = ref<string[]>([])
+
   // Claude 默认启动参数（持久化，Settings 绑定）
   const defaultClaudeOptions = ref<DefaultClaudeOptions>({
     skipPermissions: false,
@@ -98,6 +104,7 @@ export const useAppStore = defineStore('app', () => {
       fontSize.value = config.fontSize || 12
       language.value = config.language || (await detectSystemLocale())
       i18n.global.locale.value = language.value
+      hiddenProjects.value = config.hiddenProjects ?? []
 
       // 加载环境变量：非首次纯读；仅配置为空（首次使用）时持久化默认值。
       // 不能每次加载都写回（doSyncEnv）——写命令会广播 state-changed(config)，
@@ -192,7 +199,64 @@ export const useAppStore = defineStore('app', () => {
     await loadCache()
   }
 
+  /** 路径归一化（与后端 normalize_project_key 一致：Windows 大小写不敏感） */
+  function normalizeProjectPath(p: string): string {
+    return p.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
+  }
+
+  /** 隐藏项目：乐观从首页缓存移除（条目原地消失）；跨端经
+   *  state-changed(projects) 权威刷新，本端写登记抑制回环整列表重建 */
+  async function hideProject(path: string) {
+    const key = normalizeProjectPath(path)
+    cachedProjects.value = cachedProjects.value.filter(p => normalizeProjectPath(p.path) !== key)
+    cachedRecentSessions.value = cachedRecentSessions.value.filter(s => normalizeProjectPath(s.projectPath) !== key)
+    if (!hiddenProjects.value.some(p => normalizeProjectPath(p) === key)) {
+      hiddenProjects.value = [...hiddenProjects.value, path]
+    }
+    useSidebarStore().markSelfWrite('projects')
+    try {
+      await hideProjectApi(path)
+    } catch (err) {
+      console.error('Failed to hide project:', err)
+      // 失败回滚：撤销登记（无对应广播，防误吞其它端事件）+ 以服务端状态为准重拉
+      useSidebarStore().cancelSelfWrite('projects')
+      void syncHiddenProjects()
+      void refreshCache()
+    }
+  }
+
+  /** 重新打开项目时解除隐藏（未隐藏时不发写命令，避免无谓的跨端刷新） */
+  async function unhideProjectIfHidden(path: string) {
+    const key = normalizeProjectPath(path)
+    if (!hiddenProjects.value.some(p => normalizeProjectPath(p) === key)) return
+    hiddenProjects.value = hiddenProjects.value.filter(p => normalizeProjectPath(p) !== key)
+    useSidebarStore().markSelfWrite('projects')
+    try {
+      await unhideProjectApi(path)
+    } catch (err) {
+      console.error('Failed to unhide project:', err)
+      useSidebarStore().cancelSelfWrite('projects')
+      void syncHiddenProjects()
+    }
+  }
+
+  /** 仅同步 hiddenProjects 镜像（projects section 跨端刷新时补拉，不动其余配置态） */
+  async function syncHiddenProjects() {
+    try {
+      hiddenProjects.value = (await getAppConfig()).hiddenProjects ?? []
+    } catch {
+      // 读配置失败保持现状
+    }
+  }
+
+  /** 路径是否在隐藏清单中（归一化比对；乐观更新与本地缓存回填的统一守卫） */
+  function isPathHidden(path: string): boolean {
+    return hiddenProjects.value.some(p => normalizeProjectPath(p) === normalizeProjectPath(path))
+  }
+
   function ensureProjectInList(projectPath: string) {
+    // 隐藏项目不回填首页（运行中 Tab 的会话启动路径可能触发此处）
+    if (isPathHidden(projectPath)) return
     const normalize = (p: string) => p.replace(/\\/g, '/').toLowerCase()
     const normalized = normalize(projectPath)
     if (cachedProjects.value.some(p => normalize(p.path) === normalized)) return
@@ -221,6 +285,8 @@ export const useAppStore = defineStore('app', () => {
    *  「近期会话」零请求即时可见——比重拉 getHomeData 高效，且不重置
    *  项目列表分页状态。缓存条目代表已结束的会话，working/pending 清 false */
   function mergeRecentSession(session: SessionInfo) {
+    // 隐藏项目的会话不并入近期会话（Tab 关闭路径；否则隐藏被本地缓存绕过）
+    if (isPathHidden(session.projectPath)) return
     const existing = cachedRecentSessions.value.find(s => s.sessionId === session.sessionId)
     if (existing) {
       Object.assign(existing, session, { working: false, pending: false })
@@ -389,11 +455,16 @@ export const useAppStore = defineStore('app', () => {
     openedProjectPaths,
     hasMoreProjects,
     isLoadingProjects,
+    hiddenProjects,
     loadAppConfig,
     runChecks: doChecks,
     loadCache,
     loadMoreProjects,
     refreshCache,
+    hideProject,
+    unhideProjectIfHidden,
+    syncHiddenProjects,
+    isPathHidden,
     mergeRecentSession,
     ensureProjectInList,
     isKnownProject,

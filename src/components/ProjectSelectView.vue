@@ -123,23 +123,38 @@
           </div>
         </template>
         <template v-else>
-          <button
+          <div
             v-for="project in filteredProjects"
             :key="project.path"
-            class="project-item"
-            @click="$emit('selectProject', project.path)"
+            class="project-row"
           >
-            <svg class="folder-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
-            </svg>
-            <div class="project-info">
-              <span class="project-name">{{ project.name }}</span>
-              <span class="project-path">{{ project.path }}</span>
-            </div>
-            <span v-if="getProjectRunningCount(project.path) > 0" class="running-number">
-              {{ getProjectRunningCount(project.path) }}
-            </span>
-          </button>
+            <button
+              class="project-item"
+              @click="$emit('selectProject', project.path)"
+            >
+              <svg class="folder-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+              </svg>
+              <div class="project-info">
+                <span class="project-name">{{ project.name }}</span>
+                <span class="project-path">{{ project.path }}</span>
+              </div>
+              <span v-if="getProjectRunningCount(project.path) > 0" class="running-number">
+                {{ getProjectRunningCount(project.path) }}
+              </span>
+            </button>
+            <button
+              class="project-hide-btn"
+              :title="t('hideProject')"
+              :aria-label="t('hideProject')"
+              @click.stop="handleHideProject(project.path)"
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <line x1="18" y1="6" x2="6" y2="18"/>
+                <line x1="6" y1="6" x2="18" y2="18"/>
+              </svg>
+            </button>
+          </div>
 
           <div v-if="!searchQuery && appStore.hasMoreProjects && !appStore.isLoadingProjects" class="load-more-section">
             <button class="load-more-btn" @click="handleLoadMore">
@@ -352,6 +367,11 @@ function formatTimeAgo(timestamp: number): string {
 
 function handleResumeSession(session: SessionInfo) {
   emit('resumeSession', session.projectPath, session.sessionId, session.name)
+}
+
+/** 隐藏项目：列表原地移除；重新添加该项目时自动恢复展示 */
+function handleHideProject(path: string) {
+  void appStore.hideProject(path)
 }
 
 async function handleSaveDefault() {
@@ -743,6 +763,18 @@ async function handleSaveDefault() {
   padding: 8px;
 }
 
+/* 项目行 = 打开按钮 + 隐藏按钮（button 不可嵌套，row 包两个平级按钮） */
+.project-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.project-row .project-item {
+  flex: 1;
+  min-width: 0;
+}
+
 .project-item {
   display: flex;
   align-items: center;
@@ -798,6 +830,38 @@ async function handleSaveDefault() {
   color: var(--status-success);
   font-weight: 500;
   flex-shrink: 0;
+}
+
+/* 隐藏项目按钮：触屏常显；hover 设备移入项目行时浮现（包 @media (hover: hover)） */
+.project-hide-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  flex-shrink: 0;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.project-hide-btn:hover {
+  color: var(--text-primary);
+  background: var(--bg-secondary);
+}
+
+@media (hover: hover) {
+  .project-hide-btn {
+    opacity: 0;
+  }
+
+  .project-row:hover .project-hide-btn,
+  .project-hide-btn:focus-visible {
+    opacity: 1;
+  }
 }
 
 .empty-list {

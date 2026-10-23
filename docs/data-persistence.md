@@ -61,6 +61,7 @@
 | `defaultCustomArgs` | string | 自定义参数默认值 |
 | `theme` | string | GUI 主题 |
 | `fontSize` | number | 终端字号 |
+| `hiddenProjects` | string[]? | 隐藏项目路径（首页不再主动展示；重新添加该项目时解除） |
 | `lastOpenedProject` | string? | 上次打开的项目路径 |
 
 ## Store 命令 (IPC 通道)
@@ -69,6 +70,8 @@
 |------|------|
 | `get_home_data` | 一次获取项目列表 + 近期会话（合并 IO） |
 | `get_projects` | 项目列表（分页） |
+| `hide_project` | 隐藏项目（写命令，广播 state-changed(projects)；首页列表/近期会话过滤） |
+| `unhide_project` | 取消隐藏（重新添加该项目时恢复展示） |
 | `get_project_info` | 项目详情 |
 | `get_sessions` | 会话列表（分页） |
 | `get_session_count` | 会话总数 |

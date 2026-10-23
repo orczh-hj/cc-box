@@ -1410,3 +1410,56 @@ fn SetMcpEnabled_PathTraversal_001() {
     let r = set_mcp_server_enabled_in(&claude_json, &disabled_dir, "../escape", false);
     assert!(r.is_err());
 }
+
+// ==================== 隐藏项目 ====================
+
+use crate::store::{
+    get_app_config, hide_project, is_hidden_project, normalize_project_key, unhide_project,
+};
+use std::collections::HashSet;
+
+// 归一化匹配：大小写/分隔符/尾斜杠差异视为同一路径，不同路径不误伤
+#[test]
+fn IsHiddenProject_NormalizeMatch_001() {
+    let keys: HashSet<String> = ["D:\\Work\\Demo", "/home/user/proj/"]
+        .iter()
+        .map(|p| normalize_project_key(p))
+        .collect();
+
+    assert!(is_hidden_project(&keys, "d:/work/demo"));
+    assert!(is_hidden_project(&keys, "D:\\Work\\Demo"));
+    assert!(is_hidden_project(&keys, "/home/user/proj"));
+    assert!(!is_hidden_project(&keys, "D:/Work/other"));
+}
+
+// 隐藏落盘 + 归一化去重（同路径不同写法只记一条）
+#[test]
+fn HideProject_PersistAndDedup_002() {
+    let _cfg_lock = super::CONFIG_DIR_TEST_LOCK.lock();
+    let _cfg_guard = super::TestConfigDirGuard::new("hide-project");
+
+    hide_project("D:\\Work\\Demo").unwrap();
+    hide_project("/home/user/proj").unwrap();
+    // 同路径不同写法 → 去重
+    hide_project("d:/work/demo/").unwrap();
+
+    let hidden = get_app_config().unwrap().hidden_projects.unwrap();
+    assert_eq!(hidden.len(), 2);
+}
+
+// 取消隐藏：按归一化移除；未隐藏路径调用无副作用
+#[test]
+fn UnhideProject_RemoveNormalized_003() {
+    let _cfg_lock = super::CONFIG_DIR_TEST_LOCK.lock();
+    let _cfg_guard = super::TestConfigDirGuard::new("unhide-project");
+
+    hide_project("D:\\Work\\Demo").unwrap();
+    hide_project("/home/user/proj").unwrap();
+    // 不同分隔符/大小写写法也能解除
+    unhide_project("d:/work/demo").unwrap();
+    // 未隐藏路径 → 无错误、列表不变
+    unhide_project("/never/hidden").unwrap();
+
+    let hidden = get_app_config().unwrap().hidden_projects.unwrap();
+    assert_eq!(hidden, vec!["/home/user/proj".to_string()]);
+}

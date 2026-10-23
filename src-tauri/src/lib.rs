@@ -195,6 +195,8 @@ pub fn run(initial_dir: Option<String>) {
             commands::controller_status,
             commands::rename_session,
             commands::get_projects,
+            commands::hide_project,
+            commands::unhide_project,
             commands::list_directories,
             commands::get_project_info,
             commands::get_sessions,

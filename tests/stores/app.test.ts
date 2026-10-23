@@ -281,3 +281,76 @@ describe('mergeRecentSession', () => {
     expect(store.cachedRecentSessions[0].pending).toBe(false)
   })
 })
+
+describe('hideProject / unhideProjectIfHidden', () => {
+  // 隐藏：乐观移除项目与其近期会话（归一化匹配）+ 调后端命令
+  it('HideProject_OptimisticRemove_001', async () => {
+    const calls: Array<[string, unknown]> = []
+    mockIPC((cmd, args) => {
+      calls.push([cmd, args])
+      return null
+    })
+    const store = useAppStore()
+    store.cachedProjects = [
+      { path: 'D:\\Work\\Demo', name: 'Demo' },
+      { path: '/home/user/proj', name: 'proj' },
+    ]
+    store.refreshRecentSessions([
+      { sessionId: 's1', name: 's1', projectPath: 'd:/work/demo', lastActiveAt: 1 },
+      { sessionId: 's2', name: 's2', projectPath: '/home/user/proj', lastActiveAt: 2 },
+    ] as SessionInfo[])
+
+    await store.hideProject('D:\\Work\\Demo')
+
+    expect(store.cachedProjects.map(p => p.path)).toEqual(['/home/user/proj'])
+    expect(store.cachedRecentSessions.map(s => s.sessionId)).toEqual(['s2'])
+    expect(store.hiddenProjects).toContain('D:\\Work\\Demo')
+    expect(calls.some(([cmd, args]) => cmd === 'hide_project' && (args as { path: string }).path === 'D:\\Work\\Demo')).toBe(true)
+  })
+
+  // 未隐藏时打开项目：不发 unhide 命令（避免无谓跨端刷新）
+  it('UnhideProjectIfHidden_SkipsWhenNotHidden_002', async () => {
+    const calls: string[] = []
+    mockIPC((cmd) => {
+      calls.push(cmd)
+      return null
+    })
+    const store = useAppStore()
+    await store.unhideProjectIfHidden('/not/hidden')
+    expect(calls).not.toContain('unhide_project')
+  })
+
+  // 已隐藏时打开项目：归一化匹配解除 + 调命令 + 守卫集合移除
+  it('UnhideProjectIfHidden_RemovesWhenHidden_003', async () => {
+    const calls: Array<[string, unknown]> = []
+    mockIPC((cmd, args) => {
+      calls.push([cmd, args])
+      return null
+    })
+    const store = useAppStore()
+    store.hiddenProjects = ['d:/work/demo']
+
+    await store.unhideProjectIfHidden('D:\\Work\\Demo')
+
+    expect(store.hiddenProjects).toHaveLength(0)
+    expect(calls.some(([cmd, args]) => cmd === 'unhide_project' && (args as { path: string }).path === 'D:\\Work\\Demo')).toBe(true)
+  })
+
+  // 隐藏项目的本地缓存回填守卫：ensureProjectInList / mergeRecentSession
+  // 不把隐藏项目塞回首页（运行中 Tab 的会话启动/关闭路径）
+  it('HiddenProject_LocalCacheBackfillGuard_004', async () => {
+    mockIPC(() => null)
+    const store = useAppStore()
+    store.cachedProjects = []
+    store.refreshRecentSessions([])
+    store.hiddenProjects = ['D:\\Work\\Demo']
+
+    store.ensureProjectInList('D:\\Work\\Demo')
+    store.ensureProjectInList('/home/user/proj')
+    store.mergeRecentSession({ sessionId: 's1', name: 's1', projectPath: 'd:/work/demo', lastActiveAt: 1 } as SessionInfo)
+    store.mergeRecentSession({ sessionId: 's2', name: 's2', projectPath: '/home/user/proj', lastActiveAt: 2 } as SessionInfo)
+
+    expect(store.cachedProjects.map(p => p.path)).toEqual(['/home/user/proj'])
+    expect(store.cachedRecentSessions.map(s => s.sessionId)).toEqual(['s2'])
+  })
+})

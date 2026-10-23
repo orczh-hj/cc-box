@@ -122,3 +122,12 @@ registerSectionLoader('config', {
   load: () => useAppStore().loadAppConfig(),
   deferWhileSettingsOpen: true,
 })
+// 隐藏/恢复项目（hide_project/unhide_project）：首页项目列表与近期会话权威
+// 重拉；hiddenProjects 存于 config，一并静默同步守卫集合（不走 config loader
+// ——loadAppConfig 会重置 claudeOptions 等编辑中状态）
+registerSectionLoader('projects', {
+  load: async () => {
+    await useAppStore().refreshCache()
+    void useAppStore().syncHiddenProjects()
+  },
+})

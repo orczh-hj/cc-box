@@ -261,6 +261,7 @@ export default {
   noMatchingProjects: '没有匹配的项目',
   noProjectsYet: '暂无项目',
   addProject: '添加项目',
+  hideProject: '隐藏项目（不再展示，重新添加后恢复）',
 
   // Terminal
   startNewSession: '启动新的 Claude 会话',
