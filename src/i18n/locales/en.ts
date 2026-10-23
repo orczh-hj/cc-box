@@ -52,6 +52,7 @@ export default {
 
   // Quick key bar (mobile breakpoint)
   quickKeyEsc: 'Cancel / Esc',
+  quickKeyEnter: 'Enter (submit)',
   quickKeyMode: 'Switch work mode (Shift+Tab)',
   quickKeyNewline: 'Insert line break (Ctrl+J)',
   quickKeyClearLine: 'Clear current input line (Ctrl+U)',

@@ -11,6 +11,7 @@ import QuickKeyBar from '@/components/QuickKeyBar.vue'
 /** label → 期望发送的终端转义序列（action 按钮 select 不在此列） */
 const EXPECT: Record<string, string> = {
   'Esc': '\x1b',
+  'Enter': '\r',      // 回车：提交（与 Ctrl+J 换行不提交互补）
   '⇧Tab': '\x1b[Z',   // Shift+Tab：Claude CLI 工作模式切换
   'Ctrl+J': '\x0a',    // 换行不提交
   'Ctrl+U': '\x15',    // 清空当前输入行
@@ -27,7 +28,7 @@ describe('QuickKeyBar（手机快捷键工具条）', () => {
     mockT.mockClear()
   })
 
-  // 键序：选择复制 action 按钮（第一位）+ 十个字节键；
+  // 键序：选择复制 action 按钮（第一位）+ 十一个字节键（Enter 在 Esc 后）；
   // ^C 与「键盘」按钮（点击终端已可唤起软键盘）已按用户决策移除
   it('QuickKeyBar_RendersAllKeys_001', () => {
     const wrapper = mount(QuickKeyBar)

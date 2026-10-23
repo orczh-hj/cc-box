@@ -52,6 +52,7 @@ export default {
 
   // 快捷键工具条（手机断点）
   quickKeyEsc: '取消/Esc',
+  quickKeyEnter: '回车（提交）',
   quickKeyMode: '切换工作模式 (Shift+Tab)',
   quickKeyNewline: '插入换行不提交 (Ctrl+J)',
   quickKeyClearLine: '清空当前输入行 (Ctrl+U)',

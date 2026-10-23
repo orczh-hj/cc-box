@@ -15,8 +15,8 @@
 /**
  * 快捷键工具条（手机断点）：软键盘按不出的控制键，用按钮直发终端转义序列。
  * 软键盘由点击终端区域唤出；「选择复制」进入终端原生选择模式（拖选 + 复制走
- * xterm selection）；Shift+Tab 模式切换，Ctrl+J 换行，Ctrl+U 清行，
- * Home/End 行首/行尾。action 按钮不发字节，经 TerminalView 转发。
+ * xterm selection）；Enter 提交，Shift+Tab 模式切换，Ctrl+J 换行不提交，
+ * Ctrl+U 清行，Home/End 行首/行尾。action 按钮不发字节，经 TerminalView 转发。
  */
 import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
@@ -35,6 +35,7 @@ interface QuickKey {
 const keys = computed<QuickKey[]>(() => [
   { label: t('quickKeySelectCopy'), action: 'select' },
   { label: 'Esc', bytes: '\x1b', hint: t('quickKeyEsc') },
+  { label: 'Enter', bytes: '\r', hint: t('quickKeyEnter') },
   { label: '⇧Tab', bytes: '\x1b[Z', hint: t('quickKeyMode') },
   { label: 'Ctrl+J', bytes: '\x0a', hint: t('quickKeyNewline') },
   { label: 'Ctrl+U', bytes: '\x15', hint: t('quickKeyClearLine') },
