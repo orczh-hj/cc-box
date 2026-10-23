@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.16.6] - 2026-10-23
+
+### Fixed
+- Fix iPhone terminal touch scrolling (unreachable due to iOS gesture takeover) by adopting xterm 6 native gestures with pixel-follow and inertia
+- Fix garbage aN;NaNM sequences during inertial scrolling in mouse-reporting apps (vim/htop)
+- Stop auto-rotating remote credentials on stop/start; paired devices now persist across restarts
+- Restore desktop quick-key focus after sending control sequences
+
+### Features
+- Add Rotate Secret button (two-step confirm) that revokes all paired devices instantly
+- Add security explanation to the remote panel; compact panel layout
+- Add Enter key to the mobile quick-key toolbar
+
+Note: relay update restarts the service; phone clients need to re-pair after update, and browsers should hard-refresh.
+
 ## [0.16.5] - 2026-10-22
 
 ### Features
