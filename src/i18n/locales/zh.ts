@@ -41,6 +41,9 @@ export default {
   remoteRefreshPair: '更新连接码',
   remoteRelayNotConfigured: '中继未连接，正在自动重试…',
   remoteHostedElsewhere: '远程服务由本机另一 CC-Box 实例提供，扫码连接的是该实例',
+  remoteSecurityHint: '安全说明：仅扫码配对的设备可访问本机；停止远程立即断开一切连接；刷新密钥会使所有已配对设备失效，需重新扫码。',
+  remoteRotateSecret: '刷新密钥',
+  remoteRotateConfirm: '确认刷新？所有已配对设备将断开',
 
   // 全局控制权遮罩（设备互斥：其他设备操作中）
   controllerMaskTitle: '被其他设备控制中',

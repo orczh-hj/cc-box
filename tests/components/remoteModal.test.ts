@@ -298,4 +298,76 @@ describe('RemoteModal（统一扫码：默认公网中继 + 局域访问复选�
     expect(text).not.toContain('remoteQrHint')
     wrapper.unmount()
   })
+
+  // 安全逻辑说明：运行态面板必须展示（令牌认证 / 停止即断 / 刷新密钥作废设备）
+  it('RemoteModal_SecurityHintShown_010', async () => {
+    mockIPC((cmd) => {
+      if (cmd === 'get_remote_status') return RELAY_READY
+      return null
+    })
+
+    const wrapper = mountModal()
+    await flushPromises()
+
+    expect(bodyText()).toContain('remoteSecurityHint')
+    wrapper.unmount()
+  })
+
+  // 刷新密钥两段式：首次点击仅进入待确认（不调后端、按钮转确认文案），
+  // 再次点击才调 rotate_remote_secret 并以返回状态刷新面板
+  it('RemoteModal_RotateSecretTwoStep_011', async () => {
+    const ROTATED = {
+      ...RELAY_READY,
+      relayPairUrl: 'https://cc.orczh.top/#pair=NEWCODE1',
+      relayPairCode: 'NEWCODE1',
+    }
+    let rotateCalls = 0
+    mockIPC((cmd) => {
+      if (cmd === 'get_remote_status') return RELAY_READY
+      if (cmd === 'rotate_remote_secret') {
+        rotateCalls++
+        return ROTATED
+      }
+      return null
+    })
+
+    const wrapper = mountModal()
+    await flushPromises()
+
+    const btn = [...document.body.querySelectorAll('button')]
+      .find(b => b.textContent?.includes('remoteRotateSecret')) as HTMLButtonElement
+    expect(btn).toBeTruthy()
+
+    // 第一次点击：仅待确认，后端未被调用
+    btn.click()
+    await flushPromises()
+    expect(rotateCalls).toBe(0)
+    expect(bodyText()).toContain('remoteRotateConfirm')
+
+    // 第二次点击：执行轮换，面板展示新配对码
+    btn.click()
+    await flushPromises()
+    expect(rotateCalls).toBe(1)
+    expect(bodyText()).toContain('NEWCODE1')
+    expect(bodyText()).not.toContain('584744A5')
+    wrapper.unmount()
+  })
+
+  // 宿主制：凭证属宿主实例，非宿主不显示刷新密钥（与停止按钮同规则）
+  it('RemoteModal_HostedNoRotate_012', async () => {
+    mockIPC((cmd) => {
+      if (cmd === 'get_remote_status') {
+        return { ...LAN_STATUS, running: false, hostedElsewhere: true }
+      }
+      return null
+    })
+
+    const wrapper = mountModal()
+    await flushPromises()
+
+    const text = bodyText()
+    expect(text).not.toContain('remoteRotateSecret')
+    expect(text).not.toContain('remoteStop')
+    wrapper.unmount()
+  })
 })

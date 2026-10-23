@@ -275,6 +275,11 @@ export const setRelayUrl = (url: string | null): Promise<RemoteStatus> =>
 export const refreshRelayPairCode = (): Promise<RemoteStatus> =>
   invoke<RemoteStatus>('refresh_relay_pair_code');
 
+/** 刷新访问密钥：轮换 LAN token 与中继设备身份并踢掉一切已连接设备，
+ *  所有已配对设备失效须重新扫码，返回最新状态 */
+export const rotateRemoteSecret = (): Promise<RemoteStatus> =>
+  invoke<RemoteStatus>('rotate_remote_secret');
+
 export const getDefaultClaudeOptions = (): Promise<DefaultClaudeOptions> =>
   invoke<DefaultClaudeOptions>('get_default_claude_options');
 

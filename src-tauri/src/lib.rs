@@ -256,6 +256,7 @@ pub fn run(initial_dir: Option<String>) {
             commands::set_remote_enabled,
             commands::set_relay_url,
             commands::refresh_relay_pair_code,
+            commands::rotate_remote_secret,
             // File Transfer Commands（远程浏览器模式；桌面 invoke 走 conn_id=None 拒绝上传/下载）
             commands::file_transfer_limits,
             commands::file_list,

@@ -51,6 +51,9 @@ pub const EXCLUDED: &[&str] = &[
     "set_relay_url",
     // 桌面专属：重申一次性配对码，新码仅经桌面扫码面板展示，远程调用无意义
     "refresh_relay_pair_code",
+    // 桌面专属：密钥轮换只应由桌面「刷新密钥」按钮发起（会踢掉一切连接，
+    // 远程调用等于让已连接设备自毁）
+    "rotate_remote_secret",
 ];
 
 /// 状态广播 section（state-changed 事件 payload 的 id 字段）。

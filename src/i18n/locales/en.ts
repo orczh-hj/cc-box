@@ -41,6 +41,9 @@ export default {
   remoteRefreshPair: 'New Pairing Code',
   remoteRelayNotConfigured: 'Relay not connected, retrying automatically…',
   remoteHostedElsewhere: 'Remote is hosted by another CC-Box instance on this machine; scanning connects to that instance',
+  remoteSecurityHint: 'Security: only paired devices can connect. Stopping disconnects everything; rotating the secret revokes all paired devices (rescan required).',
+  remoteRotateSecret: 'Rotate Secret',
+  remoteRotateConfirm: 'Confirm? All paired devices will be disconnected',
 
   // Global controller mask (device mutual exclusion: another device is operating)
   controllerMaskTitle: 'Controlled by another device',

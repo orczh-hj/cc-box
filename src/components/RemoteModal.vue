@@ -14,6 +14,9 @@
             <p v-if="loading" class="hint">{{ t('loading') }}</p>
 
             <template v-else-if="status?.running || status?.hostedElsewhere">
+              <!-- 安全逻辑说明（顶部）：令牌认证 / 停止即断 / 刷新密钥作废全部设备 -->
+              <p class="hint security-hint">{{ t('remoteSecurityHint') }}</p>
+
               <!-- 宿主制：远程由本机另一实例提供，扫码连接的是该实例 -->
               <p v-if="status.hostedElsewhere" class="hint">{{ t('remoteHostedElsewhere') }}</p>
 
@@ -50,10 +53,6 @@
                       {{ copiedRelay ? t('remoteCopied') : t('remoteCopyUrl') }}
                     </button>
                   </div>
-                  <!-- 连接码一次性：设备配对成功即消费，为下一台设备重申新码 -->
-                  <button class="refresh-btn" :disabled="refreshingPair" @click="refreshPairCode">
-                    {{ refreshingPair ? t('loading') : t('remoteRefreshPair') }}
-                  </button>
                 </template>
                 <!-- 未配置中继地址：提示去启动面板配置 -->
                 <p v-else-if="!status.relayEnabled" class="hint">{{ t('remoteRelayNotConfigured') }}</p>
@@ -63,8 +62,33 @@
                 </div>
               </template>
 
-              <!-- 停止按钮仅宿主实例显示（非宿主停不了宿主的服务） -->
-              <button v-if="!status.hostedElsewhere" class="stop-btn" :disabled="stopping" @click="stopRemote">
+              <!-- 操作行：更新连接码 + 刷新密钥同行（少量间距）；停止远程访问单独一行。
+                   停止/刷新密钥仅宿主实例显示（非宿主停不了、也轮换不了宿主的服务） -->
+              <div class="action-row">
+                <button
+                  v-if="!lanOnly && status.relayPairUrl"
+                  class="refresh-btn"
+                  :disabled="refreshingPair || rotating || stopping"
+                  @click="refreshPairCode"
+                >
+                  {{ refreshingPair ? t('loading') : t('remoteRefreshPair') }}
+                </button>
+                <button
+                  v-if="!status.hostedElsewhere"
+                  class="refresh-btn rotate-btn"
+                  :class="{ armed: rotateArmed }"
+                  :disabled="rotating || stopping || refreshingPair"
+                  @click="handleRotateSecret"
+                >
+                  {{ rotating ? t('loading') : rotateArmed ? t('remoteRotateConfirm') : t('remoteRotateSecret') }}
+                </button>
+              </div>
+              <button
+                v-if="!status.hostedElsewhere"
+                class="stop-btn"
+                :disabled="stopping || rotating"
+                @click="stopRemote"
+              >
                 {{ t('remoteStop') }}
               </button>
             </template>
@@ -90,7 +114,7 @@ import { ref, watch, onUnmounted } from 'vue'
 import { useI18n } from 'vue-i18n'
 import QRCode from 'qrcode'
 import { copyText } from '@/api/platform'
-import { getRemoteStatus, setRemoteEnabled, refreshRelayPairCode } from '@/api/tauri'
+import { getRemoteStatus, setRemoteEnabled, refreshRelayPairCode, rotateRemoteSecret } from '@/api/tauri'
 import type { RemoteStatus } from '@/types'
 
 const props = defineProps<{ visible: boolean }>()
@@ -109,6 +133,10 @@ const copiedRelay = ref(false)
 const error = ref('')
 /** 连接码手动更新中（等待 relay 往返新码） */
 const refreshingPair = ref(false)
+/** 刷新密钥：两段式确认（arm → 4s 内再点执行）与执行中状态 */
+const rotateArmed = ref(false)
+const rotating = ref(false)
+let rotateArmTimer: number | null = null
 /** 局域直连模式（默认公网中继） */
 const lanOnly = ref(false)
 /** 中继状态轮询（连接/配对码异步就绪） */
@@ -116,11 +144,17 @@ let relayPollTimer: number | null = null
 
 watch(() => props.visible, (v) => {
   if (v) open()
-  else stopRelayPoll()
+  else {
+    stopRelayPoll()
+    resetRotateArm()
+  }
 }, { immediate: true })
 
-// 组件卸载兜底清轮询（watch 之外的最后一道清理）
-onUnmounted(stopRelayPoll)
+// 组件卸载兜底清轮询与待确认定时器（watch 之外的最后一道清理）
+onUnmounted(() => {
+  stopRelayPoll()
+  resetRotateArm()
+})
 
 function stopRelayPoll() {
   if (relayPollTimer !== null) {
@@ -253,6 +287,42 @@ async function stopRemote() {
   }
 }
 
+/** 刷新密钥两段式：首次点击进入待确认（4s 未确认自动复位），再点执行 */
+function handleRotateSecret() {
+  if (rotating.value) return
+  if (!rotateArmed.value) {
+    rotateArmed.value = true
+    if (rotateArmTimer !== null) window.clearTimeout(rotateArmTimer)
+    rotateArmTimer = window.setTimeout(() => { rotateArmed.value = false }, 4000)
+    return
+  }
+  void doRotate()
+}
+
+async function doRotate() {
+  rotating.value = true
+  resetRotateArm()
+  error.value = ''
+  try {
+    // 轮换 + 重启服务 + 中继重连完成后返回最新状态：旧二维码/连接码全部
+    // 失效，新配对码经轮询（pair.created）到位后原位刷新
+    const s = await rotateRemoteSecret()
+    await applyStatus(s)
+  } catch (e) {
+    error.value = String(e)
+  } finally {
+    rotating.value = false
+  }
+}
+
+function resetRotateArm() {
+  rotateArmed.value = false
+  if (rotateArmTimer !== null) {
+    window.clearTimeout(rotateArmTimer)
+    rotateArmTimer = null
+  }
+}
+
 async function copyUrl() {
   if (!status.value?.url) return
   try {
@@ -322,11 +392,11 @@ async function copyUrl() {
 }
 
 .modal-body {
-  padding: 20px 18px;
+  padding: 14px 16px;
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 14px;
+  gap: 10px;
 }
 
 .hint {
@@ -337,14 +407,14 @@ async function copyUrl() {
 
 .qr-wrap {
   background: #fff;
-  padding: 8px;
+  padding: 6px;
   border-radius: 8px;
 }
 
 .qr-wrap img {
   display: block;
-  width: 220px;
-  height: 220px;
+  width: 180px;
+  height: 180px;
 }
 
 .url-row {
@@ -420,6 +490,35 @@ async function copyUrl() {
 .stop-btn:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+/* 刷新密钥：常态沿用次级样式；待确认态转警示色（破坏性操作递进提示） */
+.rotate-btn.armed {
+  border-color: var(--error-color);
+  color: var(--error-color);
+}
+
+.rotate-btn.armed:hover {
+  background: var(--hover-bg);
+  color: var(--error-color);
+}
+
+/* 操作行：连接码更新/刷新密钥/停止横排省纵向高度，窄屏自动换行 */
+.action-row {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 6px;
+  width: 100%;
+}
+
+/* 安全逻辑说明（顶部）：小一号弱化，不与主流程争夺注意力 */
+.security-hint {
+  font-size: 11px;
+  line-height: 1.6;
+  opacity: 0.85;
+  max-width: 320px;
+  margin-bottom: 2px;
 }
 
 /* 未开启状态：显式开启入口（安全阻断——远程默认不通） */

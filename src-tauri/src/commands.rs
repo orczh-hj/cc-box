@@ -508,18 +508,9 @@ static REMOTE_OP_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
 pub async fn set_remote_enabled(enabled: bool) -> Result<RemoteStatus, String> {
     let _op_guard = REMOTE_OP_LOCK.lock().await;
     if enabled {
-        // 安全阻断语义：「停止→开启」轮换全部访问凭证——旧局域二维码（token
-        // 已换）与已配对手机（access_token 绑定旧 device_id，relay 查在线表
-        // miss）一律失效；用户在面板重扫新码即可。已开启状态重复开启、
-        // 或远程由另一实例宿主时不轮换（避免干扰宿主的有效凭证）
-        if !crate::remote_server::is_running()
-            && !crate::remote_server::hosted_elsewhere().await
-        {
-            // 轮换失败必须报错（安全阻断语义依赖它）：旧凭证未失效就继续启动
-            // 等于向持有旧码的人保持开放
-            crate::remote_server::rotate_token().map_err(|e| e.to_string())?;
-            crate::remote_client::rotate_identity();
-        }
+        // 访问凭证（LAN token / relay 设备身份）持久稳定：停止/开启不再轮换，
+        // 已配对设备跨停止持续可用；轮换只由用户显式点「刷新密钥」触发
+        // （rotate_remote_secret），避免每次开关都要全部设备重新扫码
         crate::remote_server::save_remote_config(Some(true), None, None).map_err(|e| e.to_string())?;
         // 启动失败（端口被占等）显式报错给 UI，并回滚开关（否则残留 enabled=true，
         // 重启后自动尝试启动又失败）
@@ -552,6 +543,45 @@ pub async fn set_relay_url(url: Option<String>) -> Result<RemoteStatus, String> 
 #[tauri::command]
 pub async fn refresh_relay_pair_code() -> Result<RemoteStatus, String> {
     crate::remote_client::refresh_pair_code().await?;
+    get_remote_status().await
+}
+
+/// 刷新访问密钥（显式轮换全部凭证 + 踢掉一切已连接设备）：
+/// 轮换 LAN token（旧局域二维码失效）与 relay 设备身份（已配对手机在
+/// relay 侧 access_token→旧 device_id 查在线表 miss，全部失效，须重新扫码）；
+/// 重启 LAN 服务器（SHUTDOWN 广播断开全部已连接 WS，旧 token 连接立即中断）
+/// 并以新身份重连中继。运行态面板「刷新密钥」按钮调用。桌面专属
+/// （裸 #[tauri::command] 不带宏出口——密钥轮换只应由桌面发起，远程不可达，
+/// rpc_dispatch EXCLUDED）
+#[tauri::command]
+pub async fn rotate_remote_secret() -> Result<RemoteStatus, String> {
+    let _op_guard = REMOTE_OP_LOCK.lock().await;
+    // 宿主制：远程由本机另一实例提供时，凭证属宿主，非宿主实例无权轮换
+    if crate::remote_server::hosted_elsewhere().await {
+        return Err("remote hosted by another instance".to_string());
+    }
+    // 轮换失败必须报错（不重启服务）：半轮换状态（token 新身份旧）会让
+    // 用户误以为已全部失效
+    crate::remote_server::rotate_token().map_err(|e| e.to_string())?;
+    crate::remote_client::rotate_identity();
+    // LAN：重启服务器踢掉全部已连接客户端（token 只在 hello 验证，
+    // 不重启则已连接设备可凭旧 token 持续使用）
+    if crate::remote_server::is_running() {
+        crate::remote_server::stop().await;
+        crate::remote_server::start().await.map_err(|e| e.to_string())?;
+    }
+    // 中继：断开旧身份连接并以新身份重连（旧 device_id 永不再上线，
+    // relay 侧断开其全部桥接——已配对手机的 WS 随之中断，重连被拒）。
+    // 仅远程开启时执行：停止态轮换不得把中继重新拉起
+    let enabled = crate::store::get_app_config()
+        .ok()
+        .and_then(|c| c.remote)
+        .and_then(|r| r.enabled)
+        .unwrap_or(false);
+    if enabled {
+        crate::remote_client::disconnect();
+        crate::remote_client::connect().await;
+    }
     get_remote_status().await
 }
 
