@@ -657,16 +657,15 @@ impl RemoteState {
         }
         match msg {
             // hello 的 token 认证：LAN 由连接层（remote_server）完成；中继链路
-            // token v2 由本端校验（relay 只按前缀路由不校验）——校验失败回
-            // hello.error 并断连（恶意客户端可无视错误继续发消息，必须门闩）
+            // token v2 由本端校验（relay 只按前缀路由不校验）——校验失败经
+            // client.kick 让 relay 下发 hello.error 并断连（恶意客户端可无视
+            // 错误继续发消息，必须门闩 + 真断连）
             ClientMessage::Hello { token, .. } => {
                 // via_relay：None（未知连接）按中继从严处理
                 if self.conn_via_relay(conn_id) != Some(false)
                     && !crate::remote_client::verify_relay_token(token)
                 {
-                    self.try_send(conn_id, ServerMessage::HelloError {
-                        error: "invalid token".into(),
-                    });
+                    crate::remote_client::kick_relay_client(conn_id, "invalid token");
                     self.remove_conn(conn_id);
                     return;
                 }

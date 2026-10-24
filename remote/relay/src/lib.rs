@@ -70,6 +70,8 @@ struct PairCode {
 struct ClientConn {
     device_id: String,
     tx: mpsc::Sender<String>,
+    /// 断连通知（client.kick）：唤醒 handle_client 接收循环退出以关闭 WS
+    kick: std::sync::Arc<tokio::sync::Notify>,
 }
 
 /// 桌面出站消息（JSON 字符串，直接写 WS）
@@ -198,6 +200,11 @@ enum DeviceInMsg {
         to: u64,
         payload: serde_json::Value,
     },
+    /// 桌面校验手机 token 失败：向该手机下发 hello.error(reason) 并断开其连接。
+    /// token v2 校验在桌面、连接挂在 relay——不显式踢则恶意客户端可无视
+    /// hello.error 长期占住 clients 表（MAX_CLIENTS 被打满拒绝正常手机）
+    #[serde(rename = "client.kick")]
+    ClientKick { conn: u64, reason: String },
     /// 中继层 keepalive：桌面定时发送，防止 nginx 等反代掐断空闲连接
     #[serde(rename = "ping")]
     Ping,
@@ -366,6 +373,30 @@ async fn handle_device(mut socket: WebSocket, state: SharedState, addr: SocketAd
                     }
                 }
             }
+            DeviceInMsg::ClientKick { conn, reason } => {
+                // 校验归属（与 Data 同规则，防跨设备踢他人连接）后：
+                // 先发 hello.error（client_tx 有序，先于断连送达）再唤醒
+                // kick 关闭连接；断开清理走 handle_client 统一路径
+                // （client.disconnected 回发桌面，本地映射随回环清理）
+                let kick = {
+                    let inner = state.lock();
+                    match inner.st.clients.get(&conn) {
+                        Some(c) if c.device_id == device_id => {
+                            let err = serde_json::json!({
+                                "type": "hello.error",
+                                "error": reason,
+                            });
+                            let _ = c.tx.try_send(err.to_string());
+                            Some(c.kick.clone())
+                        }
+                        _ => None,
+                    }
+                };
+                if let Some(kick) = kick {
+                    kick.notify_one();
+                    println!("[relay] client kicked: conn={} device={}", conn, device_id);
+                }
+            }
         }
     }
 
@@ -460,6 +491,7 @@ async fn handle_client(mut socket: WebSocket, state: SharedState, addr: SocketAd
 
     let (mut ws_sender, mut ws_receiver) = socket.split();
     let (client_tx, mut client_rx) = mpsc::channel::<String>(256);
+    let kick = std::sync::Arc::new(tokio::sync::Notify::new());
 
     let conn_id = {
         let mut inner = state.lock();
@@ -470,6 +502,7 @@ async fn handle_client(mut socket: WebSocket, state: SharedState, addr: SocketAd
             ClientConn {
                 device_id: device_id.clone(),
                 tx: client_tx.clone(),
+                kick: kick.clone(),
             },
         );
         conn_id
@@ -496,8 +529,16 @@ async fn handle_client(mut socket: WebSocket, state: SharedState, addr: SocketAd
 
     println!("[relay] client online: conn={} device={} from {}", conn_id, device_id, addr);
 
-    // 接收循环：手机应用层消息 → 包 Data{from} 转发桌面
-    while let Some(Ok(msg)) = ws_receiver.next().await {
+    // 接收循环：手机应用层消息 → 包 Data{from} 转发桌面；
+    // kick.notified（桌面 client.kick 校验踢人）退出循环即关闭连接
+    loop {
+        let msg = tokio::select! {
+            _ = kick.notified() => break,
+            msg = ws_receiver.next() => match msg {
+                Some(Ok(m)) => m,
+                _ => break,
+            },
+        };
         let Message::Text(text) = msg else {
             if matches!(msg, Message::Close(_)) {
                 break;

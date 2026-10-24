@@ -1170,7 +1170,9 @@ fn setup_v2_config() {
     crate::remote_server::save_paired_secrets(&[V2_SECRET.to_string()]).unwrap();
 }
 
-/// 中继连接 + 伪造/未知 secret → hello.error（relay 只路由不校验，桌面是校验闭环）
+/// 中继连接 + 伪造/未知 secret → 本地移除连接（relay 只路由不校验，桌面是
+/// 校验闭环）。错误帧与断连由 relay 执行（client.kick，帧构造与调用链见
+/// remote_client 测试）——本地不再直发 HelloError（防与 kick 双帧乱序）
 #[tokio::test]
 async fn RemoteState_Hello_ViaRelay_未知secret被拒() {
     let _cfg_lock = super::CONFIG_DIR_TEST_LOCK.lock();
@@ -1185,10 +1187,13 @@ async fn RemoteState_Hello_ViaRelay_未知secret被拒() {
         client: "web".into(),
         token: format!("{}.ffffffffffffffffffffffffffffffff", V2_DEVICE_ID),
     });
-    match recv_timeout(&mut rx).await {
-        ServerMessage::HelloError { error } => assert_eq!(error, "invalid token"),
-        other => panic!("expected HelloError, got {:?}", other),
-    }
+    // 连接被移除：通道关闭（recv 立即 None），无任何本地应答帧
+    let res = tokio::time::timeout(std::time::Duration::from_millis(300), rx.recv()).await;
+    assert!(
+        res.is_err() || matches!(res, Ok(None)),
+        "校验失败不应本地直发应答（由 relay 下发 hello.error），got {:?}",
+        res
+    );
 }
 
 /// 中继连接 + 已配对 secret → hello.ok（正常路径）
@@ -1238,16 +1243,18 @@ async fn RemoteState_Hello_ViaRelay_校验失败后拒绝后续消息() {
 
     let state = RemoteState::new();
     let (conn, mut rx) = setup_conn_via(&state, true);
-    // 假 secret 的 v2 token → HelloError
+    // 假 secret 的 v2 token → 连接被移除（错误帧由 relay 经 client.kick 下发）
     state.handle_client_message(conn, &ClientMessage::Hello {
         ver: 1,
         client: "web".into(),
         token: format!("{}.ffffffffffffffffffffffffffffffff", V2_DEVICE_ID),
     });
-    match recv_timeout(&mut rx).await {
-        ServerMessage::HelloError { .. } => {}
-        other => panic!("expected HelloError, got {:?}", other),
-    }
+    let res = tokio::time::timeout(std::time::Duration::from_millis(300), rx.recv()).await;
+    assert!(
+        res.is_err() || matches!(res, Ok(None)),
+        "校验失败不应本地直发应答，got {:?}",
+        res
+    );
 
     // 恶意客户端无视错误继续接管：不得获得控制权
     state.handle_client_message(conn, &ClientMessage::ControllerTakeover);

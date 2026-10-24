@@ -663,6 +663,33 @@ async fn run_once(
     end
 }
 
+/// 桌面校验中继手机 token 失败后踢其连接：relay 向该手机下发
+/// hello.error(reason) 并断开（校验在桌面、连接在 relay，不踢则恶意
+/// 客户端可无视错误长期占住 clients 表）。本地连接与桥接映射由 relay
+/// 的 client.disconnected 回环清理。
+pub fn kick_relay_client(local_conn_id: u64, reason: &str) {
+    // BRIDGED_CONNS 为 relay→local，反查 local 对应的 relay conn_id
+    let Some(relay_conn) = BRIDGED_CONNS
+        .lock()
+        .iter()
+        .find(|(_, &local)| local == local_conn_id)
+        .map(|(&relay, _)| relay)
+    else {
+        return;
+    };
+    let Some(tx) = DEVICE_TX.lock().clone() else {
+        return;
+    };
+    let frame = serde_json::json!({
+        "type": "client.kick",
+        "conn": relay_conn,
+        "reason": reason,
+    });
+    if tx.try_send(frame.to_string()).is_err() {
+        log::debug!("[remote] kick frame dropped (relay channel closed)");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -883,5 +910,85 @@ mod tests {
         persist_granted_secret(TEST_SECRET);
         assert_eq!(paired_secrets_from_config(), vec![TEST_SECRET.to_string()]);
         PENDING_SECRETS.lock().clear();
+    }
+
+    // ==================== client.kick（校验失败踢连接） ====================
+
+    /// kick 帧：本地 conn_id 经 BRIDGED_CONNS 反查 relay conn_id，
+    /// 组出 client.kick 帧发送；未挂载/无映射时静默 no-op
+    #[tokio::test]
+    async fn KickRelayClient_帧构造与静默兜底_1() {
+        let _g = TEST_LOCK.lock();
+        reset_globals();
+
+        // 无映射 → no-op（不 panic、不发送）
+        let (tx, mut rx) = mpsc::channel::<String>(8);
+        *DEVICE_TX.lock() = Some(tx);
+        kick_relay_client(424242, "invalid token");
+        assert!(rx.try_recv().is_err(), "未知连接不应发送 kick 帧");
+
+        // 有映射 → 发送 client.kick（relay conn_id 正确回填）
+        BRIDGED_CONNS.lock().insert(7, 424242);
+        kick_relay_client(424242, "invalid token");
+        let frame = rx.try_recv().expect("kick frame");
+        let v: serde_json::Value = serde_json::from_str(&frame).unwrap();
+        assert_eq!(v["type"], "client.kick");
+        assert_eq!(v["conn"].as_u64(), Some(7));
+        assert_eq!(v["reason"], "invalid token");
+        BRIDGED_CONNS.lock().remove(&7);
+
+        // DEVICE_TX 未挂载 → no-op
+        *DEVICE_TX.lock() = None;
+        kick_relay_client(424242, "invalid token");
+        reset_globals();
+    }
+
+    /// Hello 校验失败分支 → kick 帧（组合链路）：注入桥接映射与 DEVICE_TX，
+    /// 经 RemoteState Hello 分支触发，断言 relay 收到 client.kick（relay 侧
+    /// 下发 hello.error 并断连由 relay 集成测试 RelayClient_KickOnVerifyFail
+    /// 覆盖）
+    #[tokio::test]
+    async fn HelloVerifyFail_经RemoteState发kick帧() {
+        let _g = TEST_LOCK.lock();
+        let _cfg_lock = crate::tests::CONFIG_DIR_TEST_LOCK.lock();
+        let _cfg = crate::tests::TestConfigDirGuard::new("hello-kick-frame");
+        reset_globals();
+        crate::remote_server::save_paired_secrets(&[TEST_SECRET.to_string()]).unwrap();
+        crate::remote_server::save_relay_config(
+            None,
+            Some((TEST_DEVICE_ID, TEST_DEVICE_KEY)),
+        )
+        .unwrap();
+
+        let (tx, mut kick_rx) = mpsc::channel::<String>(8);
+        *DEVICE_TX.lock() = Some(tx);
+        let state = crate::remote_state::RemoteState::new();
+        let conn = crate::remote_state::next_conn_id();
+        let (bridge_tx, _bridge_rx) =
+            mpsc::channel::<cc_box_remote_protocol::ServerMessage>(8);
+        state.add_conn(conn, bridge_tx, true);
+        BRIDGED_CONNS.lock().insert(7, conn);
+
+        state.handle_client_message(
+            conn,
+            &cc_box_remote_protocol::ClientMessage::Hello {
+                ver: 1,
+                client: "web".into(),
+                // 前缀正确但 secret 未配对（伪造）
+                token: format!("{}.ffffffffffffffffffffffffffffffff", TEST_DEVICE_ID),
+            },
+        );
+
+        let frame = tokio::time::timeout(Duration::from_secs(3), kick_rx.recv())
+            .await
+            .expect("kick frame timeout")
+            .expect("channel closed");
+        let v: serde_json::Value = serde_json::from_str(&frame).unwrap();
+        assert_eq!(v["type"], "client.kick");
+        assert_eq!(v["conn"].as_u64(), Some(7));
+        assert_eq!(v["reason"], "invalid token");
+
+        BRIDGED_CONNS.lock().remove(&7);
+        reset_globals();
     }
 }

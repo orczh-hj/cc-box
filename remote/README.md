@@ -37,7 +37,7 @@ remote handler ──► pty.rs（tee 输出 / write 注入 / resize）
 
 要点：
 
-- **桌面是权威**：会话、PTY、权限判定全在桌面 Rust；中继纯路由，不解析应用层 payload
+- **桌面是权威**：会话、PTY、权限判定全在桌面 Rust；中继纯路由（例外仅中继层自身语义：token 前缀路由、配对码、client.kick 等控制消息），应用层 payload 不解析
 - 手机扫码 QR 携带双地址（直连 + 中继），先试直连、不通走中继，自动切换
 
 ## 4. 统一管理（核心原则）
@@ -101,14 +101,16 @@ Web UI 页面（= 主应用 UI）：TokenGate 认证门（token/配对码）→ 
 桌面→中继  {"type":"register","device_id":"..."}                          // 头带 device_key
 桌面→中继  {"type":"pair.create","secret":"<32hex>"}                      // 申请配对码（secret 桌面预生成；缺省=旧版桌面，relay 生成）
 桌面→中继  {"type":"ping"}                                                 // 25s keepalive（防反代掐断空闲连接）
+桌面→中继  {"type":"client.kick","conn":"<conn_id>","reason":"..."}        // 校验失败踢连接：relay 向该手机下发 hello.error(reason) 并断开（防占位打满 clients 上限）
 中继→桌面  {"type":"pair.created","code":"XXXXXXXX"}                       // 配对码（TTL 5 分钟，一次性）
 中继→桌面  {"type":"pair.granted","secret":"<32hex>"}                     // 仅 fallback 配对成功时下发（旧桌面升级后手机不失效）
+中继→桌面  {"type":"client.disconnected","conn":"<conn_id>"}              // 手机连接断开（含被踢），桌面回环清理桥接映射
 中继→手机  {"type":"device_status","online":true}
 手机→中继  {"type":"data","payload":{...}}                   // hello 头带 token v2，前缀路由到绑定桌面
 桌面→中继  {"type":"data","to":"<conn_id>","payload":{...}}  // 路由到指定手机连接
 ```
 
-手机 token v2 格式 `<device_id>.<secret>`（各 32 hex）：relay 只按前缀查在线桌面路由（格式非法/无点 v1 → `hello.error`；桌面不在线 → `device.status offline`），**secret 校验在桌面**（`remote_state` Hello 分支查 `~/.cc-box/config.json` 的 `paired_secrets` + 内存 pending）。relay 不存任何凭证表——重启后已配对手机凭 token 自动重连恢复。
+手机 token v2 格式 `<device_id>.<secret>`（各 32 hex）：relay 只按前缀查在线桌面路由（格式非法/无点 v1 → `hello.error`；桌面不在线 → `device.status offline`），**secret 校验在桌面**（`remote_state` Hello 分支查 `~/.cc-box/config.json` 的 `paired_secrets` + 内存 pending；校验失败经 `client.kick` 让 relay 下发错误并断连）。relay 不存任何凭证表——重启后已配对手机凭 token 自动重连恢复。
 
 ### 6.2 应用层（手机 ↔ 桌面，两种传输同构）
 
@@ -187,7 +189,7 @@ PTY 退出           清理状态
 
 - 中继模式全程 TLS（nginx + Let's Encrypt）；局域网明文 HTTP + token（同网段可接受）
 - 桌面零入站端口（出站 WSS 穿透 NAT）；远程默认关闭；停用/换中继时在途连接立即拆除
-- 中继不解析 payload、不存凭证表：明文仅自托管中继可见，secret 明文不出桌面/手机，未来 E2E 只改两端不动中继
+- 中继不解析应用层 payload、不存凭证表；v2 token（含 secret）在每次 hello 时明文经自托管中继路由，但 relay 不落盘、secret 校验只在桌面——未来 E2E 加密仍只改桌面/手机两端不动中继
 - token v2 双层校验：relay 前缀路由（device_id 过 device_key 首注绑定）+ 桌面 secret 校验（128bit 随机）；配对码 8 位 hex、5 分钟 TTL、`/api/pair` 按 IP 失败锁定（5 次锁 60s），抗暴力猜解
 - conn_id 全局唯一命名空间（局域网与中继共用分配器，双模式并存不冲突）；远程会话创建限已知项目白名单 + 并发上限
 

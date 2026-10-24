@@ -428,3 +428,54 @@ async fn RelayRestart_V2TokenSurvives_13() {
     // 旧 token（重启前配对）直接接入新 relay 实例：路由成功、hello 透传桌面
     let (_ph2, _conn2) = client_online(port, &token, &mut dev).await;
 }
+
+/// client.kick 闭环：桌面校验 token 失败 → 手机先收 hello.error 再被断开，
+/// 桌面收 client.disconnected（回环清理桥接映射）；clients 表随之释放
+/// （不踢则恶意客户端可无视 hello.error 长期占位打满 MAX_CLIENTS）
+#[tokio::test]
+async fn RelayClient_KickOnVerifyFail_14() {
+    let port = spawn_relay(cc_box_relay::PAIR_TTL).await;
+    let mut dev = device_online(port, DEV_ID, KEY_A).await;
+    // 格式合法但 secret 无效的 v2 token（路由到桌面，校验必失败）
+    let (mut ph, conn) = client_online(
+        port,
+        &format!("{}.{}", DEV_ID, "ffffffffffffffffffffffffffffffff"),
+        &mut dev,
+    )
+    .await;
+
+    send(&mut dev, json!({"type": "client.kick", "conn": conn, "reason": "invalid token"})).await;
+
+    let v = recv_of_type(&mut ph, "hello.error").await;
+    assert_eq!(v["error"], "invalid token");
+    // 错误帧先于断连送达；随后流关闭（None/Err 均视为已断）
+    let closed = tokio::time::timeout(Duration::from_secs(3), ph.next()).await.unwrap();
+    assert!(matches!(closed, None | Some(Err(_))), "kick 后连接应断开，got {:?}", closed.map(|m| m.map(|_| ())).is_some());
+
+    let v = recv_of_type(&mut dev, "client.disconnected").await;
+    assert_eq!(v["conn"].as_u64(), Some(conn));
+}
+
+/// 跨设备踢保护：他设备对不属于自己设备的连接发 client.kick 无效（与 Data
+/// 路由同规则归属校验，防公网注册假设备后踢他人手机）
+#[tokio::test]
+async fn RelayClient_KickOwnershipGuard_15() {
+    let port = spawn_relay(cc_box_relay::PAIR_TTL).await;
+    const OTHER_ID: &str = "9999d3d4e5f6a7b8c9d0e1f2a3b4c5d6";
+    let mut dev = device_online(port, DEV_ID, KEY_A).await;
+    let (mut ph, conn) = client_online(
+        port,
+        &format!("{}.{}", DEV_ID, "ffffffffffffffffffffffffffffffff"),
+        &mut dev,
+    )
+    .await;
+    let mut other = device_online(port, OTHER_ID, KEY_B).await;
+
+    send(&mut other, json!({"type": "client.kick", "conn": conn, "reason": "x"})).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // 连接仍活：桌面向手机发 data 照常送达（未被误断）
+    send(&mut dev, json!({"type": "data", "to": conn, "payload": {"type": "hello.ok", "ver": 1}})).await;
+    let v = recv_of_type(&mut ph, "hello.ok").await;
+    assert_eq!(v["ver"], 1);
+}
