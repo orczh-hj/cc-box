@@ -262,6 +262,9 @@ export default {
   noProjectsYet: '暂无项目',
   addProject: '添加项目',
   hideProject: '隐藏项目（不再展示，重新添加后恢复）',
+  hideProjectTitle: '隐藏项目「{name}」？',
+  hideProjectHint: '隐藏后不再显示此项目，重新添加项目后恢复到列表',
+  hideProjectConfirm: '确认隐藏',
 
   // Terminal
   startNewSession: '启动新的 Claude 会话',

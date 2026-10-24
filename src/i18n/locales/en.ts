@@ -262,6 +262,9 @@ export default {
   noProjectsYet: 'No projects yet',
   addProject: 'Add Project',
   hideProject: 'Hide project (removed from list; re-adding restores it)',
+  hideProjectTitle: 'Hide project "{name}"?',
+  hideProjectHint: 'This project will no longer be shown. Re-add it to restore it to the list.',
+  hideProjectConfirm: 'Hide',
 
   // Terminal
   startNewSession: 'Start a new Claude session',

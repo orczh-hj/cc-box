@@ -147,7 +147,7 @@
               class="project-hide-btn"
               :title="t('hideProject')"
               :aria-label="t('hideProject')"
-              @click.stop="handleHideProject(project.path)"
+              @click.stop="hideConfirmPath = project.path"
             >
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <line x1="18" y1="6" x2="6" y2="18"/>
@@ -186,6 +186,18 @@
           <span>{{ t('addProject') }}</span>
         </button>
       </footer>
+    </div>
+
+    <!-- 隐藏项目确认对话框（样式与设置页删除确认一致） -->
+    <div v-if="hideConfirmPath" class="confirm-overlay" @click.self="hideConfirmPath = null">
+      <div class="confirm-dialog">
+        <p class="confirm-text">{{ t('hideProjectTitle', { name: hideConfirmName }) }}</p>
+        <p class="confirm-hint">{{ t('hideProjectHint') }}</p>
+        <div class="confirm-actions">
+          <button class="btn-cancel" @click="hideConfirmPath = null">{{ t('cancel') }}</button>
+          <button class="btn-danger" @click="confirmHideProject">{{ t('hideProjectConfirm') }}</button>
+        </div>
+      </div>
     </div>
   </div>
 </template>
@@ -230,7 +242,22 @@ const saveSuccess = ref(false)
 
 const projects = computed(() => appStore.cachedProjects)
 
-/** 合并缓存的历史会话和当前运行中的 tabs */
+/** 路径归一（与 appStore.isPathHidden 同口径：Windows 大小写不敏感） */
+function normalizePath(p: string): string {
+  return p.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
+}
+
+/** 用户本端打开过该项目（setCwd 记录）——隐藏项目的"会话已打开"例外判定 */
+function openedByUser(projectPath: string): boolean {
+  for (const p of appStore.openedProjectPaths) {
+    if (normalizePath(p) === normalizePath(projectPath)) return true
+  }
+  return false
+}
+
+/** 合并缓存的历史会话和当前运行中的 tabs。
+ *  隐藏项目的会话不再进近期会话；例外：用户本端打开过该项目（运行中 Tab
+ *  可能是远程端自动采纳的，未打开过的不算"已打开"） */
 const recentSessions = computed(() => {
   const result: SessionInfo[] = []
   const addedIds = new Set<string>()
@@ -238,6 +265,7 @@ const recentSessions = computed(() => {
   // 先添加运行中的 tabs
   for (const tab of sessionStore.tabs.values()) {
     if (tab.status === 'running' && tab.sessionId) {
+      if (appStore.isPathHidden(tab.projectPath) && !openedByUser(tab.projectPath)) continue
       addedIds.add(tab.sessionId)
       result.push({
         sessionId: tab.sessionId,
@@ -250,11 +278,11 @@ const recentSessions = computed(() => {
     }
   }
 
-  // 再添加缓存的历史会话（排除已在运行中的）
+  // 再添加缓存的历史会话（排除已在运行中的；隐藏项目双保险过滤）
   for (const session of appStore.cachedRecentSessions) {
-    if (!addedIds.has(session.sessionId)) {
-      result.push(session)
-    }
+    if (addedIds.has(session.sessionId)) continue
+    if (appStore.isPathHidden(session.projectPath)) continue
+    result.push(session)
   }
 
   // 按时间排序
@@ -369,9 +397,18 @@ function handleResumeSession(session: SessionInfo) {
   emit('resumeSession', session.projectPath, session.sessionId, session.name)
 }
 
-/** 隐藏项目：列表原地移除；重新添加该项目时自动恢复展示 */
-function handleHideProject(path: string) {
-  void appStore.hideProject(path)
+/** 隐藏项目：弹窗二次确认（防误触）；确认后列表原地移除，重新添加该项目时自动恢复展示 */
+const hideConfirmPath = ref<string | null>(null)
+
+const hideConfirmName = computed(() => {
+  const p = projects.value.find(x => x.path === hideConfirmPath.value)
+  return p?.name ?? hideConfirmPath.value ?? ''
+})
+
+function confirmHideProject() {
+  const path = hideConfirmPath.value
+  hideConfirmPath.value = null
+  if (path) void appStore.hideProject(path)
 }
 
 async function handleSaveDefault() {
@@ -832,7 +869,7 @@ async function handleSaveDefault() {
   flex-shrink: 0;
 }
 
-/* 隐藏项目按钮：触屏常显；hover 设备移入项目行时浮现（包 @media (hover: hover)） */
+/* 隐藏项目按钮：触屏常显（无 hover）；hover 设备移入项目行时浮现（包 @media (hover: hover)） */
 .project-hide-btn {
   display: flex;
   align-items: center;
@@ -862,6 +899,72 @@ async function handleSaveDefault() {
   .project-hide-btn:focus-visible {
     opacity: 1;
   }
+}
+
+/* 隐藏确认对话框（与设置页 ProvidersSection 删除确认同构） */
+.confirm-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.3);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 300;
+}
+
+.confirm-dialog {
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-lg);
+  padding: 24px;
+  /* 手机视口内收缩 */
+  min-width: min(320px, calc(100vw - 64px));
+  box-shadow: var(--shadow-xl);
+}
+
+.confirm-text {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-primary);
+  margin: 0 0 6px 0;
+}
+
+.confirm-hint {
+  font-size: 12px;
+  color: var(--text-tertiary);
+  margin: 0 0 20px 0;
+}
+
+.confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.confirm-actions .btn-cancel {
+  padding: 7px 18px;
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  font-size: 13px;
+  cursor: pointer;
+  font-family: var(--font-sans);
+}
+
+.confirm-actions .btn-cancel:hover {
+  background: var(--hover-bg);
+}
+
+.confirm-actions .btn-danger {
+  padding: 7px 18px;
+  background: var(--status-error);
+  color: #fff;
+  border: none;
+  border-radius: var(--radius-md);
+  font-size: 13px;
+  cursor: pointer;
+  font-family: var(--font-sans);
 }
 
 .empty-list {
