@@ -561,8 +561,8 @@ pub async fn refresh_relay_pair_code() -> Result<RemoteStatus, String> {
 }
 
 /// 刷新访问密钥（显式轮换全部凭证 + 踢掉一切已连接设备）：
-/// 轮换 LAN token（旧局域二维码失效）与 relay 设备身份（已配对手机在
-/// relay 侧 access_token→旧 device_id 查在线表 miss，全部失效，须重新扫码）；
+/// 轮换 LAN token（旧局域二维码失效）与 relay 设备身份（已配对手机的
+/// token 前缀路由永久 miss + 桌面清空 paired_secrets，全部失效，须重新扫码）；
 /// 重启 LAN 服务器（SHUTDOWN 广播断开全部已连接 WS，旧 token 连接立即中断）
 /// 并以新身份重连中继。运行态面板「刷新密钥」按钮调用。桌面专属
 /// （裸 #[tauri::command] 不带宏出口——密钥轮换只应由桌面发起，远程不可达，

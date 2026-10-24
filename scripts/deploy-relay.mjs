@@ -9,7 +9,8 @@
  *
  * 流程:前端构建 → musl 交叉编译 → ssh 预检 → scp .new + md5 校验 →
  * 【人工确认】切换 + systemctl restart → 三查(md5 / bundle hash / 特征)。
- * 切换保留人工确认:relay 重启清空内存态,所有手机需重新扫码配对。
+ * 切换保留人工确认:relay 重启断开在途连接(已配对手机凭 token v2 自动重连
+ * 恢复,无需重扫;仅升级到 v2 版 relay 时存量 v1 手机需各重扫一次)。
  *
  * 全程国内直连(ssh/scp),无需代理。
  * 用法:npm run deploy:relay [-- --yes 跳过切换确认]
@@ -104,7 +105,8 @@ async function main() {
 
   logStep('[5/6] 切换(需确认)')
   if (!skipConfirm) {
-    log('\x1b[33mrelay 重启将断开所有手机连接,且内存态清空——所有手机需重新扫码配对!\x1b[0m')
+    log('\x1b[33mrelay 重启将短暂断开全部连接——已配对手机自动重连恢复(token v2 存活);\x1b[0m')
+    log('\x1b[33m若本次是从 v1 版本升级,存量 v1 token 手机需各重扫一次!\x1b[0m')
     const ok = await askConfirm('确认切换并重启 relay?(y/n) ')
     if (!ok) {
       log('已取消。.new 已就位,可稍后手动执行:')
@@ -127,7 +129,7 @@ async function main() {
   console.log(iconCode === '200' ? '✓ HTTP 特征(icon.png 200)' : `⚠ icon.png: ${iconCode || '请求失败'}`)
 
   log('\n部署完成。提醒:')
-  log('  - 所有手机需重新扫码配对(桌面远程面板自动出新码)')
+  log('  - 已配对手机自动重连恢复(v2 token 存活);从 v1 升级则存量手机各重扫一次')
   log('  - 浏览器远程端强刷页面获取新 bundle')
 }
 

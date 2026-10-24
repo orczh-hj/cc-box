@@ -15,19 +15,44 @@ type Ws = WebSocketStream<MaybeTlsStream<TcpStream>>;
 const SHORT_TTL: Duration = Duration::from_millis(80);
 /// 合法 device_key（64 hex）
 const KEY_A: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+/// 测试 device_id（32 hex，与生产 uuid simple 形态一致——v2 token 前缀校验依据）
+const DEV_ID: &str = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6";
+/// 桌面预生成的配对 secret（32 hex）
+const SECRET_A: &str = "0123456789abcdef0123456789abcdef";
 const KEY_B: &str = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
 
-/// 内存起 relay（随机端口），返回端口
+/// 内存起 relay（随机端口），返回端口。
+/// 无需停止的常规测试用此入口：泄漏 shutdown Sender（Sender drop 即触发
+/// graceful shutdown，会让 server 秒停）——测试进程结束时统一清理
 async fn spawn_relay(pair_ttl: Duration) -> u16 {
+    let (port, shutdown) = spawn_relay_on(0, pair_ttl).await;
+    std::mem::forget(shutdown);
+    port
+}
+
+/// 在指定端口起 relay（0 = 随机），返回 (端口, 停止信号)。
+/// 可停止 + 指定端口重绑 = 模拟进程重启（内存态全清、手机 token v2 仍有效）
+async fn spawn_relay_on(port: u16, pair_ttl: Duration) -> (u16, tokio::sync::watch::Sender<bool>) {
     let state = cc_box_relay::new_state(pair_ttl);
     let app = cc_box_relay::build_router(state)
         .into_make_service_with_connect_info::<std::net::SocketAddr>();
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
-    let port = listener.local_addr().unwrap().port();
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await.unwrap();
+    let bound = listener.local_addr().unwrap().port();
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
+        axum::serve(listener, app)
+            .with_graceful_shutdown(async move {
+                let mut rx = shutdown_rx;
+                while rx.changed().await.is_ok() {
+                    if *rx.borrow() {
+                        break;
+                    }
+                }
+            })
+            .await
+            .unwrap();
     });
-    port
+    (bound, shutdown_tx)
 }
 
 async fn ws_connect(port: u16, path: &str) -> Ws {
@@ -93,16 +118,19 @@ async fn device_online(port: u16, device_id: &str, key: &str) -> Ws {
     ws
 }
 
-/// 桌面在线 + 已配对，返回 (桌面 ws, access_token)
+/// 桌面在线 + 已配对（v2 流程：pair.create 带桌面预生成 secret），
+/// 返回 (桌面 ws, token)。token 格式断言 `<device_id>.<secret>` 且桌面不收 pair.granted
 async fn paired_device(port: u16, device_id: &str) -> (Ws, String) {
     let mut dev = device_online(port, device_id, KEY_A).await;
-    send(&mut dev, json!({"type": "pair.create"})).await;
+    send(&mut dev, json!({"type": "pair.create", "secret": SECRET_A})).await;
     let v = recv_of_type(&mut dev, "pair.created").await;
     let code = v["code"].as_str().unwrap().to_string();
     let resp = http_post(port, "/api/pair", &json!({"code": code}).to_string()).await;
     let resp: Value = serde_json::from_str(&resp).unwrap();
     assert_eq!(resp["ok"], true, "pair should succeed: {}", resp);
     let token = resp["token"].as_str().unwrap().to_string();
+    // v2 格式：桌面提供的 secret 原样组入（relay 不改写）
+    assert_eq!(token, format!("{}.{}", device_id, SECRET_A));
     (dev, token)
 }
 
@@ -128,7 +156,7 @@ async fn client_online(port: u16, token: &str, dev: &mut Ws) -> (Ws, u64) {
 #[tokio::test]
 async fn Relay_FullFlow_RegisterPairRoute_1() {
     let port = spawn_relay(cc_box_relay::PAIR_TTL).await;
-    let (mut dev, token) = paired_device(port, "dev-1").await;
+    let (mut dev, token) = paired_device(port, DEV_ID).await;
 
     // 手机接入（hello 已透传到桌面）
     let (mut ph, conn) = client_online(port, &token, &mut dev).await;
@@ -159,20 +187,20 @@ async fn Relay_DeviceKey_Validation_2() {
     let mut bad = ws_connect(port, "/ws/device").await;
     send(
         &mut bad,
-        json!({"type": "register", "deviceId": "dev-2", "deviceKey": "short"}),
+        json!({"type": "register", "deviceId": DEV_ID, "deviceKey": "short"}),
     )
     .await;
     let v = recv_of_type(&mut bad, "register.failed").await;
     assert_eq!(v["reason"], "bad device_key");
 
     // 首次合法注册（绑定 KEY_A）
-    let _dev = device_online(port, "dev-2", KEY_A).await;
+    let _dev = device_online(port, DEV_ID, KEY_A).await;
 
     // 同 device_id 不同 key → mismatch
     let mut intruder = ws_connect(port, "/ws/device").await;
     send(
         &mut intruder,
-        json!({"type": "register", "deviceId": "dev-2", "deviceKey": KEY_B}),
+        json!({"type": "register", "deviceId": DEV_ID, "deviceKey": KEY_B}),
     )
     .await;
     let v = recv_of_type(&mut intruder, "register.failed").await;
@@ -197,7 +225,7 @@ async fn Relay_Token_Invalid_3() {
 #[tokio::test]
 async fn Relay_PairCode_TtlAndOneShot_4() {
     let port = spawn_relay(SHORT_TTL).await;
-    let mut dev = device_online(port, "dev-4", KEY_A).await;
+    let mut dev = device_online(port, DEV_ID, KEY_A).await;
 
     // 过期
     send(&mut dev, json!({"type": "pair.create"})).await;
@@ -228,7 +256,7 @@ async fn Relay_PairCode_TtlAndOneShot_4() {
 #[tokio::test]
 async fn Relay_DeviceOffline_NotifyClients_5() {
     let port = spawn_relay(cc_box_relay::PAIR_TTL).await;
-    let (mut dev, token) = paired_device(port, "dev-5").await;
+    let (mut dev, token) = paired_device(port, DEV_ID).await;
     let (mut ph, _) = client_online(port, &token, &mut dev).await;
 
     // 桌面断开
@@ -251,7 +279,7 @@ async fn Relay_DeviceOffline_NotifyClients_5() {
 #[tokio::test]
 async fn Relay_ClientDisconnect_NotifyDevice_6() {
     let port = spawn_relay(cc_box_relay::PAIR_TTL).await;
-    let (mut dev, token) = paired_device(port, "dev-6").await;
+    let (mut dev, token) = paired_device(port, DEV_ID).await;
     let (mut ph, conn) = client_online(port, &token, &mut dev).await;
 
     ph.close(None).await.unwrap();
@@ -263,9 +291,9 @@ async fn Relay_ClientDisconnect_NotifyDevice_6() {
 #[tokio::test]
 async fn Relay_DeviceReplace_OldConnectionReplaced_7() {
     let port = spawn_relay(cc_box_relay::PAIR_TTL).await;
-    let mut old = device_online(port, "dev-7", KEY_A).await;
+    let mut old = device_online(port, DEV_ID, KEY_A).await;
 
-    let _new = device_online(port, "dev-7", KEY_A).await;
+    let _new = device_online(port, DEV_ID, KEY_A).await;
 
     let v = recv_of_type(&mut old, "replaced").await;
     assert_eq!(v["type"], "replaced");
@@ -275,7 +303,7 @@ async fn Relay_DeviceReplace_OldConnectionReplaced_7() {
 #[tokio::test]
 async fn Relay_PairCode_Strength_8() {
     let port = spawn_relay(cc_box_relay::PAIR_TTL).await;
-    let mut dev = device_online(port, "dev-8", KEY_A).await;
+    let mut dev = device_online(port, DEV_ID, KEY_A).await;
 
     send(&mut dev, json!({"type": "pair.create"})).await;
     let v = recv_of_type(&mut dev, "pair.created").await;
@@ -288,7 +316,7 @@ async fn Relay_PairCode_Strength_8() {
 #[tokio::test]
 async fn Relay_PairFailLockout_9() {
     let port = spawn_relay(cc_box_relay::PAIR_TTL).await;
-    let mut dev = device_online(port, "dev-9", KEY_A).await;
+    let mut dev = device_online(port, DEV_ID, KEY_A).await;
 
     // 现取一个正确码（不使用）
     send(&mut dev, json!({"type": "pair.create"})).await;
@@ -309,4 +337,94 @@ async fn Relay_PairFailLockout_9() {
     let resp: Value = serde_json::from_str(&resp).unwrap();
     assert_eq!(resp["ok"], false);
     assert_eq!(resp["error"], "too many attempts, try later");
+}
+
+/// 旧版桌面 fallback：pair.create 不带 secret → relay 生成 secret 组 v2 token，
+/// 且经 pair.granted 下发桌面（桌面固化后升级新版手机不失效）
+#[tokio::test]
+async fn RelayPair_NoSecret_FallbackGranted_10() {
+    let port = spawn_relay(cc_box_relay::PAIR_TTL).await;
+    let mut dev = device_online(port, DEV_ID, KEY_A).await;
+    send(&mut dev, json!({"type": "pair.create"})).await;
+    let code = recv_of_type(&mut dev, "pair.created").await["code"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let resp = http_post(port, "/api/pair", &json!({"code": code}).to_string()).await;
+    let resp: Value = serde_json::from_str(&resp).unwrap();
+    assert_eq!(resp["ok"], true, "fallback pair should succeed: {}", resp);
+    let token = resp["token"].as_str().unwrap().to_string();
+
+    // 桌面收到 pair.granted{secret}，且 secret 与 token 后缀一致
+    let v = recv_of_type(&mut dev, "pair.granted").await;
+    let granted = v["secret"].as_str().unwrap();
+    assert_eq!(token, format!("{}.{}", DEV_ID, granted));
+    assert_eq!(granted.len(), 32);
+    assert!(granted.chars().all(|c| c.is_ascii_hexdigit()));
+
+    // fallback token 可正常接入（旧桌面不校验 hello，透传即通）
+    let (_ph, _conn) = client_online(port, &token, &mut dev).await;
+}
+
+/// token v2 格式非法（多点/段长错/非 hex）→ hello.error（手机停止重连）
+#[tokio::test]
+async fn RelayClient_MalformedToken_Denied_11() {
+    let port = spawn_relay(cc_box_relay::PAIR_TTL).await;
+    let bad_tokens = [
+        // 多点
+        format!("{}.{}.extra", DEV_ID, SECRET_A),
+        // 前缀段长错
+        format!("short.{}", SECRET_A),
+        // secret 段长错
+        format!("{}.shortsecret", DEV_ID),
+        // 前缀非 hex
+        format!("zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz.{}", SECRET_A),
+    ];
+    for t in &bad_tokens {
+        let mut ph = ws_connect(port, "/ws").await;
+        send(&mut ph, json!({"type": "hello", "ver": 1, "client": "web", "token": t})).await;
+        let v = recv_of_type(&mut ph, "hello.error").await;
+        assert_eq!(v["error"], "invalid token", "应拒绝: {}", t);
+    }
+}
+
+/// 前缀格式合法但设备从未在线 → device.status offline（手机保持重连等待桌面，
+/// 区别于格式非法的立即拒绝）
+#[tokio::test]
+async fn RelayClient_UnknownDevicePrefix_Offline_12() {
+    let port = spawn_relay(cc_box_relay::PAIR_TTL).await;
+    let mut ph = ws_connect(port, "/ws").await;
+    send(
+        &mut ph,
+        json!({"type": "hello", "ver": 1, "client": "web",
+               "token": format!("b1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6.{}", SECRET_A)}),
+    )
+    .await;
+    let v = recv_of_type(&mut ph, "device.status").await;
+    assert_eq!(v["online"], false);
+}
+
+/// 核心用例：relay 重启（内存态全清）后，已配对手机凭 v2 token 自动恢复——
+/// 桌面重连注册，手机重连即透通，无需重新配对
+#[tokio::test]
+async fn RelayRestart_V2TokenSurvives_13() {
+    let (port, shutdown) = spawn_relay_on(0, cc_box_relay::PAIR_TTL).await;
+    let (mut dev, token) = paired_device(port, DEV_ID).await;
+    let (mut ph, _conn) = client_online(port, &token, &mut dev).await;
+
+    // 模拟 relay 重启：断开全部连接、停止 server（graceful 等连接结束）
+    ph.close(None).await.unwrap();
+    dev.close(None).await.unwrap();
+    shutdown.send(true).unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // 同端口以全新内存态重启（等价进程重启）
+    let (_port, _new_shutdown) = spawn_relay_on(port, cc_box_relay::PAIR_TTL).await;
+    assert_eq!(_port, port);
+
+    // 桌面重连注册（生产由 remote_client 退避重连自动完成）
+    let mut dev = device_online(port, DEV_ID, KEY_A).await;
+
+    // 旧 token（重启前配对）直接接入新 relay 实例：路由成功、hello 透传桌面
+    let (_ph2, _conn2) = client_online(port, &token, &mut dev).await;
 }

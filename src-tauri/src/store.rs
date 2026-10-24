@@ -98,6 +98,9 @@ pub struct RemoteConfig {
     /// 文件传输大小上限（字节）：经中继默认 20MB（中继流量按量计费，实际消耗 ≈2.7×
     /// 文件大小：双程 + base64 膨胀 1.33×；局域网自建 relay 可调高）；0 = 禁用
     pub file_transfer_max_relay: Option<u64>,
+    /// 中继已配对设备 secret 列表（token v2 `<device_id>.<secret>` 的桌面校验依据；
+    /// 首次连接时固化，LRU 上限 16；rotate 设备身份时清空）
+    pub paired_secrets: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

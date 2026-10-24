@@ -51,7 +51,7 @@ const stateText = computed(() => {
 
 const hint = computed(() =>
   wasDenied.value
-    ? '访问令牌无效'
+    ? '访问令牌无效或已过期（中继升级或桌面刷新密钥后需重新配对），请重新扫码'
     : '在桌面端 CC-Box 点击左侧「远程」按钮，扫码或粘贴访问令牌',
 )
 

@@ -165,7 +165,7 @@ class RemoteTransportImpl implements Transport {
     this.open()
   }
 
-  /** 中继配对：一次性码换长期 access_token（仅经中继 serve 的页面可用） */
+  /** 中继配对：一次性码换长期 token v2 `<device_id>.<secret>`（仅经中继 serve 的页面可用） */
   private async pair(code: string): Promise<string | null> {
     try {
       const res = await fetch('/api/pair', {

@@ -155,6 +155,11 @@ fn align_head_to_ansi(s: &mut String) {
 pub(crate) struct ConnEntry {
     pub tx: mpsc::Sender<ServerMessage>,
     pub via_relay: bool,
+    /// 认证门闩：LAN 在连接层等值校验过 token（注册即 true）；中继连接须
+    /// Hello 分支校验 token v2 通过后置 true。校验失败即 remove_conn，且
+    /// 未认证期间非 Hello 消息一律忽略——恶意客户端可无视 hello.error
+    /// 继续发消息（takeover → attach → pty.input），校验必须伴随断连+门闩
+    pub authed: bool,
 }
 
 #[derive(Default)]
@@ -553,11 +558,12 @@ impl RemoteState {
         Some(status)
     }
 
-    /// 连接认证通过后注册（remote_server 直连传 false / remote_client 中继桥接传 true）
+    /// 连接注册（remote_server 直连传 false / remote_client 中继桥接传 true）。
+    /// LAN 在连接层已校验 token（authed 直接置 true）；中继连接待 Hello 校验
     pub fn add_conn(&self, conn_id: u64, sender: mpsc::Sender<ServerMessage>, via_relay: bool) {
         self.inner.lock().conns.insert(
             conn_id,
-            ConnEntry { tx: sender, via_relay },
+            ConnEntry { tx: sender, via_relay, authed: !via_relay },
         );
     }
 
@@ -640,12 +646,35 @@ impl RemoteState {
 
     /// 应用层消息分发（认证后的消息，局域网/中继同一条路径）
     pub fn handle_client_message(&self, conn_id: u64, msg: &ClientMessage) {
+        // 认证门闩：除 Hello（认证本身）外，未认证或未知连接的消息一律忽略
+        //（takeover/attach 等分支不查 conns 表，无门闩则可被盲注入）
+        if !matches!(msg, ClientMessage::Hello { .. }) {
+            let inner = self.inner.lock();
+            match inner.conns.get(&conn_id) {
+                Some(e) if e.authed => {}
+                _ => return,
+            }
+        }
         match msg {
-            // hello 的 token 认证由连接层（LAN）或 relay 完成，此处统一回复 hello.ok——
-            // 中继模式下手机消息经桥接直达这里，若无此回复手机将永远停在认证中
-            ClientMessage::Hello { .. } => {
+            // hello 的 token 认证：LAN 由连接层（remote_server）完成；中继链路
+            // token v2 由本端校验（relay 只按前缀路由不校验）——校验失败回
+            // hello.error 并断连（恶意客户端可无视错误继续发消息，必须门闩）
+            ClientMessage::Hello { token, .. } => {
+                // via_relay：None（未知连接）按中继从严处理
+                if self.conn_via_relay(conn_id) != Some(false)
+                    && !crate::remote_client::verify_relay_token(token)
+                {
+                    self.try_send(conn_id, ServerMessage::HelloError {
+                        error: "invalid token".into(),
+                    });
+                    self.remove_conn(conn_id);
+                    return;
+                }
                 let (controller, revision) = {
-                    let inner = self.inner.lock();
+                    let mut inner = self.inner.lock();
+                    if let Some(e) = inner.conns.get_mut(&conn_id) {
+                        e.authed = true;
+                    }
                     (inner.controller.map(|c| c.as_id()), inner.revision)
                 };
                 self.try_send(

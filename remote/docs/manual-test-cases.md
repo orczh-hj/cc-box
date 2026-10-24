@@ -354,7 +354,22 @@
 - **预期**：
   - 打开中继页面自动完成配对并进入会话列表
   - 关闭浏览器再开（含切 Wi-Fi/流量）打开即连，无需重新扫码
-  - 中继重启后需重新配对（预期行为）
+  - 桌面 config.json 的 `remote.pairedSecrets` 出现该设备的 secret（首次连接时固化）
+
+### R3-2a 中继重启后手机自动恢复（token v2）
+
+- **目标**：relay 无凭证存储、token 校验在桌面——重启不再强制全员重配对
+- **步骤**：手机配对并 connected → 重启中继（本地 `Ctrl+C` 后重新 `cargo run`；生产 `systemctl restart cc-box-relay`）
+- **预期**：
+  - 手机短暂显示「重连中」，桌面日志出现 `relay disconnected → relay registered`
+  - 手机在两端退避窗口内（数秒至约 1 分钟）**自动恢复 connected，无需重新扫码**
+  - 恢复后会话列表/终端接管功能正常
+
+### R3-2b 伪造 token 被桌面拒绝
+
+- **目标**：relay 只路由不校验，secret 校验闭环在桌面
+- **步骤**：手机 TokenGate 手动输入 `<真实 device_id>.<32位伪造hex>` 格式的 token 连接
+- **预期**：收到「令牌无效」被拒（hello.error，停止重连）；重新扫码可正常配对
 
 ### R3-3 公网完整功能
 

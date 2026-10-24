@@ -1149,6 +1149,119 @@ async fn Controller_HelloOk携带控制权快照() {
     }
 }
 
+// ==================== Hello 分支中继 token v2 校验 ====================
+
+/// token v2 测试身份（32 hex）
+const V2_DEVICE_ID: &str = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6";
+const V2_DEVICE_KEY: &str = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+const V2_SECRET: &str = "0123456789abcdef0123456789abcdef";
+
+/// 注册指定类型的测试连接（via_relay 区分中继/局域网）
+fn setup_conn_via(state: &RemoteState, via_relay: bool) -> (u64, mpsc::Receiver<ServerMessage>) {
+    let (tx, rx) = mpsc::channel(64);
+    let conn_id = crate::remote_state::next_conn_id();
+    state.add_conn(conn_id, tx, via_relay);
+    (conn_id, rx)
+}
+
+/// 隔离 config 并预置设备身份与已配对 secret（RAII Drop 还原）
+fn setup_v2_config() {
+    crate::remote_server::save_relay_config(None, Some((V2_DEVICE_ID, V2_DEVICE_KEY))).unwrap();
+    crate::remote_server::save_paired_secrets(&[V2_SECRET.to_string()]).unwrap();
+}
+
+/// 中继连接 + 伪造/未知 secret → hello.error（relay 只路由不校验，桌面是校验闭环）
+#[tokio::test]
+async fn RemoteState_Hello_ViaRelay_未知secret被拒() {
+    let _cfg_lock = super::CONFIG_DIR_TEST_LOCK.lock();
+    let _cfg = TestConfigDirGuard::new("hello-relay-reject");
+    setup_v2_config();
+
+    let state = RemoteState::new();
+    let (conn, mut rx) = setup_conn_via(&state, true);
+    // 前缀正确但 secret 不在已配对列表（伪造场景）
+    state.handle_client_message(conn, &ClientMessage::Hello {
+        ver: 1,
+        client: "web".into(),
+        token: format!("{}.ffffffffffffffffffffffffffffffff", V2_DEVICE_ID),
+    });
+    match recv_timeout(&mut rx).await {
+        ServerMessage::HelloError { error } => assert_eq!(error, "invalid token"),
+        other => panic!("expected HelloError, got {:?}", other),
+    }
+}
+
+/// 中继连接 + 已配对 secret → hello.ok（正常路径）
+#[tokio::test]
+async fn RemoteState_Hello_ViaRelay_已配对secret通过() {
+    let _cfg_lock = super::CONFIG_DIR_TEST_LOCK.lock();
+    let _cfg = TestConfigDirGuard::new("hello-relay-accept");
+    setup_v2_config();
+
+    let state = RemoteState::new();
+    let (conn, mut rx) = setup_conn_via(&state, true);
+    state.handle_client_message(conn, &ClientMessage::Hello {
+        ver: 1,
+        client: "web".into(),
+        token: format!("{}.{}", V2_DEVICE_ID, V2_SECRET),
+    });
+    match recv_timeout(&mut rx).await {
+        ServerMessage::HelloOk { .. } => {}
+        other => panic!("expected HelloOk, got {:?}", other),
+    }
+}
+
+/// 局域网连接不触发 v2 校验（token 已在连接层完成等值校验，任意值直接通过）
+#[tokio::test]
+async fn RemoteState_Hello_Lan_不走v2校验() {
+    let state = RemoteState::new();
+    let (conn, mut rx) = setup_conn_via(&state, false);
+    state.handle_client_message(conn, &ClientMessage::Hello {
+        ver: 1,
+        client: "web".into(),
+        token: "any-lan-token".into(),
+    });
+    match recv_timeout(&mut rx).await {
+        ServerMessage::HelloOk { .. } => {}
+        other => panic!("expected HelloOk, got {:?}", other),
+    }
+}
+
+/// 认证门闩：中继连接 Hello 校验失败（假 secret）后，同一连接继续发
+/// controller.takeover / 任意消息不得生效（恶意客户端可无视 hello.error
+/// 继续发消息——校验必须伴随「失败断连 + 未认证忽略」才有真实拦截力）
+#[tokio::test]
+async fn RemoteState_Hello_ViaRelay_校验失败后拒绝后续消息() {
+    let _cfg_lock = super::CONFIG_DIR_TEST_LOCK.lock();
+    let _cfg = TestConfigDirGuard::new("hello-relay-gate");
+    setup_v2_config();
+
+    let state = RemoteState::new();
+    let (conn, mut rx) = setup_conn_via(&state, true);
+    // 假 secret 的 v2 token → HelloError
+    state.handle_client_message(conn, &ClientMessage::Hello {
+        ver: 1,
+        client: "web".into(),
+        token: format!("{}.ffffffffffffffffffffffffffffffff", V2_DEVICE_ID),
+    });
+    match recv_timeout(&mut rx).await {
+        ServerMessage::HelloError { .. } => {}
+        other => panic!("expected HelloError, got {:?}", other),
+    }
+
+    // 恶意客户端无视错误继续接管：不得获得控制权
+    state.handle_client_message(conn, &ClientMessage::ControllerTakeover);
+    assert_ne!(
+        state.controller(),
+        Some(crate::remote_state::ControllerHolder::Remote(conn)),
+        "未认证连接不得通过后续消息获得控制权"
+    );
+    // 后续读类消息同样被忽略（不产生任何回复）
+    state.handle_client_message(conn, &ClientMessage::SessionsList);
+    let res = tokio::time::timeout(std::time::Duration::from_millis(150), rx.recv()).await;
+    assert!(res.is_err() || matches!(res, Ok(None)), "未认证连接的消息不应有任何应答");
+}
+
 /// 复现手机端 rpc 超时：get_app_config 全链路（handle_rpc 线程 → dispatch →
 ///RpcResult 回连接）。页面端该命令 15s 超时，此处验证服务端是否发出应答
 #[tokio::test]
@@ -1312,6 +1425,9 @@ fn Controller_并发广播到达序revision严格递增() {
     state.add_conn(conn_a, tx, false);
 
     const N: usize = 2000;
+    // conn_b 须注册连接（认证门闩会忽略未注册连接的消息）
+    let (tx_b, _rx_b) = mpsc::channel(8);
+    state.add_conn(conn_b, tx_b, false);
     let s1 = state.clone();
     let writer = std::thread::spawn(move || {
         for _ in 0..N {

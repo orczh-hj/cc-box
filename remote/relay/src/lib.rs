@@ -2,13 +2,15 @@
 //!
 //! 部署在公网 VPS（如 cc.orczh.top），职责（详见 remote/README.md）：
 //! - `/ws/device` 桌面端注册（device_key 认证，出站长连接穿透 NAT）
-//! - `/ws` 手机端连接（access_token 认证，绑定桌面）
-//! - `POST /api/pair` 配对码换 access_token（一次性，TTL 5 分钟）
+//! - `/ws` 手机端连接（token v2 `<device_id>.<secret>` 前缀路由，secret 由桌面校验）
+//! - `POST /api/pair` 配对码换 token v2（一次性，TTL 5 分钟）
 //! - `GET /` 手机 Web UI（cc-box-web-assets：CC_BOX_RELAY_WEB_DIR 磁盘目录
 //!   优先，内嵌 dist 兜底——前端可独立 scp 更新免重编，见 deploy.md）
 //!
 //! 路由原则：**不解析、不存储、不改写应用层 payload**（透传），为 E2E 加密留路。
-//! 全内存态（重启即清），无数据库。
+//! 无凭证存储：token 自带路由前缀、secret 校验下沉桌面（token 表随重启清空的
+//! 问题不复存在——已配对手机在 relay 重启后自动重连恢复）。
+//! 全内存态（重启即清在线连接），无数据库。
 //!
 //! lib/bin 拆分是为了集成测试能在内存中起 server（tests/integration.rs）。
 
@@ -44,15 +46,25 @@ struct AppState {
     devices: HashMap<String, mpsc::Sender<DeviceOutMsg>>,
     /// 在线手机：conn_id → 绑定的 device_id 与出站通道
     clients: HashMap<u64, ClientConn>,
-    /// 配对码 → (device_id, 过期时间)
-    pair_codes: HashMap<String, (String, Instant)>,
-    /// access_token → device_id（长期有效；重启即清，手机重新配对即可）
-    access_tokens: HashMap<String, String>,
+    /// 配对码 → 配对信息（一次性，TTL 内有效）
+    pair_codes: HashMap<String, PairCode>,
     /// 首次注册绑定的 device_key：device_id → key（后续重连需匹配）
     device_keys: HashMap<String, String>,
     /// /api/pair 失败节流：IP → (连续失败次数, 锁定截止时间)
     pair_fails: HashMap<std::net::IpAddr, (u32, Option<Instant>)>,
     next_conn_id: u64,
+}
+
+/// 配对码绑定信息：token v2 = `<device_id>.<secret>`。
+/// secret 由桌面 pair.create 提供（新版桌面）；旧版桌面不带时 relay 生成
+/// （fallback），并在配对成功时经 `pair.granted` 下发桌面固化——该桌面
+/// 升级新版后已配对手机不失效
+struct PairCode {
+    device_id: String,
+    secret: String,
+    /// secret 来源为桌面（true）或 relay fallback 生成（false，需下发）
+    from_desktop: bool,
+    exp: Instant,
 }
 
 struct ClientConn {
@@ -144,22 +156,24 @@ async fn api_pair(
     };
 
     // 清理过期配对码
-    inner.st.pair_codes.retain(|_, (_, exp)| *exp > Instant::now());
+    inner.st.pair_codes.retain(|_, pc| pc.exp > Instant::now());
 
-    let Some((device_id, _)) = inner.st.pair_codes.remove(&req.code) else {
+    let Some(pc) = inner.st.pair_codes.remove(&req.code) else {
         return Json(fail(&mut inner, "invalid or expired code"));
     };
     // 设备必须在线
-    if !inner.st.devices.contains_key(&device_id) {
+    let Some(device_tx) = inner.st.devices.get(&pc.device_id).cloned() else {
         return Json(fail(&mut inner, "device offline"));
-    }
+    };
 
-    // access_token 表上限（长期有效不过期，超限拒绝新配对防膨胀）
-    if inner.st.access_tokens.len() >= MAX_ACCESS_TOKENS {
-        return Json(PairResponse { ok: false, token: None, error: Some("relay busy, try later".into()) });
+    // token v2：`<device_id>.<secret>`——relay 只按前缀路由，secret 校验在桌面。
+    // fallback（旧版桌面未提供 secret，由 relay 生成）时下发桌面固化
+    let token = format!("{}.{}", pc.device_id, pc.secret);
+    if !pc.from_desktop {
+        let _ = device_tx.try_send(
+            serde_json::to_string(&DeviceOut::PairGranted { secret: pc.secret }).unwrap(),
+        );
     }
-    let token = uuid::Uuid::new_v4().simple().to_string() + &uuid::Uuid::new_v4().simple().to_string();
-    inner.st.access_tokens.insert(token.clone(), device_id.clone());
     // 成功后清该 IP 的失败计数
     inner.st.pair_fails.remove(&ip);
     Json(PairResponse { ok: true, token: Some(token), error: None })
@@ -173,7 +187,12 @@ enum DeviceInMsg {
     #[serde(rename = "register")]
     Register { device_id: String, device_key: String },
     #[serde(rename = "pair.create")]
-    PairCreate,
+    PairCreate {
+        /// token v2 的 secret（新版桌面预生成并暂存，配对成功后校验/固化；
+        /// 缺省 = 旧版桌面，relay 生成并经 pair.granted 回发）
+        #[serde(default)]
+        secret: Option<String>,
+    },
     #[serde(rename = "data")]
     Data {
         to: u64,
@@ -191,6 +210,9 @@ enum DeviceOut {
     Registered { device_id: String },
     #[serde(rename = "pair.created")]
     PairCreated { code: String },
+    /// fallback 配对成功（旧版桌面未带 secret）时下发，桌面固化进持久列表
+    #[serde(rename = "pair.granted")]
+    PairGranted { secret: String },
     #[serde(rename = "data")]
     Data {
         from: u64,
@@ -205,7 +227,6 @@ enum DeviceOut {
 /// 资源上限（公网暴露面防护：防连接/凭证表打爆小规格 VPS）
 const MAX_DEVICES: usize = 64;
 const MAX_CLIENTS: usize = 256;
-const MAX_ACCESS_TOKENS: usize = 512;
 /// WS 单消息上限（默认 64MB 过大；应用层最大为 rpc 参数/设置导入，4MB 足够）
 const MAX_WS_MESSAGE: usize = 4 * 1024 * 1024;
 
@@ -303,14 +324,25 @@ async fn handle_device(mut socket: WebSocket, state: SharedState, addr: SocketAd
         };
         match parsed {
             DeviceInMsg::Register { .. } => {}
-            DeviceInMsg::PairCreate => {
-                // 8 位 hex（16^8 ≈ 43 亿）+ TTL 5 分钟 + /api/pair 失败锁定，抵御暴力猜解
+            DeviceInMsg::PairCreate { secret } => {
+                // 8 位 hex（16^8 ≈ 43 亿）+ TTL 5 分钟 + /api/pair 失败锁定，抵御暴力猜解。
+                // secret 由桌面提供（校验/固化都在桌面）；旧版桌面不带时 relay 生成 fallback
+                let (secret, from_desktop) = match secret {
+                    Some(s) if s.len() == 32 && s.chars().all(|c| c.is_ascii_hexdigit()) => {
+                        (s, true)
+                    }
+                    _ => (uuid::Uuid::new_v4().simple().to_string(), false),
+                };
                 let code = uuid::Uuid::new_v4().simple().to_string()[..8].to_uppercase();
-                state
-                    .lock()
-                    .st
-                    .pair_codes
-                    .insert(code.clone(), (device_id.clone(), Instant::now() + pair_ttl));
+                state.lock().st.pair_codes.insert(
+                    code.clone(),
+                    PairCode {
+                        device_id: device_id.clone(),
+                        secret,
+                        from_desktop,
+                        exp: Instant::now() + pair_ttl,
+                    },
+                );
                 let out = serde_json::to_string(&DeviceOut::PairCreated { code }).unwrap();
                 let _ = tx.try_send(out);
             }
@@ -349,7 +381,7 @@ async fn handle_device(mut socket: WebSocket, state: SharedState, addr: SocketAd
         if still_current {
             inner.st.devices.remove(&device_id_for_cleanup);
         }
-        inner.st.pair_codes.retain(|_, (d, _)| d != &device_id_for_cleanup);
+        inner.st.pair_codes.retain(|_, pc| pc.device_id != device_id_for_cleanup);
         // 通知该设备的手机连接：桌面离线
         let offline = r#"{"type":"device.status","online":false}"#.to_string();
         inner.st.clients.retain(|_, c| {
@@ -394,12 +426,22 @@ async fn handle_client(mut socket: WebSocket, state: SharedState, addr: SocketAd
         .unwrap_or("")
         .to_string();
 
-    let device_id = state.lock().st.access_tokens.get(&token).cloned();
-    let Some(device_id) = device_id else {
-        let _ = socket
-            .send(Message::Text(r#"{"type":"hello.error","error":"invalid token"}"#.into()))
-            .await;
-        return;
+    // token v2 路由：`<device_id>.<secret>`——恰一个点、两段各 32 hex，
+    // 前缀即目标桌面。secret 校验在桌面（relay 不存凭证表）。
+    // 格式非法（含 v1 无点 token，relay 升级后存量手机需重扫一次）直接拒绝
+    let is_32_hex = |s: &str| s.len() == 32 && s.chars().all(|c| c.is_ascii_hexdigit());
+    let device_id = match token.split_once('.') {
+        Some((prefix, secret))
+            if !secret.contains('.') && is_32_hex(prefix) && is_32_hex(secret) =>
+        {
+            prefix.to_string()
+        }
+        _ => {
+            let _ = socket
+                .send(Message::Text(r#"{"type":"hello.error","error":"invalid token"}"#.into()))
+                .await;
+            return;
+        }
     };
     let device_tx = state.lock().st.devices.get(&device_id).cloned();
     let Some(device_tx) = device_tx else {

@@ -98,12 +98,17 @@ Web UI 页面（= 主应用 UI）：TokenGate 认证门（token/配对码）→ 
 ### 6.1 中继层（relay 边界，仅路由）
 
 ```json
-桌面→中继  {"type":"register","device_id":"..."}            // 头带 device_key
-桌面→中继  {"type":"ping"}                                    // 25s keepalive（防反代掐断空闲连接）
+桌面→中继  {"type":"register","device_id":"..."}                          // 头带 device_key
+桌面→中继  {"type":"pair.create","secret":"<32hex>"}                      // 申请配对码（secret 桌面预生成；缺省=旧版桌面，relay 生成）
+桌面→中继  {"type":"ping"}                                                 // 25s keepalive（防反代掐断空闲连接）
+中继→桌面  {"type":"pair.created","code":"XXXXXXXX"}                       // 配对码（TTL 5 分钟，一次性）
+中继→桌面  {"type":"pair.granted","secret":"<32hex>"}                     // 仅 fallback 配对成功时下发（旧桌面升级后手机不失效）
 中继→手机  {"type":"device_status","online":true}
-手机→中继  {"type":"data","payload":{...}}                   // 路由到绑定桌面
+手机→中继  {"type":"data","payload":{...}}                   // hello 头带 token v2，前缀路由到绑定桌面
 桌面→中继  {"type":"data","to":"<conn_id>","payload":{...}}  // 路由到指定手机连接
 ```
+
+手机 token v2 格式 `<device_id>.<secret>`（各 32 hex）：relay 只按前缀查在线桌面路由（格式非法/无点 v1 → `hello.error`；桌面不在线 → `device.status offline`），**secret 校验在桌面**（`remote_state` Hello 分支查 `~/.cc-box/config.json` 的 `paired_secrets` + 内存 pending）。relay 不存任何凭证表——重启后已配对手机凭 token 自动重连恢复。
 
 ### 6.2 应用层（手机 ↔ 桌面，两种传输同构）
 
@@ -111,7 +116,7 @@ R1 已实现消息集（ver=1；正本在 `remote/protocol/src/lib.rs` 与 `prot
 
 | 方向 | type | payload | 说明 |
 |---|---|---|---|
-| 手机→桌面 | `hello` | `{ver, client, token}` | 连接认证（必须是首条消息；token 校验在连接层/relay，`hello.ok` 统一由唯一 handler 回复——中继模式依赖此路径） |
+| 手机→桌面 | `hello` | `{ver, client, token}` | 连接认证（必须是首条消息；LAN token 由连接层等值校验，中继 v2 token 由桌面 handler 校验 secret，`hello.ok` 统一由唯一 handler 回复——中继模式依赖此路径） |
 | 桌面→手机 | `hello.ok` / `hello.error` | `{ver, deviceName}` / `{error}` | 认证结果（错误即断开） |
 | 手机→桌面 | `sessions.list` → `sessions` | `{}` → `{list:[{id,type,cwd,working,pending}]}` | 多端可见，不受独占限制 |
 | 手机→桌面 | `projects.list` → `projects` | `{}` → `{list:[{path,name}]}` | 项目列表（新建/恢复入口） |
@@ -170,9 +175,11 @@ PTY 退出           清理状态
 |---|---|---|---|
 | `device_key` | 桌面 ↔ 中继 | 长期，存 `~/.cc-box/config.json` | 桌面注册 |
 | `pair_code` | 一次性 | TTL 5 分钟 | QR 配对 |
-| `access_token` | 手机 ↔ 中继 | 长期，可吊销，localStorage | 手机连接 |
+| token v2 `<device_id>.<secret>` | 手机（完整）↔ 桌面（secret） | 长期，可吊销；secret 存桌面 `paired_secrets`（LRU 上限 16），token 存手机 localStorage | 手机连接（relay 按前缀路由，桌面校验 secret） |
 
-流程：桌面开启远程 → 连上中继 → 显示 QR（`https://<relay>/#pair=<码>`；局域网 QR 为 `http://<IP>:<port>/#token=<token>`，fragment 不进服务器日志）→ 手机扫码提交配对码 → 中继校验后颁发 access_token → 此后打开即连，桌面设置页可管理/吊销已配对设备。
+流程：桌面开启远程 → 连上中继（`pair.create` 预生成 secret 随消息携带，内存 pending 暂存）→ 显示 QR（`https://<relay>/#pair=<码>`；局域网 QR 为 `http://<IP>:<port>/#token=<token>`，fragment 不进服务器日志）→ 手机扫码提交配对码 → `/api/pair` 组 v2 token 返回手机 → 手机首次 hello 命中 pending → 桌面固化为持久设备 → 此后打开即连，**中继重启自动恢复**。旧版桌面（pair.create 无 secret）走 relay fallback 生成 secret 并经 `pair.granted` 下发桌面固化——升级桌面后手机不失效。
+
+吊销：「刷新密钥」轮换 device_id + 清空 `paired_secrets`（旧 token 前缀路由 miss → 持续 offline，需重扫）。
 
 权限：首版配对即读写；协议预留 `role: readonly`。
 
@@ -180,8 +187,8 @@ PTY 退出           清理状态
 
 - 中继模式全程 TLS（nginx + Let's Encrypt）；局域网明文 HTTP + token（同网段可接受）
 - 桌面零入站端口（出站 WSS 穿透 NAT）；远程默认关闭；停用/换中继时在途连接立即拆除
-- 中继不解析 payload：明文仅自托管中继可见，未来 E2E 只改两端不动中继
-- 令牌均为随机 32 字节 base64url；配对码 8 位 hex、5 分钟 TTL、`/api/pair` 按 IP 失败锁定（5 次锁 60s），抗暴力猜解
+- 中继不解析 payload、不存凭证表：明文仅自托管中继可见，secret 明文不出桌面/手机，未来 E2E 只改两端不动中继
+- token v2 双层校验：relay 前缀路由（device_id 过 device_key 首注绑定）+ 桌面 secret 校验（128bit 随机）；配对码 8 位 hex、5 分钟 TTL、`/api/pair` 按 IP 失败锁定（5 次锁 60s），抗暴力猜解
 - conn_id 全局唯一命名空间（局域网与中继共用分配器，双模式并存不冲突）；远程会话创建限已知项目白名单 + 并发上限
 
 ## 9. 部署（orczh.top）
@@ -202,7 +209,7 @@ server {
 # certbot -d cc.orczh.top
 ```
 
-relay 全内存态（设备路由表 + 配对码 + 令牌），重启即清，无数据库。随版本发布二进制 + docker-compose.yml，社区用户可自托管。
+relay 全内存态（在线连接路由表 + 配对码），无凭证存储、无数据库——重启清空内存态不影响已配对手机（token v2 自带路由，桌面校验 secret，重连自动恢复）。随版本发布二进制 + docker-compose.yml，社区用户可自托管。
 
 ## 10. 实施阶段
 

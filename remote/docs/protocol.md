@@ -15,7 +15,7 @@
 
 | type | 字段 | 说明 |
 |---|---|---|
-| `hello` | `ver, client, token` | 认证握手（token = 局域直连 token 或中继 device_key 会话） |
+| `hello` | `ver, client, token` | 认证握手。token 两种：局域直连 = 桌面静态 token（连接层等值校验）；中继 = token v2 `<device_id>.<secret>`（relay 按前缀路由，**secret 由桌面 Hello 分支校验**——命中配对 pending 时固化为持久设备，LRU 上限 16） |
 | `sessions.list` | `{}` | 拉取运行中会话列表 |
 | `projects.list` | `{}` | 可操作项目白名单 |
 | `session.create` | `path, sessionId?, skipPermissions?, customArgs?` | 新建（无 sessionId）或恢复（--resume sessionId）会话 |

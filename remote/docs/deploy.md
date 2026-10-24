@@ -77,7 +77,7 @@ systemctl daemon-reload && systemctl enable --now cc-box-relay
 - **不要用 `cc-box-relay --version` 做 smoke test**：main 无参数解析，任何参数都会把服务器启起来；经 ssh 断开后成孤儿进程占住端口，导致 systemd 服务 Restart 循环（AddrInUse）。验证一律走 `systemctl status` + `ss -tlnp`
 - **修改 systemd 服务文件后必须 `daemon-reload`**，且先重启 relay（让出端口）再重启 nginx（bind 顺序冲突会导致 nginx 起不来）
 - 阿里云**安全组**需放行 8800/tcp（控制台操作，服务器内 firewalld 默认未启用）
-- 升级流程：scp 覆盖二进制 → `systemctl restart cc-box-relay`（relay 状态全内存态：手机需重新扫码配对，桌面自动重连）
+- 升级流程：scp 覆盖二进制 → `systemctl restart cc-box-relay`（桌面自动重连；已配对手机凭 token v2 自动恢复，无需重扫——仅升级到 v2 版 relay 时存量手机各重扫一次）
 
 **验证**（公网 TLS 可达性 + WS 握手）：
 
@@ -131,16 +131,16 @@ timeout 90 scp -r dist/* root@orczh.top:/opt/cc-box/web/
 curl -s https://orczh.top:8800/ | grep -o 'assets/index-[^"]*'   # hash 应为本次新构建
 ```
 
-> 首次启用需一次性配置：systemd 单元加 `Environment=CC_BOX_RELAY_WEB_DIR=/opt/cc-box/web`、`mkdir -p /opt/cc-box/web` 并 `systemctl daemon-reload && systemctl restart cc-box-relay`（重启即重新配对，属常规流程）。桌面端对称支持 `CC_BOX_WEB_DIR`（release 桌面同样获得免重编更新通道；debug 本就实时读 dist）。
+> 首次启用需一次性配置：systemd 单元加 `Environment=CC_BOX_RELAY_WEB_DIR=/opt/cc-box/web`、`mkdir -p /opt/cc-box/web` 并 `systemctl daemon-reload && systemctl restart cc-box-relay`（重启仅短暂断开连接，已配对手机自动重连恢复）。桌面端对称支持 `CC_BOX_WEB_DIR`（release 桌面同样获得免重编更新通道；debug 本就实时读 dist）。
 
 **relay 更新一条龙**（2026-10 起首选一键脚本，Windows Git Bash，在仓库根目录）：
 
 ```bash
 # 构建 → musl 交叉编译 → scp .new + md5 校验 → 确认后切换重启 → 三查全自动
-npm run deploy:relay          # 加 --yes 跳过切换确认（重启会踢掉所有手机连接）
+npm run deploy:relay          # 加 --yes 跳过切换确认（重启短暂断开，手机自动重连恢复）
 ```
 
-脚本实现 `scripts/deploy-relay.mjs`（全程直连无需代理；切换前确认是因为重启 = 内存态清空）。脚本不可用时的手动等价流程：
+脚本实现 `scripts/deploy-relay.mjs`（全程直连无需代理；切换前确认是因为重启会断开在途连接）。**v2 版 relay 首次升级务必先发桌面新版再部署 relay**（新版桌面兼容新旧 relay；旧桌面在新 relay 下走 fallback 但无 hello 校验加固）。脚本不可用时的手动等价流程：
 
 ```bash
 # 1. 前端最新产物（即使没改前端也建议跑，保证嵌入版本一致）
@@ -163,7 +163,7 @@ curl -s "https://orczh.top:8800/$(curl -s https://orczh.top:8800/ | grep -o 'ass
 
 **升级后必读**：
 
-- relay 重启 = 内存态清空：**所有已配对手机需重新扫码**（桌面面板会自动出新码）；桌面端自动重连（日志 `relay registered`）
+- relay 重启 = 内存态（在线连接/配对码）清空：桌面端自动重连（日志 `relay registered`）；**已配对手机凭 token v2 自动重连恢复，无需重扫**（token 校验在桌面，relay 不存凭证表）——仅升级到本版 relay 时，存量 v1 token 手机需各重扫一次（一次性迁移）
 - 手机/浏览器端要**刷新页面**拿新 bundle（浏览器缓存旧 JS 是"改了没反应"的头号原因）
 - 桌面日志验证：`~/.cc-box/logs/` 里看 `relay connected/registered` 与新配对码
 
@@ -181,7 +181,7 @@ CC_BOX_RELAY_URL=192.168.5.105:8800 npm run tauri:dev
 - 地址归一化：显式 scheme 优先（`https://` → `wss://`、`http://` → `ws://`）；裸地址默认补 `ws://`（免证书端口直连 relay 进程）
 - 配对码一次性、5 分钟有效；**过期/消费后按需自动重申**（面板查询触发 `pair.create`，2s 轮询拿到新码），无码等待期间面板回落局域直连视图
 - config 的 `relay_url` 是历史字段，**不再读取**（避免旧残留覆盖内置默认）
-- 手机扫码完成配对 → access_token 长期有效（存手机 localStorage），之后打开即连；**中继重启后手机需重新配对**
+- 手机扫码完成配对 → token v2（`<device_id>.<secret>`，存手机 localStorage；secret 固化在桌面 `~/.cc-box/config.json` 的 `pairedSecrets`）长期有效，之后打开即连；**中继重启后自动重连恢复，无需重新配对**（重新配对仅在桌面「刷新密钥」后需要）
 
 ## 5. 本地测试（开发环境）
 
@@ -212,7 +212,7 @@ CC_BOX_RELAY_URL=192.168.5.105:8800 npm run tauri:dev
 
 ## 6. 运维要点
 
-- **内存态**：设备路由表、配对码、access_token 全在内存。中继重启后：桌面自动重连（指数退避）；**手机需重新配对**（重新扫码）
+- **内存态**：在线连接路由表、配对码全在内存，无凭证存储（token v2 `<device_id>.<secret>` 由桌面校验 secret）。中继重启后：桌面自动重连（指数退避）；**已配对手机同样自动重连恢复**——重新配对仅在桌面「刷新密钥」后需要
 - **设备身份**：`device_id`/`device_key` 存于桌面 `~/.cc-box/config.json`，首次连接时生成；中继校验 key 与 device_id 绑定关系，防止伪造
 - **透传原则**：中继不解析应用层 payload——升级桌面/手机端协议无需动中继
 - 日志：`journalctl -u cc-box-relay -f`

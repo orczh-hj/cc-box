@@ -33,6 +33,18 @@ static RELAY_GEN: LazyLock<(watch::Sender<u64>, watch::Receiver<u64>)> =
 /// 中继层 keepalive 周期（须小于 nginx proxy_read_timeout 默认 60s）
 const KEEPALIVE: Duration = Duration::from_secs(25);
 
+/// 配对 secret 预生成有效期（与配对码 TTL 5 分钟对齐并留余量）
+const PENDING_SECRET_TTL: Duration = Duration::from_secs(6 * 60);
+/// 持久化已配对设备上限（LRU：超限淘汰最旧 = 最久未配对的设备掉线，重扫即可）
+const MAX_PAIRED_SECRETS: usize = 16;
+
+/// 配对流程预生成的 secret（随 pair.create 携带给 relay 组 v2 token；
+/// 手机首次 hello 命中时固化为持久设备）。仅内存暂存：桌面每次重连 relay
+/// 都会申请配对码，落盘推迟到真实配对（首连命中）以免持久列表被垃圾灌满
+static PENDING_SECRETS: LazyLock<Mutex<Vec<(String, Instant)>>> =
+    LazyLock::new(|| Mutex::new(Vec::new()));
+
+
 /// 内置默认中继（生产部署）：8800 由 nginx TLS 终止（手机浏览器对 http 强制
 /// 升级 https，纯 HTTP 端口打不开）——中继即默认远程方式，无需用户配置；
 /// 环境变量 CC_BOX_RELAY_URL 仅作本地调试覆盖
@@ -53,12 +65,126 @@ pub(crate) fn resolve_relay_url() -> String {
         .unwrap_or_else(|| normalize_relay_url(DEFAULT_RELAY_URL))
 }
 
-/// 发送 pair.create；中继未连接（DEVICE_TX 未挂载）或通道关闭时报错
+// ==================== 中继 token v2：secret 生成与校验 ====================
+
+/// 生成新配对 secret：懒清理过期项后插入 pending 暂存并返回。
+/// secret 随 pair.create 先于配对码消费而生，固化推迟到手机首次 hello 命中
+fn new_pending_secret() -> String {
+    let secret = uuid::Uuid::new_v4().simple().to_string();
+    let mut pending = PENDING_SECRETS.lock();
+    pending.retain(|(_, at)| at.elapsed() < PENDING_SECRET_TTL);
+    pending.push((secret.clone(), Instant::now()));
+    secret
+}
+
+fn is_32_hex(s: &str) -> bool {
+    s.len() == 32 && s.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// token 判定结果（纯逻辑，不碰配置与全局态）
+enum TokenVerdict {
+    Pass,
+    /// 命中 pending：需移除 pending 项并固化为持久设备
+    Persist(String),
+    Fail,
+}
+
+/// 校验中继 v2 token 的纯逻辑：`<device_id>.<secret>`（各 32 hex）。
+/// - 无 `.`：v1 token 放行（「新桌面 + 旧 relay」过渡窗口，旧 relay 内存表
+///   已完成校验；新 relay 对无点 token 一律拒绝，此分支在新 relay 下不可达）
+/// - 前缀须为本机 device_id；secret 须已配对（持久列表或 pending）
+fn judge_relay_token(
+    token: &str,
+    device_id: &str,
+    persisted: &[String],
+    pending: &[String],
+) -> TokenVerdict {
+    let Some((prefix, secret)) = token.split_once('.') else {
+        return TokenVerdict::Pass;
+    };
+    if secret.contains('.') || !is_32_hex(prefix) || !is_32_hex(secret) || prefix != device_id {
+        return TokenVerdict::Fail;
+    }
+    if persisted.iter().any(|s| s == secret) {
+        TokenVerdict::Pass
+    } else if pending.iter().any(|s| s == secret) {
+        TokenVerdict::Persist(secret.to_string())
+    } else {
+        TokenVerdict::Fail
+    }
+}
+
+/// 固化已配对设备 secret（幂等；LRU 超限淘汰最旧）。两条路径共用：
+/// hello 命中 pending、relay fallback 配对下发 pair.granted（旧桌面升级后
+/// 手机不失效的保障）。写盘为每台手机仅一次的低频同步小文件 IO
+pub fn persist_granted_secret(secret: &str) {
+    let mut list = paired_secrets_from_config();
+    if list.iter().any(|s| s == secret) {
+        return;
+    }
+    list.push(secret.to_string());
+    if list.len() > MAX_PAIRED_SECRETS {
+        list.drain(..list.len() - MAX_PAIRED_SECRETS);
+    }
+    if let Err(e) = crate::remote_server::save_paired_secrets(&list) {
+        log::warn!("[remote] failed to persist paired secret: {}", e);
+    }
+}
+
+/// 读取持久化已配对 secret 列表
+fn paired_secrets_from_config() -> Vec<String> {
+    crate::store::get_app_config()
+        .ok()
+        .and_then(|c| c.remote)
+        .and_then(|r| r.paired_secrets)
+        .unwrap_or_default()
+}
+
+/// 一次读 config 取设备身份与已配对 secret 列表（verify 热路径合并 IO；
+/// device_id 缺失 = 中继未注册，返回 None 由调用方从严拒绝）
+fn relay_identity_and_secrets() -> Option<(String, Vec<String>)> {
+    let remote = crate::store::get_app_config().ok()?.remote?;
+    let device_id = remote.device_id.filter(|s| !s.is_empty())?;
+    let secrets = remote.paired_secrets.unwrap_or_default();
+    Some((device_id, secrets))
+}
+
+/// 校验中继手机 hello 的 token（remote_state Hello 分支调用，via_relay 连接）。
+/// 命中 pending 时顺带固化（每台手机仅首次连接触发一次写盘）
+pub fn verify_relay_token(token: &str) -> bool {
+    // 一次读 config 同时取 device_id 与已配对列表（热路径避免双份文件 IO）
+    let Some((device_id, persisted)) = relay_identity_and_secrets() else {
+        return false;
+    };
+    let pending: Vec<String> = PENDING_SECRETS
+        .lock()
+        .iter()
+        .map(|(s, _)| s.clone())
+        .collect();
+    match judge_relay_token(token, &device_id, &persisted, &pending) {
+        TokenVerdict::Pass => true,
+        TokenVerdict::Persist(secret) => {
+            // 先固化再摘 pending：并发双连接同 token 首连时，后到者不会在
+            // 窗口期误判 Fail（固化幂等，重复无害）
+            persist_granted_secret(&secret);
+            PENDING_SECRETS.lock().retain(|(s, _)| *s != secret);
+            true
+        }
+        TokenVerdict::Fail => false,
+    }
+}
+
+/// 发送 pair.create（携带预生成 secret——token v2 的校验依据）；
+/// 中继未连接（DEVICE_TX 未挂载）或通道关闭时报错
 fn send_pair_create() -> Result<(), String> {
     let Some(tx) = DEVICE_TX.lock().clone() else {
         return Err("relay not connected".into());
     };
-    tx.try_send(r#"{"type":"pair.create"}"#.to_string())
+    let msg = serde_json::json!({
+        "type": "pair.create",
+        "secret": new_pending_secret(),
+    });
+    tx.try_send(msg.to_string())
         .map_err(|_| "relay channel closed".to_string())
 }
 
@@ -222,8 +348,8 @@ pub async fn connect() {
 }
 
 /// 轮换设备身份（安全阻断语义）：旧 device_id 永不再上线——已配对手机的
-/// access_token 在 relay 侧映射到旧 device_id（查在线表 miss）→ 全部失效；
-/// 新身份注册后用户重扫新配对码即可
+/// token 前缀路由 miss → 持续 offline 直至重扫；新身份注册后用户重扫新配对码即可。
+/// 配对凭证一并作废（清空持久 secret 列表与 pending）
 pub fn rotate_identity() {
     let device_id = uuid::Uuid::new_v4().simple().to_string();
     let device_key = format!(
@@ -232,12 +358,14 @@ pub fn rotate_identity() {
         uuid::Uuid::new_v4().simple()
     );
     let _ = crate::remote_server::save_relay_config(None, Some((&device_id, &device_key)));
+    let _ = crate::remote_server::save_paired_secrets(&[]);
+    PENDING_SECRETS.lock().clear();
     log::info!("[remote] device identity rotated (paired phones invalidated)");
 }
 
 /// 读取/生成设备身份（device_id + device_key 持久化于 config）。
-/// config 读取失败时报错而非静默生成新身份——新身份会让 relay 侧旧
-/// access_token 全部失配（已配对手机静默失效）
+/// config 读取失败时报错而非静默生成新身份——新身份会让已配对手机的
+/// token 前缀路由永久 miss（静默失效）
 fn ensure_device_identity() -> Result<(String, String), String> {
     let config = crate::store::get_app_config()
         .map_err(|e| format!("failed to read config for device identity: {}", e))?;
@@ -407,8 +535,14 @@ async fn run_once(
         let mut st = RELAY.lock();
         st.connected = true;
     }
-    // 申请配对码
-    let _ = out_tx.try_send(r#"{"type":"pair.create"}"#.to_string());
+    // 申请配对码（带预生成 secret；DEVICE_TX 尚未挂载，经 out_tx 直发）
+    let _ = out_tx.try_send(
+        serde_json::json!({
+            "type": "pair.create",
+            "secret": new_pending_secret(),
+        })
+        .to_string(),
+    );
     // 挂载设备出站通道（按需重申配对码等设备侧主动请求经此发送）
     *DEVICE_TX.lock() = Some(out_tx.clone());
     log::info!("[remote] relay registered, device_id={}", device_id);
@@ -451,6 +585,13 @@ async fn run_once(
                         let mut st = RELAY.lock();
                         st.pair_code = code;
                         st.pair_code_at = Some(Instant::now());
+                    }
+                    Some("pair.granted") => {
+                        // relay fallback（配对时 pair.create 未带 secret，即旧版桌面）
+                        // 签发的 secret 下发：固化进持久列表，本桌面升级后该手机不失效
+                        if let Some(secret) = v["secret"].as_str().filter(|s| is_32_hex(s)) {
+                            persist_granted_secret(secret);
+                        }
                     }
                     Some("data") => {
                         let from = v["from"].as_u64().unwrap_or(0);
@@ -573,5 +714,174 @@ mod tests {
         let code = refresh_pair_code().await.expect("new pair code");
         assert_eq!(code, "NEWCODE99");
         reset_globals();
+    }
+
+    // ==================== token v2 校验（secret 生成/校验/固化） ====================
+
+    /// 测试固定身份（32 hex）
+    const TEST_DEVICE_ID: &str = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6";
+    const TEST_DEVICE_KEY: &str = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+    const TEST_SECRET: &str = "0123456789abcdef0123456789abcdef";
+
+    /// v1 token（无点）放行：兼容「新桌面 + 旧 relay」过渡窗口
+    ///（旧 relay 内存表已完成校验；新 relay 对无点 token 一律拒绝）
+    #[test]
+    fn RelayToken_V1_Passthrough_1() {
+        assert!(matches!(
+            judge_relay_token("deadbeefcafe", TEST_DEVICE_ID, &[], &[]),
+            TokenVerdict::Pass
+        ));
+    }
+
+    /// v2 命中 pending → Persist；固化后（在持久列表）再判 → Pass
+    #[test]
+    fn RelayToken_V2Pending_HitAndPersist_2() {
+        let pending = vec![TEST_SECRET.to_string()];
+        assert!(matches!(
+            judge_relay_token(
+                &format!("{}.{}", TEST_DEVICE_ID, TEST_SECRET),
+                TEST_DEVICE_ID,
+                &[],
+                &pending
+            ),
+            TokenVerdict::Persist(s) if s == TEST_SECRET
+        ));
+        let persisted = vec![TEST_SECRET.to_string()];
+        assert!(matches!(
+            judge_relay_token(
+                &format!("{}.{}", TEST_DEVICE_ID, TEST_SECRET),
+                TEST_DEVICE_ID,
+                &persisted,
+                &[]
+            ),
+            TokenVerdict::Pass
+        ));
+    }
+
+    /// 非法 token 全部拒绝：未知 secret / 前缀非本机 / 多点 / 段长错
+    #[test]
+    fn RelayToken_V2Unknown_Rejected_3() {
+        let bad_tokens = [
+            // 未知 secret
+            format!("{}.ffffffffffffffffffffffffffffffff", TEST_DEVICE_ID),
+            // 前缀是别的设备
+            format!("b1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6.{}", TEST_SECRET),
+            // 多点
+            format!("{}.{}.extra", TEST_DEVICE_ID, TEST_SECRET),
+            // 前缀段长错
+            format!("short.{}", TEST_SECRET),
+            // secret 段长错
+            format!("{}.shortsecret", TEST_DEVICE_ID),
+            // secret 非 hex
+            format!("{}.zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz", TEST_DEVICE_ID),
+        ];
+        for t in &bad_tokens {
+            assert!(
+                matches!(
+                    judge_relay_token(t, TEST_DEVICE_ID, &[TEST_SECRET.to_string()], &[]),
+                    TokenVerdict::Fail
+                ),
+                "应拒绝: {}",
+                t
+            );
+        }
+    }
+
+    /// verify_relay_token 全链路（隔离 config）：pending 命中 → true 且固化落盘、
+    /// pending 项被移除；二次校验走持久列表
+    #[test]
+    fn RelayToken_Verify固化落盘_4() {
+        let _g = TEST_LOCK.lock();
+        let _cfg_lock = crate::tests::CONFIG_DIR_TEST_LOCK.lock();
+        let _cfg = crate::tests::TestConfigDirGuard::new("relay-verify");
+        PENDING_SECRETS.lock().clear();
+        crate::remote_server::save_relay_config(None, Some((TEST_DEVICE_ID, TEST_DEVICE_KEY)))
+            .unwrap();
+        PENDING_SECRETS
+            .lock()
+            .push((TEST_SECRET.to_string(), Instant::now()));
+
+        let token = format!("{}.{}", TEST_DEVICE_ID, TEST_SECRET);
+        assert!(verify_relay_token(&token), "pending 命中应通过");
+        // 固化落盘
+        let persisted = paired_secrets_from_config();
+        assert_eq!(persisted, vec![TEST_SECRET.to_string()]);
+        // pending 项已被移除
+        assert!(PENDING_SECRETS.lock().is_empty());
+        // 二次校验走持久列表依然通过
+        assert!(verify_relay_token(&token));
+        PENDING_SECRETS.lock().clear();
+    }
+
+    /// LRU 上限：固化超过 MAX_PAIRED_SECRETS 后保留最新 16 条（最旧淘汰）
+    #[test]
+    fn RelaySecret_Lru_Cap16_5() {
+        let _g = TEST_LOCK.lock();
+        let _cfg_lock = crate::tests::CONFIG_DIR_TEST_LOCK.lock();
+        let _cfg = crate::tests::TestConfigDirGuard::new("relay-lru");
+        PENDING_SECRETS.lock().clear();
+
+        for i in 0..=MAX_PAIRED_SECRETS {
+            persist_granted_secret(&format!("{:032x}", i));
+        }
+        let persisted = paired_secrets_from_config();
+        assert_eq!(persisted.len(), MAX_PAIRED_SECRETS, "应淘汰到上限");
+        // 最旧的（i=0）被淘汰，最新的（i=16）保留
+        assert!(!persisted.iter().any(|s| s == &format!("{:032x}", 0)));
+        assert!(persisted.iter().any(|s| s == &format!("{:032x}", MAX_PAIRED_SECRETS)));
+        PENDING_SECRETS.lock().clear();
+    }
+
+    /// rotate_identity 清空持久列表与 pending（安全阻断语义：配对凭证全部作废）
+    #[test]
+    fn RelaySecret_RotateIdentity_Clears_6() {
+        let _g = TEST_LOCK.lock();
+        let _cfg_lock = crate::tests::CONFIG_DIR_TEST_LOCK.lock();
+        let _cfg = crate::tests::TestConfigDirGuard::new("relay-rotate");
+        PENDING_SECRETS.lock().clear();
+        crate::remote_server::save_relay_config(None, Some((TEST_DEVICE_ID, TEST_DEVICE_KEY)))
+            .unwrap();
+        persist_granted_secret(TEST_SECRET);
+        PENDING_SECRETS
+            .lock()
+            .push(("ffffffffffffffffffffffffffffffff".to_string(), Instant::now()));
+
+        rotate_identity();
+
+        assert!(paired_secrets_from_config().is_empty(), "持久列表应清空");
+        assert!(PENDING_SECRETS.lock().is_empty(), "pending 应清空");
+    }
+
+    /// 过期 pending 在下次 new_pending_secret 时被懒清理
+    #[test]
+    fn RelaySecret_PendingTtl_Expired_7() {
+        let _g = TEST_LOCK.lock();
+        PENDING_SECRETS.lock().clear();
+        // 塞入一个已过期的项（TTL 之前的时间点）
+        PENDING_SECRETS.lock().push((
+            "ffffffffffffffffffffffffffffffff".to_string(),
+            Instant::now() - PENDING_SECRET_TTL - Duration::from_secs(1),
+        ));
+
+        let fresh = new_pending_secret();
+        let pending = PENDING_SECRETS.lock();
+        assert_eq!(pending.len(), 1, "过期项应被清理");
+        assert_eq!(pending[0].0, fresh);
+        drop(pending);
+        PENDING_SECRETS.lock().clear();
+    }
+
+    /// persist_granted_secret 幂等：重复固化同一 secret 列表不膨胀
+    #[test]
+    fn RelaySecret_Granted_PersistIdempotent_8() {
+        let _g = TEST_LOCK.lock();
+        let _cfg_lock = crate::tests::CONFIG_DIR_TEST_LOCK.lock();
+        let _cfg = crate::tests::TestConfigDirGuard::new("relay-granted");
+        PENDING_SECRETS.lock().clear();
+
+        persist_granted_secret(TEST_SECRET);
+        persist_granted_secret(TEST_SECRET);
+        assert_eq!(paired_secrets_from_config(), vec![TEST_SECRET.to_string()]);
+        PENDING_SECRETS.lock().clear();
     }
 }

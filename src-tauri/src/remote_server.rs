@@ -326,6 +326,16 @@ pub fn save_relay_config(
     Ok(())
 }
 
+/// 保存中继已配对设备 secret 列表（整体替换），保留其他字段
+pub fn save_paired_secrets(secrets: &[String]) -> anyhow::Result<()> {
+    let current = crate::store::get_app_config()?;
+    let mut remote: serde_json::Value =
+        serde_json::to_value(current.remote.clone().unwrap_or_default())?;
+    remote["pairedSecrets"] = serde_json::json!(secrets);
+    crate::store::update_app_config(serde_json::json!({ "remote": remote }))?;
+    Ok(())
+}
+
 /// 当前有效 token（供 WS 认证与状态查询；未生成时返回空）
 pub fn current_token() -> String {
     crate::store::get_app_config()
