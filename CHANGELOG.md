@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.16.7] - 2026-10-24
+
+### Features
+- Hide projects from home list (confirm dialog; re-adding restores the project and its recent sessions)
+- Session status dot: opening a pending session marks it read across all devices (attach clears pending, session-viewed sync)
+- Relay token v2: verification moved to desktop, paired phones auto-recover after relay restart
+
+### Fixes
+- Mobile copy reader: word-wrap within view width, collapse padding spaces
+- Mobile quick-key bar: tapping keys no longer toggles the soft keyboard
+- Relay: client.kick on token verify failure (prevents clients-table exhaustion)
+
+### Dev
+- npm run dev:relay: one-command local relay full-link dev startup
+
+Note: after the relay update, existing paired phones need to re-scan the pair code once (v1 tokens are retired); browser clients should hard-refresh to get the new bundle.
+
 ## [0.16.6] - 2026-10-23
 
 ### Fixed
