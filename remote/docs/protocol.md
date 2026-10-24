@@ -52,7 +52,7 @@
 | `pty.output` | `id, data` | 增量输出流 |
 | `pong` | `{}` | 心跳回复 |
 | `rpc.result` | `id, ok, data?, error?` | RPC 应答（写命令被控制权拦截时 `ok=false` 提示接管） |
-| `rpc.event` | `name, payload` | 控制面事件隧道（与 Tauri 事件同构）：`state-changed`（写命令状态广播）、`controller-changed`（全局控制权）、`remote-session-created/closed`（会话建立/显式关闭联动）、`session-renamed`、`hook-status` 等 |
+| `rpc.event` | `name, payload` | 控制面事件隧道（与 Tauri 事件同构）：`state-changed`（写命令状态广播）、`controller-changed`（全局控制权）、`remote-session-created/closed`（会话建立/显式关闭联动）、`session-renamed`、`session-viewed`（attach 打开即已读，服务端清 pending 并双端广播）、`hook-status` 等 |
 
 ## 全局控制权（设备互斥）与 revision
 

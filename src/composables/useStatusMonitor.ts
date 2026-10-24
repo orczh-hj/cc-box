@@ -2,7 +2,7 @@ import { watch, onMounted, onUnmounted, type Ref } from 'vue'
 import { getCurrentWindow, UserAttentionType } from '@tauri-apps/api/window'
 import { useSessionStore } from '@/stores/session'
 import { isTauriEnv } from '@/api/platform'
-import { onHookStatus } from '@/api/tauri'
+import { onHookStatus, onSessionViewed } from '@/api/tauri'
 import type { HookStatusPayload } from '@/types/hook'
 
 /**
@@ -18,6 +18,7 @@ export function useStatusMonitor(options: { isFocused: Ref<boolean>; isTerminalV
   const win = isTauriEnv ? getCurrentWindow() : null
 
   let unlisten: (() => void) | null = null
+  let unlistenViewed: (() => void) | null = null
 
   const handler = (status: HookStatusPayload) => {
     const tab = sessionStore.getTabByPtyId(status.ptyId)
@@ -79,10 +80,18 @@ export function useStatusMonitor(options: { isFocused: Ref<boolean>; isTerminalV
 
   onMounted(async () => {
     unlisten = await onHookStatus(handler)
+    // 某端打开（attach）了 pending 会话：服务端已清"待关注"，本端 Tab 状态点同步
+    // 去金黄（不监听则会被后续 sessions.list/hook-status 的服务端旧值冲回）
+    unlistenViewed = await onSessionViewed(({ id }) => {
+      const tab = sessionStore.getTabByPtyId(id)
+      if (tab) tab.pending = false
+    })
   })
 
   onUnmounted(() => {
     unlisten?.()
     unlisten = null
+    unlistenViewed?.()
+    unlistenViewed = null
   })
 }

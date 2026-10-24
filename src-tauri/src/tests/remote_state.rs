@@ -1466,3 +1466,125 @@ fn Controller_并发广播到达序revision严格递增() {
     // 2N 次广播、容量充足：丢帧容忍，但不应大面积缺失
     assert!(count > N, "广播帧过少：{}", count);
 }
+
+/// attach 打开过即已读：pending（等待关注）会话被 attach 后服务端清 false，
+/// 其他连接收到 session-viewed 广播（发起端排除，本地 setActiveTab 已清），
+/// 发起端自身不收到。防"手机看过又切走 → sessions.list 把金黄冲回"回归。
+/// 负向分支：只读订阅（subscribe）与他人持权时 attach 被拒均不清 pending
+#[tokio::test]
+async fn RemoteState_Attach_清除pending并广播已读() {
+    let _hook_lock = crate::tests::HOOK_TEST_LOCK.lock();
+    use std::sync::{Arc, Mutex as StdMutex};
+    let received: Arc<StdMutex<Vec<(String, String, String)>>> = Arc::new(StdMutex::new(Vec::new()));
+    let sink = received.clone();
+    crate::remote_state::set_event_hook(Box::new(move |name, id, data| {
+        sink.lock().unwrap().push((name.to_string(), id.to_string(), data.to_string()));
+    }));
+    // 断言失败也清 hook（RAII），防泄漏串扰后续测试
+    struct HookGuard;
+    impl Drop for HookGuard {
+        fn drop(&mut self) {
+            crate::remote_state::clear_event_hook();
+        }
+    }
+    let _guard = HookGuard;
+
+    let state = RemoteState::new();
+    state.register_pty("t-vw", "claude", "/tmp");
+    // 状态机先开回合（working），任务完成通知 → pending=true
+    state.on_hook_payload(&hook("t-vw", user_prompt()));
+    state.on_hook_payload(&hook(
+        "t-vw",
+        HookEventDetail::Notification(NotificationData {
+            notification_type: Some("idle_prompt".into()),
+            message: None,
+            title: None,
+        }),
+    ));
+    assert!(
+        state.session_list().iter().any(|s| s.id == "t-vw" && s.pending),
+        "前置：attach 前 pending 应为 true"
+    );
+
+    let (conn1, mut rx1) = setup_conn(&state);
+    let (_conn2, mut rx2) = setup_conn(&state);
+    state.handle_client_message(
+        conn1,
+        &ClientMessage::SessionAttach { id: "t-vw".into(), cols: 80, rows: 24 },
+    );
+
+    // 服务端权威值已清（sessions.list 刷新不再冲回金黄）
+    assert!(
+        state.session_list().iter().any(|s| s.id == "t-vw" && !s.pending),
+        "attach 后服务端 pending 应清 false"
+    );
+
+    // 其他端收到 session-viewed 广播（可能伴随 controller-changed，循环找目标）
+    let mut viewed = false;
+    for _ in 0..4 {
+        match recv_timeout(&mut rx2).await {
+            ServerMessage::RpcEvent { name, payload } if name == "session-viewed" => {
+                assert_eq!(payload["id"].as_str(), Some("t-vw"));
+                viewed = true;
+                break;
+            }
+            _ => continue,
+        }
+    }
+    assert!(viewed, "其他连接应收到 session-viewed 广播");
+
+    // 发起端被排除：快照之后不应再收到 session-viewed
+    if let ServerMessage::SessionAttached { .. } = recv_timeout(&mut rx1).await {
+    } else {
+        panic!("发起端首包应为 SessionAttached");
+    }
+    while let Ok(msg) = rx1.try_recv() {
+        assert!(
+            !matches!(&msg, ServerMessage::RpcEvent { name, .. } if name == "session-viewed"),
+            "发起端不应收到 session-viewed（本地已清）"
+        );
+    }
+
+    // 桌面半链：EVENT_HOOK 收到 (session-viewed, ptyId, "")
+    assert!(
+        received
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(n, id, _)| n == "session-viewed" && id == "t-vw"),
+        "桌面 EVENT_HOOK 应收到 session-viewed"
+    );
+
+    // ---- 负向分支：重新置 pending 后验证两种"非打开"路径不清 ----
+    // 会话已归还桌面（attach 者断连/主动归还后 active=Desktop；此处直接重新置
+    // pending 验证状态语义即可）
+    state.on_hook_payload(&hook("t-vw", user_prompt()));
+    state.on_hook_payload(&hook(
+        "t-vw",
+        HookEventDetail::Notification(NotificationData {
+            notification_type: Some("idle_prompt".into()),
+            message: None,
+            title: None,
+        }),
+    ));
+    assert!(state.session_list().iter().any(|s| s.id == "t-vw" && s.pending));
+
+    // ① 只读订阅（subscribe）不是"打开"：pending 保持
+    state.handle_client_message(_conn2, &ClientMessage::SessionSubscribe { id: "t-vw".into() });
+    assert!(
+        state.session_list().iter().any(|s| s.id == "t-vw" && s.pending),
+        "只读订阅不应清除 pending"
+    );
+    state.handle_client_message(_conn2, &ClientMessage::SessionUnsubscribed { id: "t-vw".into() });
+
+    // ② 他人持有控制权时 attach 被拒：pending 保持
+    state.handle_client_message(conn1, &ClientMessage::ControllerTakeover);
+    state.handle_client_message(
+        _conn2,
+        &ClientMessage::SessionAttach { id: "t-vw".into(), cols: 80, rows: 24 },
+    );
+    assert!(
+        state.session_list().iter().any(|s| s.id == "t-vw" && s.pending),
+        "attach 被拒（他人持权）不应清除 pending"
+    );
+}

@@ -1013,9 +1013,17 @@ impl RemoteState {
             let mut inner = self.inner.lock();
             let old_and_tail = inner.sessions.get_mut(id).map(|entry| {
                 let old = std::mem::replace(&mut entry.active, ActiveView::Remote(conn_id));
-                (old, entry.tail.snapshot())
+                // 打开过即已读：attach = 用户查看该会话，pending（等待用户
+                // 关注）清 false——否则服务端持续为 true，浏览器端会话面板
+                // 打开时 sessions.list 会把本地已清的"已读"冲回金黄。
+                // working 是任务实时状态，不代表"待查看"，不清
+                let pending_cleared = entry.pending;
+                if entry.pending {
+                    entry.pending = false;
+                }
+                (old, entry.tail.snapshot(), pending_cleared)
             });
-            let Some((old, tail)) = old_and_tail else {
+            let Some((old, tail, pending_cleared)) = old_and_tail else {
                 drop(inner);
                 self.try_send(conn_id, ServerMessage::SessionExit { id: id.to_string() });
                 return;
@@ -1035,7 +1043,7 @@ impl RemoteState {
             // attach 同时视为输出订阅者（旧订阅者保留，与桌面 claim 语义一致）
             let subs = inner.subscribers.entry(id.to_string()).or_default();
             subs.insert(conn_id);
-            AttachOutcome { old, snapshot_queued }
+            AttachOutcome { old, snapshot_queued, pending_cleared }
         };
 
         // 快照入队失败（通道满/已关）：主动断开，客户端重连重拉快照
@@ -1047,6 +1055,18 @@ impl RemoteState {
             );
             self.remove_conn(conn_id);
             return;
+        }
+
+        // pending 已读清除：双端广播 session-viewed（发起端本地 setActiveTab
+        // 已清、且被排除，受众是其他浏览器端与桌面 Tab 状态点；payload 与
+        // Tauri 事件同构 {id, data}，桌面经 EVENT_HOOK 转发）
+        if outcome.pending_cleared {
+            emit_via_hook(crate::events::names::SESSION_VIEWED, id, "");
+            self.broadcast_event_excluding(
+                crate::events::names::SESSION_VIEWED,
+                serde_json::json!({ "id": id, "data": "" }),
+                Some(conn_id),
+            );
         }
 
         // 旧持有者遮罩通知：远程互抢与桌面被抢统一走 taken-over 广播
@@ -1152,6 +1172,8 @@ impl RemoteState {
 struct AttachOutcome {
     old: ActiveView,
     snapshot_queued: bool,
+    /// attach 时清掉了 pending（等待用户关注），需广播 session-viewed
+    pending_cleared: bool,
 }
 
 /// 持锁发送（快照顺序保证路径）：与 push_output 的广播共用同一把锁，

@@ -169,6 +169,10 @@ export const renameSession = (ptyId: string, name: string): Promise<void> =>
 export const onSessionRenamed = (callback: (payload: { id: string; data: string }) => void): Promise<Unlisten> =>
   listen<{ id: string; data: string }>('session-renamed', callback);
 
+/** 会话被某端打开查看（attach，payload 为 { id: ptyId }）：pending 视为已读，各端 Tab 状态点同步清金黄 */
+export const onSessionViewed = (callback: (payload: { id: string }) => void): Promise<Unlisten> =>
+  listen<{ id: string }>('session-viewed', callback);
+
 /**
  * 写命令统一状态广播（payload 为 { id: section, data: revision }）。
  * 任意端写操作（开关/Provider/配置）落盘后全端收到，按 section 权威刷新；

@@ -58,7 +58,9 @@ Hook 系统只采集**对 GUI 有意义**的信息：
 │  ├─ 新 pending 的 UI 决策：正看清除 / 失焦任务栏跳动          │
 │  ├─ trigger=sessionStart → 分配 session_id                   │
 │  ├─ trigger=userPromptSubmit → 首条 prompt 自动命名           │
-│  └─ watch 聚焦+Tab 切换 → 清除 active tab 的 pending          │
+│  ├─ watch 聚焦+Tab 切换 → 清除 active tab 的 pending          │
+│  └─ session-viewed → 某端 attach 打开会话即"已读"，           │
+│       服务端清 pending 并双端广播，各端 Tab 同步去金黄        │
 │                                                               │
 │  SessionItem.vue ← tab.working → 指示灯样式                   │
 └──────────────────────────────────────────────────────────────┘
@@ -182,6 +184,8 @@ any ──[StopFailure]──→ error
 | `running`（idle） | 墨绿 | `--status-success` | 无动画 | 空闲运行态 |
 | `stopped`（激活） | 浅灰 | `--text-tertiary` | 无 | 已停止 |
 | `stopped`（非激活） | 空心灰 | `--border-color` | 无 | 已关闭 |
+
+**pending 的"打开过即已读"语义**：`pending` 表示"等待用户关注"，一旦任一端**打开**（attach）该会话即视为已读——`remote_state.handle_attach` 在锁窗口内把 `SessionEntry.pending` 清 false 并双端广播 `session-viewed`（`{id, data:""}`，发起端排除），各端 `useStatusMonitor` 收到后清 Tab 金黄。服务端同步清除是关键：浏览器端会话面板打开时 `sessions.list` 会用服务端 `working/pending` 覆盖本地 Tab，若服务端不清除，"手机看过又切走"会被列表刷新冲回金黄。`working`（任务实时状态）不代表"待查看"，attach 不清。
 
 ### 首页 Recent Sessions 状态展示
 

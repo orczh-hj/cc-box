@@ -20,6 +20,10 @@ pub mod names {
     pub const HOOK_STATUS: &str = "hook-status";
     pub const SESSION_TAKEN_OVER: &str = "session-taken-over";
     pub const SESSION_RECLAIMED: &str = "session-reclaimed";
+    /// 会话被某端打开查看（attach）：pending（等待关注）视为已读清除，各端
+    /// Tab 状态点同步（服务端 pending 持续为 true，若不同步，浏览器端会话
+    /// 面板的 sessions.list 刷新会把已读状态冲回金黄）
+    pub const SESSION_VIEWED: &str = "session-viewed";
     pub const REMOTE_SESSION_CREATED: &str = "remote-session-created";
     /// 用户显式关闭会话（桌面 pty_kill / 远程 session.kill 双路径统一广播）：
     /// 各端联动删 Tab。与自然退出（pty-exit 只置 stopped 保留 Tab）相区分
