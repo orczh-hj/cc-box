@@ -42,14 +42,10 @@
 改 `remote/`（协议/relay）或远程相关前端/Rust 后，**在本地把中继链路完整跑一遍再部署**（relay debug 实时读 dist，两端都是新代码；比只测 8747 直连多覆盖 relay 透传与嵌入 UI）：
 
 ```bash
-# 终端 1：本地 relay（绑所有网卡，手机可达）
-cd remote/relay && CC_BOX_RELAY_BIND=0.0.0.0 cargo run
-
-# 终端 2：桌面端连本地 relay（IP 用本机局域 IP，勿用 127.0.0.1——手机打不开配对 URL）
-CC_BOX_RELAY_URL=192.168.5.105:8800 npm run tauri:dev
+npm run dev:relay
 ```
 
-手机扫桌面面板出的中继配对码（走本地 relay）或局域码（8747 直连）均可验证。详细环境变量与注意事项 → [remote/docs/deploy.md](../remote/docs/deploy.md)「本地测试（开发环境）」。
+一条命令完成（`scripts/dev-relay.mjs`）：自动探测局域网 IP → 启动本地 relay（`0.0.0.0:8800`，手机可达）+ 桌面 tauri dev（注入 `CC_BOX_RELAY_URL=<局域网IP>:8800`，勿用 127.0.0.1——手机打不开配对 URL）；任一进程退出即全部退出。手机扫桌面面板出的中继配对码（走本地 relay）或局域码（8747 直连）均可验证。详细环境变量与注意事项 → [remote/docs/deploy.md](../remote/docs/deploy.md)「本地测试（开发环境）」。
 
 ## 新增功能检查清单（完整版）
 

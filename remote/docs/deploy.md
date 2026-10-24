@@ -2,7 +2,7 @@
 
 中继服务器：公网 VPS 上运行的透明路由 hub，让手机在局域网之外访问桌面 CC-Box。桌面端只出站连接（零入站端口）。
 
-> **改远程相关代码（remote/、远程前端、远程 Rust）后，先在本地跑通中继链路再部署**：终端 1 `cd remote/relay && CC_BOX_RELAY_BIND=0.0.0.0 cargo run`，终端 2 `CC_BOX_RELAY_URL=<本机局域IP>:8800 npm run tauri:dev`，手机扫配对码验证——详见 [第 5 节](#5-本地测试开发环境)。
+> **改远程相关代码（remote/、远程前端、远程 Rust）后，先在本地跑通中继链路再部署**：一条命令 `npm run dev:relay`（自动探测局域网 IP 并拉起 relay + tauri dev），手机扫配对码验证——详见 [第 5 节](#5-本地测试开发环境)。
 
 ## 1. 构建（Windows 交叉编译 Linux）
 
@@ -193,14 +193,13 @@ CC_BOX_RELAY_URL=192.168.5.105:8800 npm run tauri:dev
 | `CC_BOX_RELAY_WEB_DIR=<dir>` | relay | Web UI 磁盘目录（优先于内嵌；生产「仅前端更新」免重编通道，见 3.5 节） |
 | `CC_BOX_WEB_DIR=<dir>` | 桌面端 | 桌面 8747 对称的 Web UI 磁盘目录（release 桌面免重编更新；debug 本就实时读 dist） |
 
-完整本地链路（两个终端）：
+完整本地链路一条命令（`npm run dev:relay` = `scripts/dev-relay.mjs`：自动探测局域网 IP，按下述环境变量同时拉起 relay 与桌面端，任一进程退出全部退出；需单独手动起进程时才直接用环境变量）：
 
 ```bash
-# 终端 1：中继（绑所有网卡，手机可达）
-cd remote/relay && CC_BOX_RELAY_BIND=0.0.0.0 cargo run
-
-# 终端 2：桌面端（连中继，局域 IP）
-CC_BOX_RELAY_URL=192.168.5.105:8800 npm run tauri:dev
+npm run dev:relay
+# 手动等效（两个终端）：
+#   cd remote/relay && CC_BOX_RELAY_BIND=0.0.0.0 cargo run
+#   CC_BOX_RELAY_URL=192.168.5.105:8800 npm run tauri:dev
 ```
 
 要点：
