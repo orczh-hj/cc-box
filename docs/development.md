@@ -98,6 +98,23 @@ UI 已浏览器化（一套 UI 走桌面 Tauri / 宽屏浏览器 / 手机浏览�
 - `bind_with_retry` 最终失败时探测端口是否「可连但不响应」，错误信息提示重启僵死实例。
 - `dev-relay.mjs` 用同步 `taskkill /T` 等待进程树杀完再 `process.exit`，避免 relay/vite 残留占用 8800/1420。
 
+### 跨进程句柄继承拖死 8747（2026-10-25 修复，前项修复的更深层根因）
+
+**现象**：实例 A 开远程（宿主 8747）→ 从 A 内 `spawn_new_instance` 打开 B → 关闭 A → B 开远程报"8747 被占用"。`netstat` 显示端口仍 LISTENING、归属**已死**的 A PID；`probe_host` 能连上但无 HTTP 响应（accept 逻辑随 A 死了），判不出宿主。
+
+**根因**：WinSock socket 句柄默认 `HANDLE_FLAG_INHERIT=1`。B 由 A spawn（`bInheritHandles=TRUE`）时连带继承了 A 的 8747 listener 句柄；A 退出后端口被活着的 B 拖住——内核按句柄创建者（A）显示归属。A 的 WebView2 子进程（mojo 管道同样要求继承句柄）同理可能成为持有者。此路径下 A 的 `stop()` 再干净也救不了：句柄在别的进程手里。前项修复（stop await + 僵死探测）只覆盖本进程内的泄漏。
+
+**修复**：`remote_server.rs` `clear_socket_inherit`——bind 成功后立即 `SetHandleInformation(sock, HANDLE_FLAG_INHERIT, 0)`（SOCKET 可直接作 Win32 HANDLE，Go net/libuv 同款做法），句柄只归本进程，端口随进程退出必释放。测试：`tests/remote_host.rs` `Listener_默认句柄可继承_复现孤儿端口_001`（锚定默认行为=缺陷面）+ `Listener_清除继承位后不可继承_002`。
+
+**排查手段**（无 Sysinternals handle.exe 时）：`Get-CimInstance Win32_Process -Filter "ParentProcessId=<死PID>"` 找存活子进程（CC-Box 子实例 / 残留 msedgewebview2），持有者必在其一；清理它们或重启子实例即可释放端口。
+
+### 多实例远程开关竞态加固（2026-10-25 修复二）
+
+- **watchdog 跟随停服持锁**：`REMOTE_OP_LOCK` 从 commands.rs 移到 remote_server.rs（pub(crate)），config watchdog 的「复查 disabled → stop()」全程持锁——否则与用户并发 `set_remote_enabled(true)`（持锁写 true + start）竞争时，stop 会把刚 start 的新服务误杀，终态「开关显示开、实际没开」。锁内复查代际+配置，stop 内部不抢锁（无死锁）；watchdog 持锁最长 ~7s（2s 任务等待 + 5s 端口轮询），期间用户开关命令排队等待，可接受。
+- **同类句柄继承闭环**：stop() 内 bind 试探 listener、hook_server 的随机端口 listener 同样 bind 后 `clear_socket_inherit`（hook 端口随机无冲突，但属同类泄漏，未来固定端口即复现 8747 问题）。
+- **测试补缺**（tests/remote_host.rs）：`Start_宿主制跳过_001`（他实例 HTTP 在监听 → start Ok 且不置运行态）、`Start_静默占用报stale文案_002`、`SetRemoteEnabled_启动失败回滚enabled_003`（prev=false/true 双场景，防误停宿主）。注意测试占端口须绑 **0.0.0.0**：Windows 通配绑定与回环（127.0.0.1）同端口不冲突，绑回环挡不住 remote_server 的通配 bind。
+- **宿主转移语义**：宿主退出后端口随进程释放（前项修复保证），但**非宿主实例不会自动接管**——需手动重开远程开关（或重启该实例）；`hosted_elsewhere()` 为动态探测，面板据此提示宿主状态。
+
 ## 全局控制权（设备互斥）与状态同步
 
 > **行为规则正本见 [remote/docs/protocol.md](../remote/docs/protocol.md)「全局控制权」**（唯一权威；attach 不能抢占/接管入口/revision 过滤与跳变重同步细节以正本为准），本节为机制摘要。

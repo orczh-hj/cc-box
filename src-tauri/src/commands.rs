@@ -565,17 +565,15 @@ pub async fn get_remote_status() -> Result<RemoteStatus, String> {
     })
 }
 
-/// 远程开关操作互斥：enable/disable 交错执行会产生「enabled=false 但服务运行」
-/// 的鬼服状态（手机仍可控而用户以为已关）
-static REMOTE_OP_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
-    std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
+/// 远程开关操作互斥锁本体在 remote_server.rs（REMOTE_OP_LOCK）：watchdog
+/// 跟随停服也必须与 enable/disable/rotate 互斥，锁须两处共用
 
 /// 开/关远程访问（动态启停服务器），返回最新状态。
 /// 写但不广播 state-changed（开关结果由返回值/连接状态自身体现），registry! 登记 write(None)
 #[cc_command(write)]
 #[tauri::command]
 pub async fn set_remote_enabled(enabled: bool) -> Result<RemoteStatus, String> {
-    let _op_guard = REMOTE_OP_LOCK.lock().await;
+    let _op_guard = crate::remote_server::REMOTE_OP_LOCK.lock().await;
     if enabled {
         // 访问凭证（LAN token / relay 设备身份）持久稳定：停止/开启不再轮换，
         // 已配对设备跨停止持续可用；轮换只由用户显式点「刷新密钥」触发
@@ -630,7 +628,7 @@ pub async fn refresh_relay_pair_code() -> Result<RemoteStatus, String> {
 /// rpc_dispatch EXCLUDED）
 #[tauri::command]
 pub async fn rotate_remote_secret() -> Result<RemoteStatus, String> {
-    let _op_guard = REMOTE_OP_LOCK.lock().await;
+    let _op_guard = crate::remote_server::REMOTE_OP_LOCK.lock().await;
     // 宿主制：远程由本机另一实例提供时，凭证属宿主，非宿主实例无权轮换
     if crate::remote_server::hosted_elsewhere().await {
         return Err("remote hosted by another instance".to_string());

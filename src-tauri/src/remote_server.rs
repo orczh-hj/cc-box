@@ -47,6 +47,11 @@ static RUNNING: AtomicBool = AtomicBool::new(false);
 static CURRENT_PORT: AtomicU16 = AtomicU16::new(0);
 /// 共享配置监视代际：每次 start 递增，旧 watchdog 在下一轮自行退出
 static WATCHDOG_GEN: AtomicU64 = AtomicU64::new(0);
+/// 远程开关操作互斥（enable/disable/rotate 与 watchdog 跟随停服共用）：
+/// watchdog 的「复查 disabled → stop」若不持锁，「复查通过 → 用户并发
+/// enable 成功 → stop 误杀新服务」会留下「开关显示开、实际没开」的终态
+pub(crate) static REMOTE_OP_LOCK: LazyLock<tokio::sync::Mutex<()>> =
+    LazyLock::new(|| tokio::sync::Mutex::new(()));
 
 /// 应用启动时调用：开关开启则启动服务器
 pub async fn init(_app_handle: AppHandle) {
@@ -142,8 +147,11 @@ fn spawn_config_watchdog() {
             if enabled != Some(false) {
                 continue;
             }
-            // 停服前复查代际与配置：另一实例可能刚重新开启（其 start 会推进
-            // 代际），此时不能把新服务误停
+            // 持锁复查+停服：与 set_remote_enabled(true)（持锁写 true + start）
+            // 互斥——否则「复查通过 → 用户 enable 成功 → stop 误杀新服务」
+            // 会留下「开关显示开、实际没开」的终态。锁内复查代际与配置：
+            // 另一实例可能刚重新开启（其 start 会推进代际），不能把新服务误停
+            let _guard = REMOTE_OP_LOCK.lock().await;
             if WATCHDOG_GEN.load(Ordering::SeqCst) != generation || !is_running() {
                 return;
             }
@@ -190,7 +198,8 @@ pub async fn stop() {
         // 注：等待期间若并发 start() 抢先绑到端口，此处会空转满 5s 才返回——
         // 状态无破坏（新 server 正常运行），仅本次 stop 返回偏慢，可接受
         for _ in 0..50 {
-            if tokio::net::TcpListener::bind(addr).await.is_ok() {
+            if let Ok(l) = tokio::net::TcpListener::bind(addr).await {
+                clear_socket_inherit(&l);
                 break;
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -198,6 +207,30 @@ pub async fn stop() {
     }
     log::info!("[remote] Remote server stopped");
 }
+
+/// 清除 listener 句柄的可继承位（Windows）：WinSock socket 默认
+/// HANDLE_FLAG_INHERIT=1，spawn 新实例（spawn_new_instance）或 WebView2
+/// 子进程创建（bInheritHandles=TRUE）时会被连带继承——宿主实例退出后
+/// 端口被存活的子进程拖住（netstat 显示已死 PID 持有 LISTENING，新实例
+/// bind 10048 报端口被占用）。清除后句柄只归本进程，端口随进程退出必释放。
+#[cfg(target_os = "windows")]
+pub(crate) fn clear_socket_inherit(listener: &tokio::net::TcpListener) {
+    use std::os::windows::io::AsRawSocket;
+    const HANDLE_FLAG_INHERIT: u32 = 0x0000_0001;
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn SetHandleInformation(object: isize, mask: u32, flags: u32) -> i32;
+    }
+    // SOCKET 句柄可直接作 Win32 HANDLE 使用（Go net/libuv 同款做法）
+    if unsafe { SetHandleInformation(listener.as_raw_socket() as isize, HANDLE_FLAG_INHERIT, 0) }
+        == 0
+    {
+        log::warn!("[remote] SetHandleInformation failed, listener stays inheritable");
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+pub(crate) fn clear_socket_inherit(_listener: &tokio::net::TcpListener) {}
 
 /// bind + 失败时的宿主探测与短重试：
 /// - Ok(Some(listener))：绑定成功
@@ -216,7 +249,10 @@ async fn bind_with_retry(
     let mut last_err = String::new();
     for attempt in 0..6 {
         match tokio::net::TcpListener::bind(addr).await {
-            Ok(l) => return Ok(Some(l)),
+            Ok(l) => {
+                clear_socket_inherit(&l);
+                return Ok(Some(l));
+            }
             Err(e) => {
                 last_err = e.to_string();
                 if attempt == 0 && probe_host(port).await {

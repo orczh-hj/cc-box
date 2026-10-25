@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.16.10] - 2026-10-25
+
+### Fixed
+- Fix orphaned port 8747 when the hosting instance quits: clear the socket inherit flag on listener creation so spawned instances and WebView2 children can no longer hold the port hostage
+- Fix race where the shared-config watchdog could kill a freshly restarted server during a concurrent re-enable, leaving the toggle on but the server dead; watchdog shutdown now runs under the remote op lock
+- Extend socket-inheritance hardening to the hook server listener and stop() probe listeners
+- Add multi-instance regression tests: hosted-skip takeover, stale-port error message, and enabled rollback on start failure
+
+Note: multi-instance remote toggle is now reliable across host restarts; no phone re-pairing needed.
+
 ## [0.16.9] - 2026-10-25
 
 ### Fixed

@@ -45,6 +45,10 @@ async fn start_server(app_handle: AppHandle) -> Result<u16, String> {
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .map_err(|e| format!("bind failed: {}", e))?;
+    // 与 remote_server 的 8747 listener 同理：清掉默认可继承位，防被
+    // spawn 出的 CLI/WebView2 子进程拖住（随机端口无 bind 冲突，但属
+    // 同类句柄泄漏，且未来若固定端口即复现 8747 孤儿端口问题）
+    crate::remote_server::clear_socket_inherit(&listener);
 
     let port = listener
         .local_addr()
