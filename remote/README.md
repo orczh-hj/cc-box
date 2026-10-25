@@ -77,7 +77,7 @@ remote/
 └── docs/                # protocol.md、deploy.md、manual-test-cases.md
 ```
 
-**Web UI 已统一**：不再有独立手机 Web UI（原 remote/web 删除）。浏览器访问的是主应用 UI（src/，Vue 3 + xterm.js），经 `src/api/transport.ts` 传输层自动切换到 WS 远程实现；构建即主应用 `npm run build`，产物 dist 由 `remote/web-assets` crate 统一供给——环境变量指向的磁盘目录优先（`CC_BOX_RELAY_WEB_DIR` / `CC_BOX_WEB_DIR`，前端可独立 scp 更新免重编），未配置/未命中回退 rust-embed 编译期内嵌。
+**Web UI 已统一**：不再有独立手机 Web UI（原 remote/web 删除）。浏览器访问的是主应用 UI（src/，Vue 3 + xterm.js），经 `src/api/transport.ts` 传输层自动切换到 WS 远程实现；构建即主应用 `npm run build`，产物 dist 由 `remote/web-assets` crate 统一供给——环境变量指向的磁盘目录优先（`CC_BOX_RELAY_WEB_DIR` / `CC_BOX_WEB_DIR`，前端可独立 scp 更新免重编），未配置/未命中回退 rust-embed 编译期内嵌。**生产 relay 已启用磁盘分离（`/opt/cc-box/web`）**：前端改动 scp dist 即生效，免重编免重启。
 
 桌面侧模块（挂 `src-tauri/src/`，依赖 protocol crate）：
 

@@ -22,7 +22,7 @@ RUSTFLAGS="-C linker=rust-lld" cargo build --release --target x86_64-unknown-lin
 
 ## 2. 部署（orczh.top:8800，nginx TLS 终止模式）
 
-**生产现状（2026-10-20）**：`https://orczh.top:8800`——**手机浏览器对 http 链接强制升级 https**（HTTPS-First/HSTS，实测 4G Chrome 报 `ERR_SSL_PROTOCOL_ERROR`），纯 HTTP 端口手机打不开；由 nginx 在 8800 做 TLS 终止（复用主站证书），反代内部 relay。
+**生产现状（2026-10-20 / 磁盘分离 2026-10-25）**：`https://orczh.top:8800`——**手机浏览器对 http 链接强制升级 https**（HTTPS-First/HSTS，实测 4G Chrome 报 `ERR_SSL_PROTOCOL_ERROR`），纯 HTTP 端口手机打不开；由 nginx 在 8800 做 TLS 终止（复用主站证书），反代内部 relay。**Web UI 已与 relay 二进制分离**：`CC_BOX_RELAY_WEB_DIR=/opt/cc-box/web` 指向磁盘目录，前端更新只需 scp dist，免重编、免重启。
 
 ```bash
 scp target/x86_64-unknown-linux-musl/release/cc-box-relay root@orczh.top:/usr/local/bin/
@@ -41,6 +41,8 @@ After=network.target
 ExecStart=/usr/local/bin/cc-box-relay
 Environment=CC_BOX_RELAY_BIND=127.0.0.1
 Environment=CC_BOX_RELAY_PORT=8801
+# Web UI 磁盘目录（优先于编译期内嵌；前端更新 scp dist 即生效）
+Environment=CC_BOX_RELAY_WEB_DIR=/opt/cc-box/web
 Restart=always
 RestartSec=3
 
@@ -118,13 +120,13 @@ sudo certbot -d cc.orczh.top   # 签发证书并自动配 443
 
 | 改动 | 8747 局域端 | 桌面 Tauri | 中继 orczh.top:8800 |
 |---|---|---|---|
-| **仅前端**（src/） | `npm run build` 即时生效（rust-embed debug 实时读 dist） | vite HMR 自动 | **scp dist 即生效**（Web UI 已与 relay 二进制解耦，见下方「仅前端更新」；relay 未配磁盘目录时回退内嵌版本，仍需重编） |
+| **仅前端**（src/） | `npm run build` 即时生效（rust-embed debug 实时读 dist） | vite HMR 自动 | **scp dist 即生效，无需重编/重启**（生产已配置磁盘目录，见下方「仅前端更新」） |
 | **Rust 桌面**（src-tauri/） | 重启 `npm run tauri:dev` | 同左 | 无需动 relay |
 | **relay**（remote/relay/） | 无 | 无 | 交叉编译 + scp + 重启 |
 
 > **票据下载（远程文件直链）**：中继侧**零改动**——票据页面走现有 `/?dl=` 静态入口与 WS 透传（`<device_id>.<ticket>` 复用 token v2 前缀路由），relay 二进制无需重编/重启；只需按下方「仅前端更新」scp 新 dist。桌面必须同步升级（提供 `/dl` 与 `file_download_ticket`），否则前端自动降级为旧 Blob 分块下载。
 
-**仅前端更新（免重编 relay）**——服务器上 relay 由 `CC_BOX_RELAY_WEB_DIR` 环境变量指向 Web 目录（systemd 单元 `Environment=` 配置，如 `/opt/cc-box/web`；目录存在即优先读磁盘，miss 回退内嵌保底）：
+**仅前端更新（免重编 relay，生产已启用）**——服务器上 relay 由 `CC_BOX_RELAY_WEB_DIR=/opt/cc-box/web` 指向 Web 目录（systemd 已配置；目录存在即优先读磁盘，miss 回退内嵌保底）：
 
 ```bash
 # 仓库根：构建最新前端并上传（无需重编/重启 relay，手机刷新页面即得新 UI）
@@ -133,9 +135,9 @@ timeout 90 scp -r dist/* root@orczh.top:/opt/cc-box/web/
 curl -s https://orczh.top:8800/ | grep -o 'assets/index-[^"]*'   # hash 应为本次新构建
 ```
 
-> 首次启用需一次性配置：systemd 单元加 `Environment=CC_BOX_RELAY_WEB_DIR=/opt/cc-box/web`、`mkdir -p /opt/cc-box/web` 并 `systemctl daemon-reload && systemctl restart cc-box-relay`（重启仅短暂断开连接，已配对手机自动重连恢复）。桌面端对称支持 `CC_BOX_WEB_DIR`（release 桌面同样获得免重编更新通道；debug 本就实时读 dist）。
+> **生产配置记录（2026-10-25）**：`/opt/cc-box/web` 已创建并放入 dist，systemd 已加 `Environment=CC_BOX_RELAY_WEB_DIR=/opt/cc-box/web`（原 unit 备份为 `cc-box-relay.service.bak`），并用探针文件验证磁盘优先生效。新环境启用同样只需：`mkdir -p /opt/cc-box/web`、unit 加上述 `Environment=`、`systemctl daemon-reload && systemctl restart cc-box-relay`。桌面端对称支持 `CC_BOX_WEB_DIR`（release 桌面同样获得免重编更新通道；debug 本就实时读 dist）。
 
-**relay 更新一条龙**（2026-10 起首选一键脚本，Windows Git Bash，在仓库根目录）：
+**relay 二进制更新一条龙**（仅 `remote/relay/`、`remote/web-assets/` 改动时需要；纯前端改动不要跑，直接 scp dist。Windows Git Bash，在仓库根目录）：
 
 ```bash
 # 构建 → musl 交叉编译 → scp .new + md5 校验 → 确认后切换重启 → 三查全自动
@@ -192,7 +194,7 @@ CC_BOX_RELAY_URL=192.168.5.105:8800 npm run tauri:dev
 | `CC_BOX_RELAY_BIND=0.0.0.0` | relay | 真机测试必须：默认 `127.0.0.1`（生产经 nginx 反代），手机无法访问 |
 | `CC_BOX_RELAY_URL=<IP>:8800` | 桌面端 | 连中继；**用局域网 IP（如 `192.168.5.105:8800`）而非 `127.0.0.1`**，否则手机扫出的配对 URL 打不开 |
 | `CC_BOX_RELAY_PORT=8800` | relay | 监听端口（默认 8800） |
-| `CC_BOX_RELAY_WEB_DIR=<dir>` | relay | Web UI 磁盘目录（优先于内嵌；生产「仅前端更新」免重编通道，见 3.5 节） |
+| `CC_BOX_RELAY_WEB_DIR=<dir>` | relay | Web UI 磁盘目录（优先于内嵌；**生产已设为 `/opt/cc-box/web`**，仅前端更新 scp dist 即生效，见 3.5 节） |
 | `CC_BOX_WEB_DIR=<dir>` | 桌面端 | 桌面 8747 对称的 Web UI 磁盘目录（release 桌面免重编更新；debug 本就实时读 dist） |
 
 完整本地链路一条命令（`npm run dev:relay` = `scripts/dev-relay.mjs`：自动探测局域网 IP，按下述环境变量同时拉起 relay 与桌面端，任一进程退出全部退出；需单独手动起进程时才直接用环境变量）：

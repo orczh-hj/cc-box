@@ -2,23 +2,25 @@
   <div class="files-panel">
     <PanelHeader :title="t('files')" @close="$emit('close')" />
 
+    <!-- 单文件上限对上传与下载同时生效，放在面板顶部作为全局约束提示 -->
+    <p v-if="limitHint" class="limit-hint global" :class="{ relay: viaRelay }">{{ limitHint }}</p>
+
     <div class="panel-content">
       <!-- ==================== 上传（手机 → 桌面） ==================== -->
       <section class="section">
         <h3 class="section-title">{{ t('filesUpload') }}</h3>
 
-        <p v-if="activeTab" class="section-desc">
-          {{ t('filesUploadDesc', { dir: projectFilesDir }) }}
-        </p>
-        <p v-else class="section-desc warn">{{ t('filesUploadNoSession') }}</p>
-
-        <!-- 限额提示（中继常显流量成本） -->
-        <p v-if="limitHint" class="limit-hint" :class="{ relay: viaRelay }">{{ limitHint }}</p>
+        <p v-if="!projectRoot" class="section-desc warn">{{ t('filesErrNoSession') }}</p>
+        <template v-else>
+          <p class="section-desc">{{ t('filesUploadDesc', { dir: projectFilesDir }) }}</p>
+          <!-- 上传需在项目终端内插入路径：当前项目没有活动终端时仅提示 -->
+          <p v-if="!uploadTab" class="section-desc warn">{{ t('filesUploadNoSession') }}</p>
+        </template>
 
         <!-- idle -->
         <template v-if="upState === 'idle'">
           <input ref="fileInputRef" type="file" class="hidden-input" @change="onFileChosen" />
-          <button class="primary-btn" :disabled="!activeTab?.ptyId" @click="fileInputRef?.click()">
+          <button class="primary-btn" :disabled="!uploadTab?.ptyId" @click="fileInputRef?.click()">
             {{ t('filesChooseFile') }}
           </button>
         </template>
@@ -102,7 +104,7 @@
             :disabled="!dlPath.trim()"
             :title="t('filesCopyPath')"
             @click="copyDownloadPath"
-          >{{ dlCopied ? t('filesCopied') : t('filesCopy') }}</button>
+          >{{ dlCopied ? t('filesCopied') : t('filesCopyPath') }}</button>
         </div>
 
         <!-- 项目内简易文件浏览器 -->
@@ -196,10 +198,11 @@
  * 手机（路径输入 + 项目内简易浏览器）。传输逻辑在 api/fileTransfer.ts，
  * 本组件只做状态机与展示。
  */
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import PanelHeader from '../sidebar/PanelHeader.vue'
 import { useSessionStore } from '@/stores/session'
+import { useAppStore } from '@/stores/app'
 import { sendTerminalCommand } from '@/composables/useTerminalCommand'
 import { copyText } from '@/api/platform'
 import { transport } from '@/api/transport'
@@ -223,11 +226,27 @@ const { t } = useI18n()
 defineEmits<{ close: [] }>()
 
 const sessionStore = useSessionStore()
+const appStore = useAppStore()
 const activeTab = computed(() => sessionStore.activeTab)
+
+/**
+ * 当前项目根：以 appStore.cwd 为准（打开项目即更新）。不能只看 activeTab——
+ * 新项目尚未启动终端时 activeTab 仍停在旧项目，文件上下文会串项目。
+ */
+const projectRoot = computed(
+  () => appStore.cwd || sessionStore.activeTab?.projectPath || '',
+)
+
+/** 上传终端：仅当活动终端属于当前项目时可用（防把文件传进旧项目） */
+const uploadTab = computed(() => {
+  const tab = sessionStore.activeTab
+  if (!tab?.ptyId) return null
+  return normPath(tab.projectPath) === normPath(projectRoot.value) ? tab : null
+})
 
 /** 上传目标目录（项目根 + /.cc-box-files，正斜杠展示） */
 const projectFilesDir = computed(() => {
-  const root = activeTab.value?.projectPath ?? ''
+  const root = projectRoot.value
   return `${root.replace(/[\\/]+$/, '').replace(/\\/g, '/')}/.cc-box-files`
 })
 
@@ -304,7 +323,7 @@ async function onFileChosen(e: Event) {
   input.value = '' // 允许再次选择同一文件
   if (!file) return
 
-  const beginPtyId = sessionStore.activeTab?.ptyId
+  const beginPtyId = uploadTab.value?.ptyId
   if (!beginPtyId) {
     upState.value = 'error'
     upError.value = t('filesErrNoSession')
@@ -492,9 +511,6 @@ const browserEntries = ref<FileEntryLite[]>([])
 const browserLoading = ref(false)
 const browserError = ref('')
 
-/** 项目根 = 活动会话项目路径（浏览锁定项目内，回上级到根为止；服务端白名单兜底） */
-const projectRoot = computed(() => sessionStore.activeTab?.projectPath ?? '')
-
 /** 浏览器当前路径的展示：相对项目根；根显示「项目根目录」 */
 const browserDisplay = computed(() => {
   const rel = toRelative(browserPath.value)
@@ -580,15 +596,50 @@ function toRelative(abs: string): string {
   return a.slice(prefix.length).replace(/\\/g, '/')
 }
 
+/** 绝对路径（Windows 盘符 / UNC / POSIX） */
+function isAbsolutePath(p: string): boolean {
+  return /^(?:[A-Za-z]:[\\/]|\\\\|\/)/.test(stripVerbatim(p.trim()))
+}
+
 /** 下载路径解析：相对路径按项目根拼成绝对路径（服务端要求绝对）；绝对路径原样 */
 function resolveDownloadPath(input: string): string {
   const p = stripVerbatim(input.trim())
   if (!p) return ''
-  if (/^(?:[A-Za-z]:[\\/]|\\\\|\/)/.test(p)) return p
+  if (isAbsolutePath(p)) return p
   const root = stripVerbatim(projectRoot.value)
   if (!root) return p
   return `${root.replace(/[\\/]+$/, '')}/${p.replace(/^\.\//, '')}`
 }
+
+/**
+ * 切换项目：浏览位置、相对下载路径、上传/下载结果都绑定旧项目，必须跟随。
+ * 同项目的会话切换不重置（多会话共享项目目录）；传输在途不打断。
+ */
+watch(projectRoot, (root, prev) => {
+  if (normPath(root) === normPath(prev ?? '')) return
+
+  // 目录列表属于旧项目：清空后按新项目根重载（浏览器展开时）
+  browserPath.value = ''
+  browserEntries.value = []
+  browserError.value = ''
+  if (browserVisible.value) {
+    if (root) void loadBrowser(root)
+    else browserError.value = t('filesErrNoSession')
+  }
+
+  // 相对路径按新项目根解析会指向别的目录；绝对路径含义明确，保留
+  if (dlPath.value && !isAbsolutePath(dlPath.value)) dlPath.value = ''
+
+  if (upState.value !== 'transferring') resetUpload()
+  if (dlState.value !== 'preparing' && dlState.value !== 'transferring') {
+    dlState.value = 'idle'
+    dlError.value = ''
+    dlResult.value = ''
+    dlUrl.value = ''
+    dlCopied.value = false
+    dlLinkCopied.value = false
+  }
+})
 
 const canGoUp = computed(() => {
   const cur = normPath(browserPath.value)
@@ -702,6 +753,12 @@ function fmtBytes(n: number): string {
 
 .limit-hint.relay {
   color: var(--warning-color, #d19a66);
+}
+
+/* 面板级提示：不随内容滚动，位于标题栏下方 */
+.limit-hint.global {
+  margin: 10px 12px 0;
+  flex-shrink: 0;
 }
 
 .hidden-input {

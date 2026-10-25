@@ -820,7 +820,8 @@ async function main() {
     console.log('\n\x1b[33m⚠ OSS 未上传,发布不完整——代理开启后补传:\x1b[0m')
     console.log(`  npm run release -- --oss-only v${newVersion}`)
   }
-  logInfo('远程组件有改动时记得部署 relay: npm run deploy:relay')
+  logInfo('前端改动: npm run build + scp -r dist/* root@orczh.top:/opt/cc-box/web/')
+  logInfo('relay 二进制改动: npm run deploy:relay')
 }
 
 // 只在直接运行时执行主流程(被 require 时不执行)

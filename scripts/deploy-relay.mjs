@@ -3,9 +3,10 @@
 /**
  * relay 部署脚本(npm run deploy:relay)
  *
- * 背景:桌面版本发布 ≠ 全部生效——前端(src/)或 relay/web-assets 改动后,
- * relay(orczh.top:8800,未配置 CC_BOX_RELAY_WEB_DIR 磁盘通道)必须重编部署
- * (手机 Web UI 是 relay 编译期内嵌的 dist)。
+ * 背景:生产 relay(orczh.top:8800)已配置 CC_BOX_RELAY_WEB_DIR=/opt/cc-box/web
+ * (Web UI 与二进制分离)——纯前端改动只需 npm run build + scp dist,无需本脚本;
+ * 仅 relay/web-assets 二进制改动才重编部署。未配置磁盘目录的部署仍回退
+ * 编译期内嵌 dist,同样用本脚本。
  *
  * 流程:前端构建 → musl 交叉编译 → ssh 预检 → scp .new + md5 校验 →
  * 【人工确认】切换 + systemctl restart → 三查(md5 / bundle hash / 特征)。

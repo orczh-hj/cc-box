@@ -79,7 +79,7 @@ UI 已浏览器化（一套 UI 走桌面 Tauri / 宽屏浏览器 / 手机浏览�
 
 **不要**改用「去掉 safari13」（`minimumSystemVersion` 为 10.13，旧 WebKit 会整包解析失败）或「升级 esbuild」快修（新版对 safari13 的降级直接报错）作为默认方案。
 
-**发布注意**：修复后需重新构建并部署 relay（`npm run deploy:relay`）；配置了 `CC_BOX_RELAY_WEB_DIR` 的服务器需更新 dist，手机端刷新缓存。
+**发布注意**：前端产物修复后 `npm run build` + `scp -r dist/* root@orczh.top:/opt/cc-box/web/`（生产已磁盘分离，免重编/免重启）；仅 relay 二进制改动才需 `npm run deploy:relay`。手机端强刷获取新 bundle。
 
 ## 远程服务机制要点
 
@@ -164,4 +164,4 @@ UI 已浏览器化（一套 UI 走桌面 Tauri / 宽屏浏览器 / 手机浏览�
 - **触摸滚动**＝xterm 6 内置 Gesture 系统原生接管（`XTermTerminal.vue` 不再自管触摸，**禁止在容器 capture 阶段 stopPropagation touch 事件**——那会阻断 Gesture 的 document 级监听；且 iOS 上首个 touchmove 未 preventDefault 即被 WebKit 手势接管发 touchcancel，旧自管层正是因此 iPhone 完全无法滚动）。Gesture 自带：像素跟手滚动 + 惯性衰减；按 mouse-reporting→滚轮序列 / 有 scrollback→viewport 滚动 / 否则→方向键三通道分发。GUI 侧仅补两件 Gesture 不管的事（容器 capture 监听 xterm 手势自定义事件，事件 dispatch 在 `.xterm-screen` 且 `bubbles=false`，事件名 `-xterm-gesturechange`/`-xterm-gesturetap` 为 lib 内部常量 typings 未导出，升级 xterm 后须 grep lib 复核）：① gesturechange |translationY|≥10 时 blur 收起已弹出的软键盘（高度回升只 fit 不滚底）；② gesturetap 兜底 `term.focus()`——Gesture 对触点在 `.xterm-screen` 内的 touchstart preventDefault 杀死了合成 mousedown，而 xterm lib 内无 TAP 消费者，不兜底则软键盘无法唤出。**软键盘只由用户 tap 终端唤出，其余程序化路径一律不聚焦**（`sendText` 移动端跳过 focus——工具条按键/侧边栏插入/接管回来聚焦会突然弹键盘打断操作；桌面无软键盘问题保持聚焦；`focus()` expose 已随「键盘」按钮移除删除）。**复制部分内容**＝「选择复制」按钮打开复制阅读器（TerminalCopyReader）：`captureSnapshot` 抓 buffer 全量快照 → `reflowSnapshot`（`src/utils/terminal-reflow.ts`）反渲染还原逻辑段落（isWrapped 拼接/围栏原样/满宽启发式 CJK 显示宽度/表格 diff 保护）→ 全屏 pre 展示，**系统原生长按选择手柄**选择 → getSelection → `copyText`（http 非安全上下文 execCommand 降级）；`@contextmenu.stop` 放行 Android 长按菜单（main.ts 拦截仅 PROD，须生产构建验证）；智能/原始双模式，误拼兜底
 - **触屏已知限制**：Provider 列表拖拽排序（HTML5 drag）移动端不可用，待需要时补上/下移按钮
 - **终端符号兜底替换**：浏览器远程模式下 CLI 输出的媒体控制符（"⏵⏵" 提示/⏸ 暂停，U+23EF/U+23F4–U+23FA）移动端字体缺字形，写入 xterm 前经 `mapTerminalGlyphs`（`src/utils/terminal-glyphs.ts`）替换为 ▶◀▲▼‖■●（均 1 列不影响布局）；桌面端有系统字体回退原样写入（`!isTauriEnv` 路径才替换）
-- **构建产物供给**（remote/web-assets 共享 crate，两端同一实现）：默认 rust-embed 内嵌（debug 实时读 dist，改前端后 `npm run build` 在 8747 即时生效）；配置 `CC_BOX_RELAY_WEB_DIR` / `CC_BOX_WEB_DIR` 指向磁盘目录后优先读盘（miss 回退内嵌）——**中继端配置后仅前端更新 scp dist 即生效免重编**，未配置时 release 仍是编译期嵌入、须重编 relay 并重部署——完整流程见 [remote/docs/deploy.md](../remote/docs/deploy.md)「日常更新部署（复用手册）」
+- **构建产物供给**（remote/web-assets 共享 crate，两端同一实现）：默认 rust-embed 内嵌（debug 实时读 dist，改前端后 `npm run build` 在 8747 即时生效）；配置 `CC_BOX_RELAY_WEB_DIR` / `CC_BOX_WEB_DIR` 指向磁盘目录后优先读盘（miss 回退内嵌）——**生产 relay 已配置 `/opt/cc-box/web`，纯前端更新 `npm run build` + scp dist 即生效，免重编免重启**；未配置磁盘目录的部署仍是编译期嵌入、须重编 relay——完整流程见 [remote/docs/deploy.md](../remote/docs/deploy.md)「日常更新部署（复用手册）」

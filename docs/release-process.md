@@ -2,17 +2,17 @@
 
 ## 远程组件发布（每次版本发布的附加动作）
 
-一套 UI 三端运行（桌面 Tauri / 宽屏浏览器 / 手机浏览器），除桌面版本外多出两条发布线：**手机/浏览器 UI = 主应用 dist**（由 `remote/web-assets` 共享 crate 供给：服务器配置 `CC_BOX_RELAY_WEB_DIR` 指向磁盘目录时优先读盘、miss 回退编译期内嵌）；**relay 二进制独立部署**（重启 = 内存态清空，所有手机配对失效）。
+一套 UI 三端运行（桌面 Tauri / 宽屏浏览器 / 手机浏览器），除桌面版本外多出两条发布线：**手机/浏览器 UI = 主应用 dist**（由 `remote/web-assets` 共享 crate 供给）。**生产（orczh.top:8800）已配置磁盘分离**（`CC_BOX_RELAY_WEB_DIR=/opt/cc-box/web`）：前端改动 scp dist 即生效，免重编、免重启；未配置磁盘目录的部署回退编译期内嵌，须重编 relay。**relay 二进制独立部署**（重启 = 内存态清空，所有手机配对失效）。
 
 ### 改动类型 → 发布动作
 
 | 本次改动 | 桌面版本发布 | relay 部署 | 说明 |
 |---|---|---|---|
 | 仅桌面功能（无前端、无远程改动） | 需要 | 不需要 | 标准流程 |
-| 前端（src/ 任意改动） | 需要 | **按通道** | 服务器已配 `CC_BOX_RELAY_WEB_DIR`：scp dist 即生效免重编（deploy.md §3.5「仅前端更新」）；未配置（默认内嵌）：必须重编 relay |
+| 前端（src/ 任意改动） | 需要 | **不需要**（生产已磁盘分离） | `npm run build` + `scp -r dist/* root@orczh.top:/opt/cc-box/web/`（deploy.md §3.5）；未配置磁盘目录的部署才需重编 relay |
 | 桌面 Rust（src-tauri/） | 需要 | 不需要 | relay 透传原则，不解析应用层 payload |
 | relay / web-assets（remote/） | 不需要 | **必须** | 独立部署 |
-| 协议（remote/protocol/） | 需要 | **必须** | 三端同步（桌面 + relay + Web UI） |
+| 协议（remote/protocol/） | 需要 | 不需要（改了 relay 层消息才需要） | 桌面 + Web UI dist 同步；relay 只透传应用层 payload |
 
 ### 每次版本发布的完整清单
 
@@ -21,7 +21,8 @@
    - 协议改动：确认四处同步（crate 定义 / protocol.ts / samples / remote/docs/protocol.md，见 docs/development.md 新增功能检查清单）
    - 远程功能改动：remote/docs/manual-test-cases.md U/R 系列关键条目真机走查
 2. **桌面版本发布**：`npm run release -- --bump <type> --notes "..."`（见下节全自动流程）
-3. **relay 部署**（上表"必须"时）：`npm run deploy:relay`（一键：前端构建 → musl 交叉编译 → scp `.new` + md5 校验 → 确认后切换重启 → 三查自动执行；手动细节见 remote/docs/deploy.md §3.5）
+3. **relay 部署**（仅 relay 二进制改动时需要）：`npm run deploy:relay`（一键：前端构建 → musl 交叉编译 → scp `.new` + md5 校验 → 确认后切换重启 → 三查自动执行；手动细节见 remote/docs/deploy.md §3.5）
+   - **纯前端改动**：`npm run build` + scp dist 到 `/opt/cc-box/web/`，不重编、不重启
    - **顺序：先桌面版本，后 relay 部署**——新桌面向后兼容旧 UI；反序会出现新 UI 调用旧桌面 rpc 白名单外的命令
 4. **发布后验证**
    - relay 三查：md5 比对 / bundle hash / 新功能特征字符串（deploy.md §3.5 第 4 步）

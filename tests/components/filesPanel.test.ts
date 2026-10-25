@@ -8,15 +8,17 @@ vi.mock('vue-i18n', () => ({
   createI18n: () => ({ global: { locale: { value: 'en' } } }),
 }))
 
-// 传输层 mock：uploadFile/downloadFile 可控；quotePath/TransferCancelled 用真实现
+// 传输层 mock：uploadFile/downloadFile/getDownloadTicket 可控；quotePath/TransferCancelled 用真实现
 const mockUpload = vi.fn()
 const mockDownload = vi.fn()
+const mockTicket = vi.fn()
 vi.mock('@/api/fileTransfer', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/api/fileTransfer')>()
   return {
     ...actual,
     uploadFile: (...a: unknown[]) => mockUpload(...a),
     downloadFile: (...a: unknown[]) => mockDownload(...a),
+    getDownloadTicket: (...a: unknown[]) => mockTicket(...a),
   }
 })
 
@@ -24,6 +26,7 @@ vi.mock('@/api/tauri', () => ({
   fileTransferLimits: vi.fn().mockResolvedValue({ directMax: 200 * 1024 * 1024, relayMax: 20 * 1024 * 1024 }),
   fileList: vi.fn(),
   controllerTakeover: vi.fn(),
+  saveLastProject: vi.fn().mockResolvedValue(undefined),
 }))
 
 // 面板挂载时订阅 device-status / remote-connected 同步 viaRelay
@@ -55,6 +58,7 @@ vi.mock('@/utils/platform', () => ({
 
 import FilesPanel from '@/components/files/FilesPanel.vue'
 import { useSessionStore } from '@/stores/session'
+import { useAppStore } from '@/stores/app'
 import { sendTerminalCommand } from '@/composables/useTerminalCommand'
 
 function seedTab(ptyId: string | null) {
@@ -93,6 +97,9 @@ beforeEach(() => {
   mockUpload.mockReset()
   mockDownload.mockReset()
   mockSave.mockReset()
+  // 默认模拟旧桌面（无 file_download_ticket）→ 走 Blob 分块降级
+  mockTicket.mockReset()
+  mockTicket.mockRejectedValue(new Error('command not allowed: file_download_ticket'))
 })
 
 describe('FilesPanel 上传', () => {
@@ -277,7 +284,7 @@ describe('FilesPanel 下载', () => {
     const wrapper = mount(FilesPanel)
     await flushPromises()
 
-    const copyBtn = () => wrapper.findAll('button').find(b => b.text() === 'filesCopy' || b.text() === 'filesCopied')!
+    const copyBtn = () => wrapper.findAll('button').find(b => b.text() === 'filesCopyPath' || b.text() === 'filesCopied')!
     // 空路径时禁用
     expect(copyBtn().attributes('disabled')).toBeDefined()
 
@@ -323,5 +330,141 @@ describe('FilesPanel 下载', () => {
     await flushPromises()
 
     expect(mockDownload).toHaveBeenCalledWith('D:/demo/.cc-box-files/a.jpg', expect.anything())
+  })
+})
+
+describe('FilesPanel 当前项目（未启动终端）', () => {
+  it('FilesPanel_BrowserUsesCurrentProjectWithoutTerminal_1', async () => {
+    seedTab('pty-1') // 旧项目的终端仍然活动
+    useAppStore().setCwd('D:/other') // 已打开新项目，但尚未启动终端
+    const { fileList } = await import('@/api/tauri')
+    const mocked = vi.mocked(fileList)
+    mocked.mockImplementation(async (p: string) => [
+      p === 'D:/other'
+        ? { name: 'new.txt', path: 'D:/other/new.txt', isDir: false, size: 1 }
+        : { name: 'old.txt', path: 'D:/demo/old.txt', isDir: false, size: 1 },
+    ])
+    const wrapper = mount(FilesPanel)
+    await flushPromises()
+
+    await wrapper.findAll('button').find(b => b.text() === 'filesBrowse')!.trigger('click')
+    await flushPromises()
+
+    // 文件上下文跟随当前项目，而非旧项目的活动终端
+    expect(mocked).toHaveBeenLastCalledWith('D:/other')
+    expect(wrapper.text()).toContain('new.txt')
+  })
+
+  it('FilesPanel_DownloadRelativeUsesCurrentProjectWithoutTerminal_1', async () => {
+    seedTab('pty-1')
+    useAppStore().setCwd('D:/other')
+    mockDownload.mockResolvedValue({ blob: new Blob(['x']), fileName: 'a.jpg' })
+    const wrapper = mount(FilesPanel)
+    await flushPromises()
+
+    await wrapper.find('.dl-input').setValue('.cc-box-files/a.jpg')
+    await wrapper.findAll('button').find(b => b.text() === 'filesDownloadBtn')!.trigger('click')
+    await flushPromises()
+
+    expect(mockDownload).toHaveBeenCalledWith('D:/other/.cc-box-files/a.jpg', expect.anything())
+  })
+
+  it('FilesPanel_UploadIgnoresOtherProjectTerminal_1', async () => {
+    seedTab('pty-1')
+    useAppStore().setCwd('D:/other') // 新项目无终端；旧项目终端不属于当前项目
+    const wrapper = mount(FilesPanel)
+    await flushPromises()
+
+    await chooseFile(wrapper, new File(['hi'], 'a.txt'))
+
+    // 不得把文件上传到旧项目的终端/目录
+    expect(mockUpload).not.toHaveBeenCalled()
+  })
+})
+
+describe('FilesPanel 切换项目', () => {
+  it('FilesPanel_SwitchProjectReloadsBrowser_1', async () => {
+    const sessionStore = seedTab('pty-1')
+    const { fileList } = await import('@/api/tauri')
+    const mocked = vi.mocked(fileList)
+    // 按根返回不同文件：用于确认列表确实换成了新项目
+    mocked.mockImplementation(async (p: string) => [
+      p === 'D:/demo'
+        ? { name: 'old.txt', path: 'D:/demo/old.txt', isDir: false, size: 1 }
+        : { name: 'new.txt', path: 'D:/other/new.txt', isDir: false, size: 1 },
+    ])
+    const wrapper = mount(FilesPanel)
+    await flushPromises()
+
+    // 打开浏览器（旧项目）并进入旧目录列表
+    await wrapper.findAll('button').find(b => b.text() === 'filesBrowse')!.trigger('click')
+    await flushPromises()
+    expect(mocked).toHaveBeenLastCalledWith('D:/demo')
+    expect(wrapper.text()).toContain('old.txt')
+
+    // 切到另一个项目：浏览列表必须立即改为新项目根
+    seedSecondTab()
+    sessionStore.activeTabId = 't2'
+    await flushPromises()
+
+    expect(mocked).toHaveBeenLastCalledWith('D:/other')
+    expect(wrapper.text()).toContain('new.txt')
+    expect(wrapper.text()).not.toContain('old.txt')
+  })
+
+  it('FilesPanel_SwitchProjectClearsRelativeInput_1', async () => {
+    const sessionStore = seedTab('pty-1')
+    const wrapper = mount(FilesPanel)
+    await flushPromises()
+
+    // 浏览器点选的路径是相对旧项目根的；切项目后沿用会指向错误目录
+    await wrapper.find('.dl-input').setValue('.cc-box-files/a.jpg')
+
+    seedSecondTab()
+    sessionStore.activeTabId = 't2'
+    await flushPromises()
+
+    expect((wrapper.find('.dl-input').element as HTMLInputElement).value).toBe('')
+  })
+
+  it('FilesPanel_SwitchProjectKeepsAbsoluteInput_1', async () => {
+    const sessionStore = seedTab('pty-1')
+    const wrapper = mount(FilesPanel)
+    await flushPromises()
+
+    // 绝对路径含义明确，与项目无关，切项目后保留
+    await wrapper.find('.dl-input').setValue('D:/demo/a.jpg')
+
+    seedSecondTab()
+    sessionStore.activeTabId = 't2'
+    await flushPromises()
+
+    expect((wrapper.find('.dl-input').element as HTMLInputElement).value).toBe('D:/demo/a.jpg')
+  })
+
+  it('FilesPanel_SwitchSameProjectKeepsBrowser_1', async () => {
+    const sessionStore = seedTab('pty-1')
+    const { fileList } = await import('@/api/tauri')
+    const mocked = vi.mocked(fileList)
+    mocked.mockResolvedValue([
+      { name: 'a.txt', path: 'D:/demo/a.txt', isDir: false, size: 1 },
+    ])
+    const wrapper = mount(FilesPanel)
+    await flushPromises()
+
+    await wrapper.findAll('button').find(b => b.text() === 'filesBrowse')!.trigger('click')
+    await flushPromises()
+    expect(mocked).toHaveBeenCalledTimes(1)
+
+    // 同项目的另一个会话：目录上下文相同，不重置、不重复加载
+    sessionStore.tabs.set('t3', {
+      tabId: 't3', projectPath: 'D:/demo', ptyId: 'pty-3', sessionId: null,
+      name: 'demo-2', status: 'running', createdAt: 0, lastActiveAt: 0,
+      working: false, pending: false, isResume: false, sessionIds: [],
+    })
+    sessionStore.activeTabId = 't3'
+    await flushPromises()
+
+    expect(mocked).toHaveBeenCalledTimes(1)
   })
 })
