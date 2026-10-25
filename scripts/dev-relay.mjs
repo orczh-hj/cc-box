@@ -8,32 +8,16 @@
  * 任一子进程退出即全部退出；Ctrl+C 统一杀进程树（Windows taskkill /T）。
  */
 import { execSync, spawn } from 'node:child_process'
-import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { lanIp } from './lib/lan-ip.mjs'
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const PORT = 8800
 const IS_WIN = process.platform === 'win32'
 
-/** 探测局域网 IPv4（优先私网段，排除 loopback 与链路本地 169.254.*） */
-function lanIp() {
-  const preferred = []
-  const fallback = []
-  for (const addrs of Object.values(os.networkInterfaces())) {
-    for (const a of addrs ?? []) {
-      if (a.family !== 'IPv4' || a.internal || a.address.startsWith('169.254.')) continue
-      const privNet =
-        a.address.startsWith('192.168.') ||
-        a.address.startsWith('10.') ||
-        a.address.startsWith('172.')
-      ;(privNet ? preferred : fallback).push(a.address)
-    }
-  }
-  return preferred[0] ?? fallback[0]
-}
-
-const ip = lanIp()
+// CC_BOX_RELAY_IP 可覆盖自动探测（多网卡/虚拟网卡干扰时手工指定）
+const ip = process.env.CC_BOX_RELAY_IP?.trim() || lanIp()
 if (!ip) {
   console.error('[dev-relay] 未探测到局域网 IPv4 地址（请检查网络连接），中止')
   process.exit(1)
