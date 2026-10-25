@@ -3,6 +3,15 @@
 ## [0.16.8] - 2026-10-25
 
 ### Features
+- Add one-time download ticket links so files can be downloaded in WeChat and system browsers
+- Add one-step remote download: direct browsers start natively, relay browsers fetch in the current page
+- Show the per-file size limit at the top of the file panel
+
+### Fixed
+- Fix the remote file panel keeping the previous project directory after switching projects without opening a terminal
+- Fix uploads targeting the previous project when the current project has no active terminal
+- Fix stale remote service port (8747) after disabling remote access in multi-instance setups
+- Fix dev:relay LAN IP detection picking virtual network interfaces on macOS
 
 ## [0.16.7] - 2026-10-24
 
