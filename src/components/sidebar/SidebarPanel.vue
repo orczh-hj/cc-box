@@ -108,10 +108,10 @@ defineEmits<{
 }
 
 /* ============================================
- * 手机断点（≤768px）：flex 兄弟 → fixed 左侧抽屉 + 遮罩
+ * 手机断点（≤768px 且触屏）：flex 兄弟 → fixed 左侧抽屉 + 遮罩
  * （transform 动画替代 width 过渡，避免 flex 重排）
  * ============================================ */
-@media (max-width: 768px) {
+@media (max-width: 768px) and (hover: none) {
   .sidebar-mask {
     display: block;
     position: fixed;

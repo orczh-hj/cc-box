@@ -1110,10 +1110,10 @@ async function handleSaveDefault() {
 }
 
 /* ============================================
- * 手机断点（≤768px）：双栏 → 单栏纵向堆叠
+ * 手机断点（≤768px 且触屏）：双栏 → 单栏纵向堆叠
  * 近期会话变折叠段（默认收起），项目列表占满宽
  * ============================================ */
-@media (max-width: 768px) {
+@media (max-width: 768px) and (hover: none) {
   .project-select-view {
     flex-direction: column;
   }

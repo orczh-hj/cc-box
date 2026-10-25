@@ -272,15 +272,16 @@ button:disabled, input:disabled {
 }
 
 /* ============================================
- * 移动端适配基建（≤768px，与 useMediaQuery 的 useIsMobile 断点一致）
- * 结构分支用 useIsMobile()；纯样式分支一律写 @media (max-width: 768px)
+ * 移动端适配基建（≤768px 且触屏，与 useMediaQuery 的 useIsMobile 断点一致）
+ * 结构分支用 useIsMobile()；纯样式分支一律写
+ * @media (max-width: 768px) and (hover: none)
  * ============================================ */
 :root {
   /* 底部安全区（iPhone 刘海屏 home indicator；桌面/无环境变量时为 0） */
   --safe-area-bottom: env(safe-area-inset-bottom, 0px);
 }
 
-@media (max-width: 768px) {
+@media (max-width: 768px) and (hover: none) {
   html, body {
     /* 触屏下容器内滚动到底不带动整页回弹 */
     overscroll-behavior: none;

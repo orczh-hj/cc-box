@@ -73,13 +73,30 @@ describe('useMediaQuery', () => {
     expect(matches.value).toBe(false)
   })
 
-  // useIsMobile 断点表达式与 CSS 断点一致（768px）
+  // useIsMobile 断点表达式与 CSS 断点一致（≤768px 且触屏）
   it('MediaQuery_IsMobile_001', () => {
     const real = window.matchMedia
     const spy = vi.fn(() => ({ matches: false, addEventListener: () => {}, removeEventListener: () => {} }))
     vi.stubGlobal('matchMedia', spy)
     useIsMobile()
-    expect(spy).toHaveBeenCalledWith('(max-width: 768px)')
+    expect(spy).toHaveBeenCalledWith('(max-width: 768px) and (hover: none)')
+    vi.stubGlobal('matchMedia', real)
+  })
+
+  // 桌面窄窗（宽度 ≤768px 但有 hover 的鼠标输入）不算手机：
+  // 仅按宽度判断会把桌面右半屏误判为手机，故查询必须带设备能力条件
+  it('MediaQuery_IsMobile_DesktopNarrow_001', () => {
+    const real = window.matchMedia
+    const queries: string[] = []
+    const spy = vi.fn((q: string) => {
+      queries.push(q)
+      return { matches: false, addEventListener: () => {}, removeEventListener: () => {} }
+    })
+    vi.stubGlobal('matchMedia', spy)
+    useIsMobile()
+    expect(queries).toHaveLength(1)
+    expect(queries[0]).toContain('max-width: 768px')
+    expect(queries[0]).toContain('hover: none')
     vi.stubGlobal('matchMedia', real)
   })
 })

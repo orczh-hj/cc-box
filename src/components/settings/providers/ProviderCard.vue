@@ -177,7 +177,8 @@ defineEmits<{
   padding: 4px 12px;
 }
 
-/* 手机断点：单行放不下 4 按钮 → 操作组换到第二行右对齐；触屏无 hover 常显 */
+/* 窄屏内容自适应（与设备能力无关，桌面窄窗同样适用）：
+   单行放不下 4 按钮 → 操作组换到第二行右对齐；触屏无 hover 常显 */
 @media (max-width: 768px) {
   .provider-card {
     flex-wrap: wrap;

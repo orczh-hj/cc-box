@@ -253,10 +253,10 @@ function handleSettingsClick() {
 }
 
 /* ============================================
- * 手机断点（≤768px）：左竖栏 → 底部横栏
+ * 手机断点（≤768px 且触屏）：左竖栏 → 底部横栏
  * 纯样式分支（结构不变），与 useIsMobile 断点一致
  * ============================================ */
-@media (max-width: 768px) {
+@media (max-width: 768px) and (hover: none) {
   .icon-bar {
     position: fixed;
     left: 0;

@@ -152,21 +152,20 @@ if (isUndoShortcut(event)) {
 
 ## 触摸交互（手机断点 ≤768px）
 
-手机端手势设计原则：**终端触摸零抢焦点**（tap 合成 click 由 xterm 自然处理，如光标跳转）、**触摸滚动经合成 wheel 走 xterm 正确通道**（capture 阶段 stopPropagation 断 xterm 的 touch 路径——其 touchmove 在应用鼠标模式下转序列时坐标异常，产生 `aN;NaNM` 垃圾输入；拖动量改为派发坐标可控的合成 WheelEvent：CLI 开 mouse reporting 时 xterm 编码滚轮序列发给 CLI **TUI 内部滚动**，未开时滚 scrollback——Claude CLI 是 TUI 自管滚动，scrollback 滚动对其无效）、**软键盘由工具栏「键盘」按钮显式唤出**。
+手机端手势设计原则：**终端触摸零抢焦点**（tap 合成 click 由 xterm 自然处理，如光标跳转）、**触摸滚动经合成 wheel 走 xterm 正确通道**（capture 阶段 stopPropagation 断 xterm 的 touch 路径——其 touchmove 在应用鼠标模式下转序列时坐标异常，产生 `aN;NaNM` 垃圾输入；拖动量改为派发坐标可控的合成 WheelEvent：CLI 开 mouse reporting 时 xterm 编码滚轮序列发给 CLI **TUI 内部滚动**，未开时滚 scrollback——Claude CLI 是 TUI 自管滚动，scrollback 滚动对其无效）、**软键盘由点击终端区域唤出**（gesturetap 兜底聚焦裸 textarea）。
 
 | 手势/入口 | 判定 | 行为 |
 |------|------|------|
 | tap 终端 | 位移 <10px 的起落 | 无自定义行为——浏览器合成 click/mousedown 透传 xterm（CLI 光标跳转等） |
 | 滚动 | touchmove 位移 ≥10px | preventDefault + 拖动量累积满一行派发一次合成 wheel（deltaY 像素，触点为有效坐标）；同时 blur 收起已弹出的软键盘 |
 | 选择复制 | 工具栏按钮打开复制阅读器 | **冻结快照 + DOM 原生选择**：`captureSnapshot` 抓 buffer 全量（scrollback+viewport，5000 行上限）→ `reflowSnapshot` 反渲染（`src/utils/terminal-reflow.ts`）→ 全屏 `<pre>`（user-select:text）展示；用户**长按唤起系统原生选择手柄**选择，「复制选中」（getSelection → copyText）/「复制全部」/「智能·原始」模式切换；`@contextmenu.stop` 放行 Android 长按菜单（阻隔 main.ts 的 PROD 全局拦截）；终端不暂停，退出重进可重抓 |
-| 键盘 | 工具栏第一位按钮 | 手势内聚焦裸 `term.textarea`（iOS/Android 对 xterm 内部 preventScroll 聚焦不弹键盘） |
 
 关键约束：
 
 - 收起键盘引发容器高度**回升**时只 fit 不 scrollToBottom（ResizeObserver 仅对骤降 >120px 滚底），翻阅位置不被打断
 - 反渲染规则（终端是"内容渲染型"，buffer 存 Ink 帧而非线性文本）：isWrapped 无缝拼接 / 代码围栏内原样 / markdown 结构与 diff 标记保留换行 / 满宽启发式拼接（显示宽度按 CJK=2 算，英文词中断补空格中文直拼）/ box-drawing 与表格保护；已知误拼场景切「原始」模式兜底
 - `copyText` 走 execCommand 降级（http 局域网非安全上下文可用）
-- 快捷键工具条（QuickKeyBar）键序：键盘 / 选择复制（action 按钮）+ Esc / ⇧Tab / Ctrl+J / Ctrl+U / ↑↓←→ / Home / End（直发转义序列）
+- 快捷键工具条（QuickKeyBar，仅手机渲染：视口 ≤768px 且 `hover: none`；桌面鼠标设备窗口再窄也不显示）键序：选择复制（action 按钮）+ Esc / ⇧Tab / Ctrl+J / Ctrl+U / ↑↓←→ / Home / End（直发转义序列）
 
 ## GUI 增强边界
 

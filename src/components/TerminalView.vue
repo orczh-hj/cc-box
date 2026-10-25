@@ -53,7 +53,8 @@
           :font-size="appStore.fontSize"
           @pty-started="handlePtyStarted"
         />
-        <!-- 快捷键工具条（手机断点）：键盘唤出/选择复制 + 软键盘按不出的控制键 -->
+        <!-- 快捷键工具条（仅手机：窄屏触屏）：选择复制 + 软键盘按不出的控制键；
+             桌面鼠标设备窗口再窄也不渲染 -->
         <QuickKeyBar v-if="isMobile" @send="handleQuickKey" @select="handleSelectCopy" />
         <!-- 复制阅读器（手机复制部分内容）：buffer 快照 + 反渲染，系统原生长按选择 -->
         <TerminalCopyReader
@@ -419,8 +420,8 @@ function handlePtyStarted(tabId: string, _ptyId: string) {
   background: var(--bg-primary);
 }
 
-/* 手机断点：IconBar 变 fixed 底部横栏，主内容让出空间 */
-@media (max-width: 768px) {
+/* 手机断点（≤768px 且触屏）：IconBar 变 fixed 底部横栏，主内容让出空间 */
+@media (max-width: 768px) and (hover: none) {
   .terminal-view {
     padding-bottom: calc(52px + var(--safe-area-bottom));
   }
@@ -477,8 +478,8 @@ function handlePtyStarted(tabId: string, _ptyId: string) {
   background: var(--terminal-bg);
 }
 
-/* 手机断点：终端 + 快捷键工具条纵向排布（工具条占高，终端 fit 随之收缩） */
-@media (max-width: 768px) {
+/* 手机断点（≤768px 且触屏）：终端 + 快捷键工具条纵向排布（工具条占高，终端 fit 随之收缩） */
+@media (max-width: 768px) and (hover: none) {
   .terminal-container {
     display: flex;
     flex-direction: column;

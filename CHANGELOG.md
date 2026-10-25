@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.16.9] - 2026-10-25
+
+### Fixed
+- Fix desktop split-screen windows being misdetected as phones, which showed the QuickKeyBar and select-copy button behind the window header
+- Require touch input (hover: none) on top of the 768px width for mobile layout, aligned across JS and CSS breakpoints
+
 ## [0.16.8] - 2026-10-25
 
 ### Features

@@ -151,12 +151,13 @@ UI 已浏览器化（一套 UI 走桌面 Tauri / 宽屏浏览器 / 手机浏览�
 - remote 会话列表经 `RemoteSession.sessionId` 下发（hook 建立 ptyId→sessionId 映射），浏览器端采纳 Tab 名优先取历史会话名（未加载时回退项目名，加载后 backfillTabNamesFromHistory 回填）
 - **会话结束并入近期会话缓存（本地合并，零请求）**：`cachedRecentSessions` 启动时只加载一次，会话结束（closeTab/closeAllTabs/closeOtherTabs/handlePtyExit）时把 Tab 已知信息（sessionId/名称/项目路径）经 `mergeTabIntoRecentSessions` → `appStore.mergeRecentSession` 按 sessionId 去重就地并入缓存，首页「近期会话」即时可见——不重拉 getHomeData（低效且重置项目分页）；无 sessionId 的 Tab 不并入；缓存条目 working/pending 清 false（已结束）
 
-## 响应式与触屏适配（手机断点 ≤768px）
+## 响应式与触屏适配（手机 = 视口 ≤768px 且触屏）
 
-一套 UI 走桌面 Tauri / 宽屏浏览器 / 手机浏览器，断点统一 **768px**：
+一套 UI 走桌面 Tauri / 宽屏浏览器 / 手机浏览器。**手机判定必须同时满足视口 ≤768px 与 `hover: none`**——只按宽度会把桌面分屏（右半屏常 <768px）误判为手机，导致桌面出现底部 IconBar、快捷键工具条、设置顶部 tab 等移动布局。
 
-- **纯样式分支**一律写 `@media (max-width: 768px)`（IconBar 底部横栏、SidebarPanel 抽屉、ProjectSelectView 单栏折叠、ProviderCard 按钮换行等）
-- **结构分支**（两套 DOM，如 SettingsView 竖导航/顶部 tab）用 `useIsMobile()`（`src/composables/useMediaQuery.ts`，与 CSS 断点一致）
+- **纯样式分支**一律写 `@media (max-width: 768px) and (hover: none)`（IconBar 底部横栏、SidebarPanel 抽屉、ProjectSelectView 单栏折叠、TerminalView 工具条排布等）
+- **纯内容宽度自适应**（与设备能力无关，桌面窄窗仍需）：ProviderCard 按钮换行、StartupSection env-key 比例宽度，保持 `@media (max-width: 768px)`
+- **结构分支**（两套 DOM，如 SettingsView 竖导航/顶部 tab）用 `useIsMobile()`（`src/composables/useMediaQuery.ts` 的 `MOBILE_MEDIA_QUERY`，与 CSS 断点一致）
 - **终端字号**：手机 = 桌面设置 × 0.9（`XTermTerminal` 的 `effectiveFontSize`），断点跨越自动重算
 - **软键盘**：App.vue 同步 `visualViewport.height` 到 app-root 高度，驱动终端 fit
 - **safe-area**：底部栏用 `--safe-area-bottom`（env(safe-area-inset-bottom)），视口 meta 带 viewport-fit=cover

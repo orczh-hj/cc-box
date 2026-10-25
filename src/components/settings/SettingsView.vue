@@ -259,7 +259,7 @@ const navItems = computed(() => [
   border-radius: 2px 2px 0 0;
 }
 
-@media (max-width: 768px) {
+@media (max-width: 768px) and (hover: none) {
   /* 手机整体变纵向布局：导航在上、内容在下 */
   .settings-view {
     flex-direction: column;
