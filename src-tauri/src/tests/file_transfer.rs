@@ -639,3 +639,124 @@ fn FileTransfer_StartupCleanup_UnlinkedDirSkipped_1() {
     file_transfer::startup_cleanup();
     assert!(victim.exists(), "链接到项目外的目录不应被清理");
 }
+
+// ==================== 一次性下载票据 ====================
+
+#[test]
+fn FileTransfer_TicketSignAndRead_1() {
+    let env = FtEnv::new("ticket-ok");
+    let path = env._dir.path().join("hello.txt");
+    std::fs::write(&path, b"hello ticket").unwrap();
+    let path_s = path.to_string_lossy().into_owned();
+
+    let info =
+        file_transfer::create_download_ticket(Some(CONN_A), &path_s, Some(false)).unwrap();
+    assert_eq!(info.file_name, "hello.txt");
+    assert_eq!(info.size, b"hello ticket".len() as u64);
+    assert!(info.expires_at > 0);
+
+    let chunk = file_transfer::download_ticket_chunk(&info.ticket, 0).unwrap();
+    assert_eq!(chunk.bytes, b"hello ticket".len() as u64);
+    assert!(chunk.eof);
+    assert_eq!(unb64(&chunk.data_b64), b"hello ticket");
+}
+
+/// 票据不绑连接：手机切到系统下载器后 WS 断开，票据必须仍然可用
+#[test]
+fn FileTransfer_TicketSurvivesConnCleanup_1() {
+    let env = FtEnv::new("ticket-conn");
+    let path = env._dir.path().join("keep.bin");
+    std::fs::write(&path, b"payload").unwrap();
+    let path_s = path.to_string_lossy().into_owned();
+
+    let info =
+        file_transfer::create_download_ticket(Some(CONN_A), &path_s, Some(false)).unwrap();
+    file_transfer::cleanup_conn(CONN_A);
+    let chunk = file_transfer::download_ticket_chunk(&info.ticket, 0).unwrap();
+    assert_eq!(unb64(&chunk.data_b64), b"payload");
+}
+
+#[test]
+fn FileTransfer_TicketExpires_1() {
+    let env = FtEnv::new("ticket-expire");
+    let path = env._dir.path().join("expire.txt");
+    std::fs::write(&path, b"x").unwrap();
+    let path_s = path.to_string_lossy().into_owned();
+
+    let info =
+        file_transfer::create_download_ticket(Some(CONN_A), &path_s, Some(false)).unwrap();
+    file_transfer::test_expire_sessions();
+    file_transfer::sweep_stale();
+    assert!(file_transfer::peek_ticket(&info.ticket).is_none());
+    assert!(file_transfer::download_ticket_chunk(&info.ticket, 0).is_err());
+}
+
+/// HEAD 探测（peek）不扣使用次数
+#[test]
+fn FileTransfer_TicketPeekDoesNotConsume_1() {
+    let env = FtEnv::new("ticket-peek");
+    let path = env._dir.path().join("peek.txt");
+    std::fs::write(&path, b"peek").unwrap();
+    let path_s = path.to_string_lossy().into_owned();
+
+    let info =
+        file_transfer::create_download_ticket(Some(CONN_A), &path_s, Some(false)).unwrap();
+    for _ in 0..100 {
+        assert!(file_transfer::peek_ticket(&info.ticket).is_some());
+    }
+    assert!(file_transfer::download_ticket_chunk(&info.ticket, 0).is_ok());
+}
+
+#[test]
+fn FileTransfer_TicketOutsideProjectRejected_1() {
+    let _env = FtEnv::new("ticket-outside");
+    let outside = tempfile::tempdir().unwrap();
+    let victim = outside.path().join("secret.txt");
+    std::fs::write(&victim, b"secret").unwrap();
+    let path_s = victim.to_string_lossy().into_owned();
+
+    assert!(file_transfer::create_download_ticket(Some(CONN_A), &path_s, Some(false)).is_err());
+}
+
+#[test]
+fn FileTransfer_TicketSourceChangedRejected_1() {
+    let env = FtEnv::new("ticket-changed");
+    let path = env._dir.path().join("grow.txt");
+    std::fs::write(&path, b"one").unwrap();
+    let path_s = path.to_string_lossy().into_owned();
+
+    let info =
+        file_transfer::create_download_ticket(Some(CONN_A), &path_s, Some(false)).unwrap();
+    std::fs::write(&path, b"one-and-then-some-more").unwrap();
+    let err = file_transfer::download_ticket_chunk(&info.ticket, 0).unwrap_err();
+    assert!(err.contains("changed during download"), "unexpected: {}", err);
+}
+
+#[test]
+fn FileTransfer_TicketRequiresRemoteConn_1() {
+    let env = FtEnv::new("ticket-desktop");
+    let path = env._dir.path().join("local.txt");
+    std::fs::write(&path, b"local").unwrap();
+    let path_s = path.to_string_lossy().into_owned();
+
+    assert!(file_transfer::create_download_ticket(None, &path_s, Some(false)).is_err());
+}
+
+/// 票据使用次数耗尽后失效
+#[test]
+fn FileTransfer_TicketExhaustsUses_1() {
+    let env = FtEnv::new("ticket-uses");
+    let path = env._dir.path().join("uses.txt");
+    std::fs::write(&path, b"x").unwrap();
+    let path_s = path.to_string_lossy().into_owned();
+
+    let info =
+        file_transfer::create_download_ticket(Some(CONN_A), &path_s, Some(false)).unwrap();
+    let mut count = 0u32;
+    while file_transfer::take_ticket(&info.ticket).is_ok() {
+        count += 1;
+        assert!(count <= 1024, "ticket uses did not terminate");
+    }
+    assert_eq!(count, 256, "票据使用次数应为 256");
+    assert!(file_transfer::take_ticket(&info.ticket).is_err());
+}

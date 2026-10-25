@@ -27,6 +27,12 @@ export type ClientMessage =
   /** 抢占全局控制权（设备互斥：他端持有时唯一获取方式；attach 不能抢占） */
   | { type: 'controller.takeover' }
 
+/** 票据连接的下载范围（受限会话：只能拉取这一个文件的分块） */
+export interface DownloadScope {
+  fileName: string
+  size: number
+}
+
 /** 远程可见的会话信息 */
 export interface RemoteSession {
   id: string
@@ -64,6 +70,8 @@ export type ServerMessage =
       controller: number | null
       /** 服务端状态版本基线；旧桌面端缺省 0 */
       revision: number
+      /** 票据连接：只能拉取该文件的下载分块；普通连接缺省（旧桌面端不下发） */
+      downloadScope?: DownloadScope
     }
   | { type: 'hello.error'; error: string }
   | { type: 'sessions'; list: RemoteSession[]; revision: number }
@@ -196,6 +204,16 @@ export function parseServerMessage(raw: unknown): ServerMessage | null {
           connId: num(raw.connId) ? raw.connId : 0,
           controller: num(raw.controller) ? raw.controller : null,
           revision: num(raw.revision) ? raw.revision : 0,
+          ...(isObject(raw.downloadScope) &&
+          str(raw.downloadScope.fileName) &&
+          num(raw.downloadScope.size)
+            ? {
+                downloadScope: {
+                  fileName: raw.downloadScope.fileName,
+                  size: raw.downloadScope.size,
+                },
+              }
+            : {}),
         }
       }
       return null

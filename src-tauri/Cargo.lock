@@ -404,7 +404,7 @@ dependencies = [
 
 [[package]]
 name = "cc-box"
-version = "0.16.6"
+version = "0.16.7"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -437,6 +437,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-tungstenite",
+ "tokio-util",
  "tower",
  "uuid",
  "webview2-com",

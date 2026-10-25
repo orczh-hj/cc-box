@@ -15,7 +15,7 @@
 
 | type | 字段 | 说明 |
 |---|---|---|
-| `hello` | `ver, client, token` | 认证握手。token 两种：局域直连 = 桌面静态 token（连接层等值校验）；中继 = token v2 `<device_id>.<secret>`（relay 按前缀路由，**secret 由桌面 Hello 分支校验**——命中配对 pending 时固化为持久设备，LRU 上限 16） |
+| `hello` | `ver, client, token` | 认证握手。token 三种：局域直连 = 桌面静态 token（连接层等值校验）；中继 = token v2 `<device_id>.<secret>`（relay 按前缀路由，**secret 由桌面 Hello 分支校验**——命中配对 pending 时固化为持久设备，LRU 上限 16）；**下载票据** = `<device_id>.<ticket>`（同格式复用 relay 路由，桌面命中票据表即建立受限会话，只允许 `file_download_ticket_chunk` 与 `ping`） |
 | `sessions.list` | `{}` | 拉取运行中会话列表 |
 | `projects.list` | `{}` | 可操作项目白名单 |
 | `session.create` | `path, sessionId?, skipPermissions?, customArgs?` | 新建（无 sessionId）或恢复（--resume sessionId）会话 |
@@ -35,7 +35,7 @@
 
 | type | 字段 | 说明 |
 |---|---|---|
-| `hello.ok` | `ver, deviceName, connId, controller?, revision` | 认证通过（桌面设备名）。`connId` = 本连接唯一标识；`controller` = 当前全局控制者（null=无人持有；**0=桌面持有**（conn_id 从 1 起，0 保留）；>0=远程连接 id。前端显示"被其他设备控制中"遮罩的判定依据）；`revision` = 状态版本基线（旧桌面端缺省 0） |
+| `hello.ok` | `ver, deviceName, connId, controller?, revision, downloadScope?` | 认证通过（桌面设备名）。`connId` = 本连接唯一标识；`controller` = 当前全局控制者（null=无人持有；**0=桌面持有**（conn_id 从 1 起，0 保留）；>0=远程连接 id。前端显示"被其他设备控制中"遮罩的判定依据）；`revision` = 状态版本基线（旧桌面端缺省 0）；`downloadScope` = 票据连接的下载范围 `{fileName, size}`（普通连接缺省） |
 | `hello.error` | `error` | 认证失败 |
 | `sessions` | `list: RemoteSession[], revision` | 运行中会话列表 + 状态版本快照（全量刷新基线） |
 | `projects` | `list: RemoteProject[]` | 项目列表 |
@@ -100,6 +100,16 @@
 - **双限额（流量成本）**：`config.json` `remote.fileTransferMaxDirect`（默认 200MB）/`remote.fileTransferMaxRelay`（默认 20MB——中继流量 ≈2.7× 文件大小：双程 + base64 膨胀；`0` = 禁用）。判定依据是「经由中继」（连接表 `via_relay`：relay 桥接 true / LAN 直连 false），非「公网」——局域网自建 relay 可调高
 - **清理三层**：begin/list 入口惰性 TTL sweep（chunk/finish 不触发）+ lib.rs setup 定时（600s）+ 启动扫描已知项目 `.cc-box-files/*.upload-*.part`（崩溃遗留，仅 mtime >10 分钟且目录 canonicalize 后仍在项目内才删）；连接断开时即时回收该连接的传输会话
 - **审计**：begin/finish/abort/download_begin 记 `~/.cc-box/logs`（方向/连接/路径/大小）
+
+### 一次性下载票据（直链）
+
+微信把下载交给系统下载器/系统浏览器时，`blob:` 与 WebView 内 token 都不可用——因此下载改为「签发票据 → 浏览器直接 GET」：
+
+- 签发：`file_download_ticket(path)`（已认证 WS，复用白名单/限额校验）→ `{ticket, urlPath, fileName, size, expiresAt}`
+- 直连：`GET /dl/<ticket>` 流式返回（`Content-Disposition: attachment`，支持单区间 Range；HEAD 只探测不扣次数）
+- 中继：`GET /?dl=<device_id>.<ticket>` 返回同一 Web UI，前端以票据为 token 建连（relay 只按前缀路由，零改动）；`hello.ok.downloadScope` 下发文件名/大小，随后该受限连接只允许 `file_download_ticket_chunk(ticket, offset)` 与 `ping`
+- 票据：128bit 随机、TTL 10 分钟、使用上限 256 次、**不绑连接**（交给系统浏览器后 WS 必然断开，不能随 `cleanup_conn` 回收）
+- 旧版本降级：`file_download_ticket` 不存在（旧桌面）或 HEAD 探测到 HTML（旧静态 fallback）时，回退 `file_download_begin/chunk` + Blob
 
 ## 关键结构
 

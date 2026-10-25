@@ -122,6 +122,8 @@ sudo certbot -d cc.orczh.top   # 签发证书并自动配 443
 | **Rust 桌面**（src-tauri/） | 重启 `npm run tauri:dev` | 同左 | 无需动 relay |
 | **relay**（remote/relay/） | 无 | 无 | 交叉编译 + scp + 重启 |
 
+> **票据下载（远程文件直链）**：中继侧**零改动**——票据页面走现有 `/?dl=` 静态入口与 WS 透传（`<device_id>.<ticket>` 复用 token v2 前缀路由），relay 二进制无需重编/重启；只需按下方「仅前端更新」scp 新 dist。桌面必须同步升级（提供 `/dl` 与 `file_download_ticket`），否则前端自动降级为旧 Blob 分块下载。
+
 **仅前端更新（免重编 relay）**——服务器上 relay 由 `CC_BOX_RELAY_WEB_DIR` 环境变量指向 Web 目录（systemd 单元 `Environment=` 配置，如 `/opt/cc-box/web`；目录存在即优先读磁盘，miss 回退内嵌保底）：
 
 ```bash

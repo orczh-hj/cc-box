@@ -8,11 +8,17 @@ vi.mock('@/api/tauri', () => ({
   fileUploadAbort: vi.fn(),
   fileDownloadBegin: vi.fn(),
   fileDownloadChunk: vi.fn(),
+  fileDownloadTicket: vi.fn(),
+  fileDownloadTicketChunk: vi.fn(),
 }))
 
 import {
   uploadFile,
   downloadFile,
+  getDownloadTicket,
+  downloadFileByTicket,
+  probeDownloadUrl,
+  triggerDownload,
   quotePath,
   TransferCancelled,
 } from '@/api/fileTransfer'
@@ -23,6 +29,8 @@ import {
   fileUploadAbort,
   fileDownloadBegin,
   fileDownloadChunk,
+  fileDownloadTicket,
+  fileDownloadTicketChunk,
 } from '@/api/tauri'
 
 /** 鸭子类型 File（只用 name/size/slice），多块场景无需构造大文件：
@@ -281,5 +289,91 @@ describe('downloadFile', () => {
     })
     const r = await downloadFile('/p/e.txt')
     expect(r.blob.size).toBe(0)
+  })
+})
+
+// ==================== 一次性票据直链 ====================
+
+describe('下载票据直链', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  it('DownloadTicket_BuildUrl_1', async () => {
+    const ticket = 'a'.repeat(32)
+    vi.mocked(fileDownloadTicket).mockResolvedValue({
+      ticket,
+      urlPath: `/dl/${ticket}`,
+      fileName: 'a.txt',
+      size: 3,
+      expiresAt: 1,
+    })
+    const t = await getDownloadTicket('/p/a.txt')
+    expect(t.url).toBe(`${location.origin}/dl/${ticket}`)
+    expect(t.fileName).toBe('a.txt')
+    expect(t.size).toBe(3)
+  })
+
+  /// 断线后按已下载 offset 重拉同一块（服务端 offset 幂等）
+  it('DownloadTicket_ResumeAfterReconnect_1', async () => {
+    const chunk = (text: string, eof: boolean) => ({
+      dataB64: b64(new TextEncoder().encode(text)),
+      bytes: text.length,
+      eof,
+    })
+    vi.mocked(fileDownloadTicketChunk)
+      .mockResolvedValueOnce(chunk('hel', false))
+      .mockRejectedValueOnce(new Error('connection not open'))
+      .mockResolvedValueOnce(chunk('lo', true))
+
+    const { blob } = await downloadFileByTicket('t'.repeat(32), 5)
+    expect(new TextDecoder().decode(await blobBytes(blob))).toBe('hello')
+    const offsets = vi.mocked(fileDownloadTicketChunk).mock.calls.map((c) => c[1])
+    expect(offsets).toEqual([0, 3, 3])
+  })
+
+  it('DownloadTicket_FailFastOnExpiredTicket_1', async () => {
+    vi.mocked(fileDownloadTicketChunk).mockRejectedValueOnce(
+      new Error('download ticket not found or expired'),
+    )
+    await expect(downloadFileByTicket('t'.repeat(32), 5)).rejects.toThrow(/ticket/)
+  })
+
+  it('ProbeDownload_RejectsStaticFallbackHtml_1', async () => {
+    const orig = globalThis.fetch
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      headers: new Headers({ 'content-type': 'text/html; charset=utf-8' }),
+    }) as unknown as typeof fetch
+    expect(await probeDownloadUrl('http://x/dl/t', 10)).toBe(false)
+    globalThis.fetch = orig
+  })
+
+  it('ProbeDownload_AcceptsAttachment_1', async () => {
+    const orig = globalThis.fetch
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      headers: new Headers({
+        'content-type': 'application/octet-stream',
+        'content-disposition': "attachment; filename=\"a.txt\"",
+        'content-length': '10',
+      }),
+    }) as unknown as typeof fetch
+    expect(await probeDownloadUrl('http://x/dl/t', 10)).toBe(true)
+    globalThis.fetch = orig
+  })
+
+  it('TriggerDownload_UsesAnchorDownload_1', () => {
+    const clicked: HTMLAnchorElement[] = []
+    const spy = vi
+      .spyOn(HTMLAnchorElement.prototype, 'click')
+      .mockImplementation(function (this: HTMLAnchorElement) {
+        clicked.push(this)
+      })
+    triggerDownload('http://x/dl/t', 'a b.txt')
+    expect(clicked).toHaveLength(1)
+    expect(clicked[0].download).toBe('a b.txt')
+    expect(clicked[0].getAttribute('rel')).toBe('noopener')
+    spy.mockRestore()
   })
 })

@@ -53,7 +53,7 @@ cc-box/
 │   │   ├── remote_server.rs    # 远程直连服务器（axum WS + Web UI + token 认证）
 │   │   ├── remote_state.rs     # 远程状态与消息处理（会话聚合、控制权、revision、广播）
 │   │   ├── remote_client.rs    # 中继出站客户端（连接 relay、手机桥接、断线重连）
-│   │   ├── file_transfer.rs    # 远程文件传输（分块上传/下载、双限额、三层清理）
+│   │   ├── file_transfer.rs    # 远程文件传输（分块上传/下载、票据直链、双限额、三层清理）
 │   │   ├── rpc_dispatch.rs     # RPC 命令单一注册表（registry! 宏表）
 │   │   ├── events.rs           # 事件单一出口（事件名常量 + emit_all）
 │   │   ├── checks.rs           # 环境检查
@@ -160,6 +160,7 @@ npm run release -- --bump patch --notes "### Features\n- Add feature"
 ## 开发约定
 
 - **远程操作一致性**：远程（手机）操作与桌面直接操作效果一致——桌面端原生实现单点执行，远程只是触发器 + 事件同步的镜像，不另写一份执行逻辑
+- **远程文件下载走票据直链（所有浏览器统一）**：`file_download_ticket` 签发一次性票据 → 直连 `GET /dl/<ticket>` 流式返回、中继 `/?dl=<device>.<ticket>` 票据页（受限 WS 只允许 `file_download_ticket_chunk`/`ping`）。票据 **不绑连接**（系统浏览器/下载器接管后 WS 必断，不能被 `cleanup_conn` 回收）、128bit、TTL 10 分钟、256 次；旧桌面/旧 relay 经 `command not allowed` 与 HEAD 探测自动降级 Blob。relay 零改动（只按 token 前缀路由），详见 [remote/docs/protocol.md](remote/docs/protocol.md)「一次性下载票据」
 - **避免重复实现**：同一逻辑只留一份（如 `spawn_pty_core`、`apply_hook_event`）；两端各自需要的状态靠事件同步（`session-renamed`、`hook-status`），不靠复制代码
 - **离散操作必广播**：用户离散操作（建/关/重命名会话）经 Rust 广播事件让对端走同一个原生函数；远程安全守卫（白名单/并发上限/独占）作为前置检查包住共用核心，不因统一而放宽
 - **用户级资源开关（skills/agents/mcp/plugins）**：后端单点 `store.rs` 的 `set_*_enabled`（桌面/远程同一函数）。skill/agent 禁用=移入 `~/.cc-box/disabled/<category>`，必须 **symlink 感知**（相对链接按目标位置重算、存在性用 `symlink_metadata`、disabled 扫描列出断链以便恢复）；前端 `state-changed` 刷新必须**静默**（`loadXxx(cwd, { silent: true })`，不切 loading 分支，否则整列表卸载重建）；**本端写回环必须抑制**（`markSelfWrite` 登记 → `applyStateSection` 消费并跳过该 section，条目原地响应；plugin 仍级联子项），后端列表按名称**稳定排序**（顺序与 enabled 解耦）；开关按 `(sourceType=user, name)` 定位，禁止裸 name

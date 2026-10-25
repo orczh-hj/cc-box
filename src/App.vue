@@ -1,6 +1,8 @@
 <template>
+<!-- 票据模式：系统浏览器打开 /?dl= 后只渲染受限下载页（不进入主 UI） -->
+<DownloadTicketPage v-if="!isTauriEnv && ticketMode" />
 <!-- 浏览器模式：WS 认证完成前只显示 TokenGate（主 UI 挂载后 invoke 才可用） -->
-<TokenGate v-if="!isTauriEnv && !remoteReady" @connected="remoteReady = true" />
+<TokenGate v-else-if="!isTauriEnv && !remoteReady" @connected="remoteReady = true" />
 <div v-else ref="appRootRef" class="app-root" :class="{ 'browser-env': !isTauriEnv }">
   <!-- 自定义标题栏为桌面专属（浏览器使用原生标签栏；遮罩层顶部偏移随之取消） -->
   <TitleBar v-if="isTauriEnv" />
@@ -152,6 +154,8 @@ import {
 } from '@/api/tauri'
 import { useAppShortcuts } from '@/composables/useAppShortcuts'
 import TokenGate from '@/components/TokenGate.vue'
+import DownloadTicketPage from '@/components/remote/DownloadTicketPage.vue'
+import { remoteTransport } from '@/api/remote-transport'
 import DirectoryPicker from '@/components/DirectoryPicker.vue'
 import WelcomeView from '@/components/WelcomeView.vue'
 import ProjectSelectView from '@/components/ProjectSelectView.vue'
@@ -175,6 +179,8 @@ const currentView = ref<ViewType>('welcome')
 const showDirPicker = ref(false)
 /** 浏览器模式：远程 WS 认证完成（TokenGate 触发），主 UI 启动链的门控 */
 const remoteReady = ref(false)
+/** 票据模式（?dl=）：URL 在模块加载时已解析，首屏即确定，不启动主 UI */
+const ticketMode = remoteTransport.downloadTicket !== null
 const terminalViewRef = ref()
 const appRootRef = ref<HTMLElement | null>(null)
 

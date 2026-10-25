@@ -393,6 +393,21 @@ export const fileDownloadBegin = (path: string): Promise<DownloadBeginResult> =>
 export const fileDownloadChunk = (downloadId: string, offset: number): Promise<{ dataB64: string; bytes: number; eof: boolean }> =>
   invoke<{ dataB64: string; bytes: number; eof: boolean }>('file_download_chunk', { downloadId, offset }, { timeoutMs: FILE_RPC_TIMEOUT });
 
+export interface DownloadTicketResult {
+  ticket: string;
+  /** 服务端按连接类型给出：直连 /dl/<ticket>、中继 /?dl=<deviceId>.<ticket> */
+  urlPath: string;
+  fileName: string;
+  size: number;
+  expiresAt: number;
+}
+
+export const fileDownloadTicket = (path: string): Promise<DownloadTicketResult> =>
+  invoke<DownloadTicketResult>('file_download_ticket', { path }, { timeoutMs: FILE_RPC_TIMEOUT });
+
+export const fileDownloadTicketChunk = (ticket: string, offset: number): Promise<{ dataB64: string; bytes: number; eof: boolean }> =>
+  invoke<{ dataB64: string; bytes: number; eof: boolean }>('file_download_ticket_chunk', { ticket, offset }, { timeoutMs: FILE_RPC_TIMEOUT });
+
 // ============================================
 // Updater (Tauri official plugin)
 // ============================================

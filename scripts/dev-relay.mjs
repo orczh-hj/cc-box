@@ -7,7 +7,7 @@
  *
  * 任一子进程退出即全部退出；Ctrl+C 统一杀进程树（Windows taskkill /T）。
  */
-import { spawn } from 'node:child_process'
+import { execSync, spawn } from 'node:child_process'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -44,11 +44,17 @@ console.log(`[dev-relay] 手机访问: http://${ip}:${PORT}（扫码或输入地
 
 let exiting = false
 
-/** Windows 下杀进程树（tauri dev 会嵌套 spawn vite/cargo/app）；POSIX 组信号直达 */
+/** Windows 下杀进程树（tauri dev 会嵌套 spawn vite/cargo/app）；POSIX 组信号直达。
+ * 必须同步等待 taskkill 完成：process.exit 会立刻终止本进程，异步 spawn 的
+ * taskkill 还没跑完就没了，relay/vite 会残留在 8800/1420。 */
 function killTree(p) {
   if (p.exitCode !== null) return
   if (IS_WIN) {
-    if (p.pid) spawn('taskkill', ['/F', '/T', '/PID', String(p.pid)], { stdio: 'ignore' })
+    if (p.pid) {
+      try {
+        execSync(`taskkill /F /T /PID ${p.pid}`, { stdio: 'ignore', windowsHide: true })
+      } catch { /* 已退出 */ }
+    }
   } else {
     try { p.kill('SIGTERM') } catch { /* 已退出 */ }
   }

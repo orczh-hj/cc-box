@@ -227,6 +227,10 @@ registry! {
     "file_upload_abort" => write(None) => |upload_id: String, conn_id: Option<u64>| crate::commands::file_upload_abort,
     "file_download_begin" => write(None) => |path: String, conn_id: Option<u64>, via_relay: Option<bool>| crate::commands::file_download_begin,
     "file_download_chunk" => write(None) => |download_id: String, offset: u64, conn_id: Option<u64>| crate::commands::file_download_chunk,
+    // 一次性票据：直链下载（微信/系统浏览器不带 token），urlPath 由服务端拼
+    "file_download_ticket" => write(None) => |path: String, conn_id: Option<u64>, via_relay: Option<bool>| crate::commands::file_download_ticket,
+    // 票据分块：票据即权限，只读登记（受限连接无控制权，不能被写守卫拦截）
+    "file_download_ticket_chunk" => read() => |ticket: String, offset: u64| crate::commands::file_download_ticket_chunk,
 }
 
 /// 抹掉 rpc 响应中的远程凭证字段（token/deviceId/deviceKey）

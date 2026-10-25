@@ -87,6 +87,17 @@ UI 已浏览器化（一套 UI 走桌面 Tauri / 宽屏浏览器 / 手机浏览�
 - `remote_state.rs`：会话聚合、**256KB TailBuffer 输出回放**、working/pending 状态机唯一实现、局域网/中继共用唯一 handler
 - `remote_client.rs`：连接 cc-box-relay、手机连接桥接、断线重连
 
+### 多实例与端口释放（2026-10-25 修复）
+
+**原问题**：多实例共享 `~/.cc-box/config.json` 时，在实例 A 关闭远程只停 A 的 server；端口实际由先启动的实例 B 监听时，B 继续服务而两端 UI 都显示已关闭。叠加 `stop()` 只 `abort()` 不等待任务结束，Windows 上可能留下「LISTENING 但 HTTP 无响应」的僵死 listener——新实例 bind 10048，`probe_host` 也因超时认不出宿主。
+
+**修复**：
+- `stop()` abort 后 `await` serve 任务（2s 上限），确保 `axum::serve` 的 future 被 drop、listener 真正关闭。
+- `start()` 成功后启动 config watchdog（3s 低频轮询共享配置）：任一实例写 `enabled=false`，正在监听的宿主随之 `stop()` 并断开中继。
+- `set_remote_enabled(true)` 启动失败时**恢复原 enabled 值**（不再一律写 false），避免把另一实例的正常服务误停。
+- `bind_with_retry` 最终失败时探测端口是否「可连但不响应」，错误信息提示重启僵死实例。
+- `dev-relay.mjs` 用同步 `taskkill /T` 等待进程树杀完再 `process.exit`，避免 relay/vite 残留占用 8800/1420。
+
 ## 全局控制权（设备互斥）与状态同步
 
 > **行为规则正本见 [remote/docs/protocol.md](../remote/docs/protocol.md)「全局控制权」**（唯一权威；attach 不能抢占/接管入口/revision 过滤与跳变重同步细节以正本为准），本节为机制摘要。

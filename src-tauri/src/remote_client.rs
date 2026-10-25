@@ -174,6 +174,30 @@ pub fn verify_relay_token(token: &str) -> bool {
     }
 }
 
+/// 票据连接认证：token v2 格式 `<device_id>.<ticket>`。
+/// relay 只按前缀路由、secret 校验在桌面——票据命中内存表即建立受限会话，
+/// 只能拉取该文件的分块（见 remote_state 门闩）。
+pub fn verify_download_ticket(
+    token: &str,
+) -> Option<cc_box_remote_protocol::DownloadScope> {
+    let (prefix, ticket) = token.split_once('.')?;
+    if ticket.contains('.') || !is_32_hex(prefix) || !is_32_hex(ticket) {
+        return None;
+    }
+    if prefix != current_device_id()? {
+        return None;
+    }
+    // 先续期（下载期间页面可能长时间在前台），再读快照
+    if !crate::file_transfer::touch_ticket(ticket) {
+        return None;
+    }
+    let access = crate::file_transfer::peek_ticket(ticket)?;
+    Some(cc_box_remote_protocol::DownloadScope {
+        file_name: access.file_name,
+        size: access.size,
+    })
+}
+
 /// 发送 pair.create（携带预生成 secret——token v2 的校验依据）；
 /// 中继未连接（DEVICE_TX 未挂载）或通道关闭时报错
 fn send_pair_create() -> Result<(), String> {
@@ -361,6 +385,12 @@ pub fn rotate_identity() {
     let _ = crate::remote_server::save_paired_secrets(&[]);
     PENDING_SECRETS.lock().clear();
     log::info!("[remote] device identity rotated (paired phones invalidated)");
+}
+
+/// 本机 device_id（下载票据拼中继 urlPath 用）。
+/// 中继未启用/未注册时返回 None——调用方应报错，而不是签发必然 404 的链接
+pub fn current_device_id() -> Option<String> {
+    relay_identity_and_secrets().map(|(id, _)| id)
 }
 
 /// 读取/生成设备身份（device_id + device_key 持久化于 config）。

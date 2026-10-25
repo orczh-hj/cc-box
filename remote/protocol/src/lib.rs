@@ -105,6 +105,10 @@ pub enum ServerMessage {
         /// 服务端状态版本基线（接管/重连后全量刷新对齐；防旧事件覆盖）
         #[serde(default)]
         revision: u64,
+        /// 票据连接：本连接只能拉取该文件的下载分块（受限会话）。
+        /// None=普通连接；旧桌面不下发（serde default）
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        download_scope: Option<DownloadScope>,
     },
     #[serde(rename = "hello.error")]
     HelloError { error: String },
@@ -167,6 +171,14 @@ pub enum ServerMessage {
         name: String,
         payload: serde_json::Value,
     },
+}
+
+/// 票据连接的下载范围（受限会话：只允许拉取这一个文件的分块）
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DownloadScope {
+    pub file_name: String,
+    pub size: u64,
 }
 
 /// 远程可见的会话信息
@@ -360,6 +372,12 @@ mod tests {
     #[test]
     fn contract_server_hello_ok() {
         round_trip_server(include_str!("../samples/server-hello-ok.json"));
+    }
+
+    /// 票据连接：hello.ok 携带受限下载范围
+    #[test]
+    fn contract_server_hello_ok_download() {
+        round_trip_server(include_str!("../samples/server-hello-ok-download.json"));
     }
 
     #[test]

@@ -377,6 +377,61 @@ pub async fn file_download_chunk(
     crate::file_transfer::download_chunk(conn_id, &download_id, offset)
 }
 
+/// 下载票据签发结果：urlPath 由服务端按连接类型给出（直连 /dl/<ticket>、
+/// 中继 /?dl=<device_id>.<ticket>），前端只拼 origin，不猜 host
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DownloadTicketResult {
+    pub ticket: String,
+    pub url_path: String,
+    pub file_name: String,
+    pub size: u64,
+    pub expires_at: u64,
+}
+
+/// 签发一次性下载票据：供系统浏览器/系统下载器不带 token 直接取文件。
+/// 准入校验与 file_download_begin 完全一致（白名单/限额）。
+#[cc_command(write)]
+#[tauri::command]
+pub async fn file_download_ticket(
+    path: String,
+    conn_id: Option<u64>,
+    via_relay: Option<bool>,
+) -> Result<DownloadTicketResult, String> {
+    // 中继链路先确认设备身份，再占用票据槽位（否则失败时票据无人可达却占槽 10 分钟）
+    let relay = via_relay.unwrap_or(true);
+    let device_id = if relay {
+        Some(
+            crate::remote_client::current_device_id()
+                .ok_or("relay not connected: cannot build download link")?,
+        )
+    } else {
+        None
+    };
+    let info = crate::file_transfer::create_download_ticket(conn_id, &path, via_relay)?;
+    let url_path = match device_id {
+        Some(id) => format!("/?dl={}.{}", id, info.ticket),
+        None => format!("/dl/{}", info.ticket),
+    };
+    Ok(DownloadTicketResult {
+        ticket: info.ticket,
+        url_path,
+        file_name: info.file_name,
+        size: info.size,
+        expires_at: info.expires_at,
+    })
+}
+
+/// 票据分块读取（中继票据页面用）：票据即权限，不绑定连接。
+/// 只读登记——受限连接不持有控制权，不能被写命令守卫拦截。
+#[tauri::command]
+pub async fn file_download_ticket_chunk(
+    ticket: String,
+    offset: u64,
+) -> Result<crate::file_transfer::DownloadChunkResult, String> {
+    crate::file_transfer::download_ticket_chunk(&ticket, offset)
+}
+
 
 /// 获取会话列表
 #[tauri::command]
@@ -525,11 +580,17 @@ pub async fn set_remote_enabled(enabled: bool) -> Result<RemoteStatus, String> {
         // 访问凭证（LAN token / relay 设备身份）持久稳定：停止/开启不再轮换，
         // 已配对设备跨停止持续可用；轮换只由用户显式点「刷新密钥」触发
         // （rotate_remote_secret），避免每次开关都要全部设备重新扫码
+        let prev_enabled = crate::store::get_app_config()
+            .ok()
+            .and_then(|c| c.remote)
+            .and_then(|r| r.enabled)
+            .unwrap_or(false);
         crate::remote_server::save_remote_config(Some(true), None, None).map_err(|e| e.to_string())?;
-        // 启动失败（端口被占等）显式报错给 UI，并回滚开关（否则残留 enabled=true，
-        // 重启后自动尝试启动又失败）
+        // 启动失败（端口被占等）显式报错给 UI，并**恢复原值**（不是一律写
+        // false）：另一实例可能正在服务，失败回滚 false 会让它的 config
+        // watchdog 把正常服务也停掉
         if let Err(e) = crate::remote_server::start().await {
-            let _ = crate::remote_server::save_remote_config(Some(false), None, None);
+            let _ = crate::remote_server::save_remote_config(Some(prev_enabled), None, None);
             return Err(e);
         }
         // 中继即默认远程方式：开启时联动连接（内置 orczh.top:8800，

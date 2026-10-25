@@ -1595,3 +1595,56 @@ async fn RemoteState_Attach_清除pending并广播已读() {
         "attach 被拒（他人持权）不应清除 pending"
     );
 }
+
+/// 票据受限连接：只放行该文件的下载分块与心跳，其余消息全部拒绝
+#[test]
+fn RemoteState_TicketConnAllowlist_1() {
+    use crate::remote_state::ticket_conn_allows;
+
+    assert!(ticket_conn_allows(&ClientMessage::Ping));
+    assert!(ticket_conn_allows(&ClientMessage::RpcCall {
+        id: 1,
+        cmd: "file_download_ticket_chunk".into(),
+        args: serde_json::json!({ "ticket": "x", "offset": 0 }),
+    }));
+
+    assert!(!ticket_conn_allows(&ClientMessage::SessionsList));
+    assert!(!ticket_conn_allows(&ClientMessage::ControllerTakeover));
+    assert!(!ticket_conn_allows(&ClientMessage::RpcCall {
+        id: 2,
+        cmd: "file_download_begin".into(),
+        args: serde_json::json!({ "path": "x" }),
+    }));
+    assert!(!ticket_conn_allows(&ClientMessage::SessionAttach {
+        id: "x".into(),
+        cols: 80,
+        rows: 24,
+    }));
+}
+
+/// 票据受限连接不接收任何广播（会话/项目/配置元数据隔离）
+#[tokio::test]
+async fn RemoteState_TicketConnNoBroadcast_1() {
+    use cc_box_remote_protocol::DownloadScope;
+
+    let state = RemoteState::new();
+    let (_normal, mut normal_rx) = setup_conn(&state);
+    let (ticket, mut ticket_rx) = setup_conn(&state);
+    state.test_mark_download_scope(
+        ticket,
+        DownloadScope {
+            file_name: "a.txt".into(),
+            size: 1,
+        },
+    );
+
+    state.broadcast_event("state-changed", serde_json::json!({ "id": "sessions" }));
+
+    // 普通连接收到
+    match recv_timeout(&mut normal_rx).await {
+        ServerMessage::RpcEvent { name, .. } => assert_eq!(name, "state-changed"),
+        other => panic!("expected RpcEvent, got {:?}", other),
+    }
+    // 票据连接不应收到
+    assert!(ticket_rx.try_recv().is_err(), "受限连接不应收到广播");
+}

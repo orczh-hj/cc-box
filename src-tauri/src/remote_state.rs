@@ -10,7 +10,7 @@ use std::sync::LazyLock;
 use parking_lot::Mutex;
 use tokio::sync::mpsc;
 
-use cc_box_remote_protocol::{ClientMessage, RemoteSession, ServerMessage};
+use cc_box_remote_protocol::{ClientMessage, DownloadScope, RemoteSession, ServerMessage};
 
 use crate::hook_events::{HookEventDetail, HookPayload};
 use crate::rpc_dispatch::StateSection;
@@ -160,6 +160,9 @@ pub(crate) struct ConnEntry {
     /// 未认证期间非 Hello 消息一律忽略——恶意客户端可无视 hello.error
     /// 继续发消息（takeover → attach → pty.input），校验必须伴随断连+门闩
     pub authed: bool,
+    /// 票据连接（`<device_id>.<ticket>` 认证）：只允许拉取该文件分块与心跳，
+    /// 不支持会话/控制权等任何其他消息
+    pub download_scope: Option<DownloadScope>,
 }
 
 #[derive(Default)]
@@ -180,6 +183,12 @@ struct StateInner {
     ///   command（ControllerMask 接管按钮）与 pty_claim（终端接管回来）
     /// - takeover 剥离旧持有者全部终端归属；断连自动释放
     controller: Option<ControllerHolder>,
+}
+
+/// 票据受限连接的放行规则：只允许拉取该文件分块与心跳
+pub(crate) fn ticket_conn_allows(msg: &ClientMessage) -> bool {
+    matches!(msg, ClientMessage::Ping)
+        || matches!(msg, ClientMessage::RpcCall { cmd, .. } if cmd == "file_download_ticket_chunk")
 }
 
 pub struct RemoteState {
@@ -355,6 +364,9 @@ impl RemoteState {
             payload: serde_json::json!({ "id": id, "data": rev.to_string() }),
         };
         for e in inner.conns.values() {
+            if e.download_scope.is_some() {
+                continue; // 票据受限连接不接收控制面事件
+            }
             let _ = e.tx.try_send(msg.clone());
         }
     }
@@ -437,6 +449,9 @@ impl RemoteState {
             payload: serde_json::json!({ "id": section, "data": rev.to_string() }),
         };
         for e in inner.conns.values() {
+            if e.download_scope.is_some() {
+                continue; // 票据受限连接不接收状态广播
+            }
             let _ = e.tx.try_send(msg.clone());
         }
     }
@@ -563,8 +578,22 @@ impl RemoteState {
     pub fn add_conn(&self, conn_id: u64, sender: mpsc::Sender<ServerMessage>, via_relay: bool) {
         self.inner.lock().conns.insert(
             conn_id,
-            ConnEntry { tx: sender, via_relay, authed: !via_relay },
+            ConnEntry {
+                tx: sender,
+                via_relay,
+                authed: !via_relay,
+                download_scope: None,
+            },
         );
+    }
+
+    /// 测试辅助：把连接标记为票据受限会话（验证广播隔离）
+    #[cfg(test)]
+    pub(crate) fn test_mark_download_scope(&self, conn_id: u64, scope: DownloadScope) {
+        if let Some(e) = self.inner.lock().conns.get_mut(&conn_id) {
+            e.download_scope = Some(scope);
+            e.authed = true;
+        }
     }
 
     /// 连接是否经中继（文件传输限额选档；未知连接返回 None，调用方按中继从严处理）
@@ -646,13 +675,21 @@ impl RemoteState {
 
     /// 应用层消息分发（认证后的消息，局域网/中继同一条路径）
     pub fn handle_client_message(&self, conn_id: u64, msg: &ClientMessage) {
+        // 票据受限连接只放行文件分块与心跳（见 ticket_conn_allows）
         // 认证门闩：除 Hello（认证本身）外，未认证或未知连接的消息一律忽略
         //（takeover/attach 等分支不查 conns 表，无门闩则可被盲注入）
         if !matches!(msg, ClientMessage::Hello { .. }) {
             let inner = self.inner.lock();
-            match inner.conns.get(&conn_id) {
-                Some(e) if e.authed => {}
-                _ => return,
+            let Some(e) = inner.conns.get(&conn_id) else {
+                return;
+            };
+            if !e.authed {
+                return;
+            }
+            // 票据连接是受限会话：只放行该文件的下载分块与心跳，其余消息
+            // （session.* / rpc 写命令 / controller.takeover）一律忽略
+            if e.download_scope.is_some() && !ticket_conn_allows(msg) {
+                return;
             }
         }
         match msg {
@@ -661,18 +698,30 @@ impl RemoteState {
             // client.kick 让 relay 下发 hello.error 并断连（恶意客户端可无视
             // 错误继续发消息，必须门闩 + 真断连）
             ClientMessage::Hello { token, .. } => {
+                let mut download_scope = None;
                 // via_relay：None（未知连接）按中继从严处理
-                if self.conn_via_relay(conn_id) != Some(false)
-                    && !crate::remote_client::verify_relay_token(token)
-                {
-                    crate::remote_client::kick_relay_client(conn_id, "invalid token");
-                    self.remove_conn(conn_id);
-                    return;
+                if self.conn_via_relay(conn_id) != Some(false) {
+                    // 先按普通 token v2 校验；失败再看是否是下载票据
+                    // （`<device_id>.<ticket>`，relay 只按前缀路由不校验）
+                    if !crate::remote_client::verify_relay_token(token) {
+                        match crate::remote_client::verify_download_ticket(token) {
+                            Some(scope) => download_scope = Some(scope),
+                            None => {
+                                crate::remote_client::kick_relay_client(
+                                    conn_id,
+                                    "invalid token",
+                                );
+                                self.remove_conn(conn_id);
+                                return;
+                            }
+                        }
+                    }
                 }
                 let (controller, revision) = {
                     let mut inner = self.inner.lock();
                     if let Some(e) = inner.conns.get_mut(&conn_id) {
                         e.authed = true;
+                        e.download_scope = download_scope.clone();
                     }
                     (inner.controller.map(|c| c.as_id()), inner.revision)
                 };
@@ -685,6 +734,7 @@ impl RemoteState {
                         // 桌面持有 = Some(0)（conn_id 从 1 起，0 保留给桌面）
                         controller,
                         revision,
+                        download_scope,
                     },
                 );
             }
@@ -1116,17 +1166,26 @@ impl RemoteState {
         let inner = self.inner.lock();
         if let Some(subs) = inner.subscribers.get(id) {
             for conn_id in subs {
-                if let Some(tx) = inner.conns.get(conn_id).map(|e| &e.tx) {
-                    let _ = tx.try_send(msg.clone());
+                if let Some(e) = inner.conns.get(conn_id) {
+                    // 票据受限连接不接收任何广播（纵深防御：当前 attach 已被门闩拦截）
+                    if e.download_scope.is_some() {
+                        continue;
+                    }
+                    let _ = e.tx.try_send(msg.clone());
                 }
             }
         }
     }
 
-    /// 广播给全部在线连接（会话列表级信息：exit、working/pending 状态）
+    /// 广播给全部在线连接（会话列表级信息：exit、working/pending 状态）。
+    /// 票据受限连接不接收任何广播——它们只允许文件分块与心跳，
+    /// 不该拿到会话/项目/配置等元数据
     fn broadcast_to_all(&self, msg: ServerMessage) {
         let inner = self.inner.lock();
         for e in inner.conns.values() {
+            if e.download_scope.is_some() {
+                continue;
+            }
             let _ = e.tx.try_send(msg.clone());
         }
     }
@@ -1153,7 +1212,7 @@ impl RemoteState {
             payload,
         };
         for (conn_id, e) in inner.conns.iter() {
-            if Some(*conn_id) == exclude {
+            if Some(*conn_id) == exclude || e.download_scope.is_some() {
                 continue;
             }
             let _ = e.tx.try_send(msg.clone());

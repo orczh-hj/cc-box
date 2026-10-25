@@ -16,6 +16,8 @@ import {
   fileUploadAbort,
   fileDownloadBegin,
   fileDownloadChunk,
+  fileDownloadTicket,
+  fileDownloadTicketChunk,
 } from './tauri'
 
 /** 与服务端 file_transfer.rs CHUNK_SIZE 对齐（512KB；base64 后 ~683KB < relay 4MiB） */
@@ -151,6 +153,117 @@ export async function downloadFile(
     opts.onProgress?.({ transferred, total: begin.size })
   }
   return { blob: new Blob(chunks), fileName: begin.fileName }
+}
+
+// ==================== 一次性票据直链（所有浏览器统一路径） ====================
+
+export interface DownloadTicket {
+  ticket: string
+  url: string
+  fileName: string
+  size: number
+  expiresAt: number
+}
+
+/**
+ * 签发票据并拼出完整下载地址。
+ * urlPath 由服务端按连接类型给出（直连 /dl/…、中继 /?dl=…），前端只拼 origin。
+ */
+export async function getDownloadTicket(path: string): Promise<DownloadTicket> {
+  const t = await fileDownloadTicket(path)
+  return {
+    ticket: t.ticket,
+    url: new URL(t.urlPath, location.origin).href,
+    fileName: t.fileName,
+    size: t.size,
+    expiresAt: t.expiresAt,
+  }
+}
+
+/**
+ * 能力探测：旧 relay/旧桌面对 /dl/ 会返回 200 + index.html（静态 fallback），
+ * 必须确认响应确实是文件，否则会下载到一个 HTML。HEAD 不消耗票据次数。
+ */
+export async function probeDownloadUrl(url: string, size: number): Promise<boolean> {
+  try {
+    const res = await fetch(url, { method: 'HEAD', cache: 'no-store' })
+    if (!res.ok) return false
+    const disposition = res.headers.get('content-disposition') ?? ''
+    const contentType = res.headers.get('content-type') ?? ''
+    const length = Number(res.headers.get('content-length'))
+    if (!disposition.includes('attachment')) return false
+    if (contentType.includes('text/html')) return false
+    return size === 0 || length === size
+  } catch {
+    return false
+  }
+}
+
+/** 触发浏览器原生下载（同源 download 属性 + 服务端 attachment 双保险） */
+export function triggerDownload(url: string, fileName: string): void {
+  const a = document.createElement('a')
+  a.href = url
+  a.download = fileName
+  a.rel = 'noopener'
+  a.style.display = 'none'
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+}
+
+/**
+ * 票据分块拉取（中继模式受限下载页）：断线后调用方按已下载 offset 重试即可续传
+ * （服务端按 offset 幂等读取）。
+ */
+export async function downloadFileByTicket(
+  ticket: string,
+  size: number,
+  opts: TransferOpts & { shouldRetry?(err: unknown): boolean } = {},
+): Promise<{ blob: Blob; uploaded: number }> {
+  const chunks: BlobPart[] = []
+  const cancelled = () => opts.shouldCancel?.() === true
+  let transferred = 0
+  let eof = false
+  let failures = 0
+  while (!eof) {
+    if (cancelled()) throw new TransferCancelled()
+    let c: { dataB64: string; bytes: number; eof: boolean }
+    try {
+      // offset 幂等：断线重连后重拉同一块即可续传
+      c = await fileDownloadTicketChunk(ticket, transferred)
+      failures = 0
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      // 票据失效/源文件变化/命令不可用：重试无意义，立即失败
+      if (
+        msg.includes('ticket') ||
+        msg.includes('changed during download') ||
+        msg.includes('offset beyond end') ||
+        msg.includes('cannot read') ||
+        msg.includes('not allowed')
+      ) {
+        throw e
+      }
+      // 网络抖动/重连中：等待恢复后按原 offset 继续（上限约 60s）
+      failures++
+      if (failures > 60 || (opts.shouldRetry && !opts.shouldRetry(e))) throw e
+      await new Promise((r) => setTimeout(r, 1000))
+      continue
+    }
+    if (c.bytes === 0 && !c.eof) {
+      throw new Error('zero progress: empty chunk before eof')
+    }
+    if (c.bytes > 0) {
+      const bin = atob(c.dataB64)
+      const arr = new Uint8Array(bin.length)
+      for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i)
+      chunks.push(arr as unknown as BlobPart)
+      transferred += c.bytes
+    }
+    eof = c.eof
+    opts.onProgress?.({ transferred, total: size })
+  }
+  return { blob: new Blob(chunks), uploaded: transferred }
 }
 
 /** 纯安全字符可直接裸写（字母数字 + `/ . _ -`）——不含 Windows 反斜杠、

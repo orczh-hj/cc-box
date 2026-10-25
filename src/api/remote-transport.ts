@@ -12,6 +12,7 @@ import {
   PROTOCOL_VERSION,
   parseServerMessage,
   type ClientMessage,
+  type DownloadScope,
   type ServerMessage,
 } from '../../remote/protocol/protocol'
 import { transportEnv } from './env'
@@ -31,6 +32,14 @@ export type RemoteConnState =
   | 'closed'
 
 type EventHandler = (payload: unknown) => void
+
+/** 票据入口：`?dl=<device_id>.<ticket>`（query 更不易被微信复制链接截断） */
+function parseDownloadTicket(): string | null {
+  if (typeof location === 'undefined') return null
+  const fromQuery = new URLSearchParams(location.search).get('dl')
+  if (fromQuery) return fromQuery
+  return new URLSearchParams(location.hash.slice(1)).get('dl') || null
+}
 
 class RemoteTransportImpl implements Transport {
   readonly env = transportEnv
@@ -65,6 +74,22 @@ class RemoteTransportImpl implements Transport {
 
   /** 认证/连接状态（TokenGate 与主 UI 的挂载时机依据） */
   onConnState: (state: RemoteConnState) => void = () => {}
+
+  /** 票据模式：URL 携带 dl= 时以票据为 token 建连（受限会话，不写 localStorage） */
+  readonly downloadTicket: string | null = parseDownloadTicket()
+  /** 裸票据（去掉 `<device_id>.` 前缀）：`file_download_ticket_chunk` 只接受 32 hex */
+  get downloadTicketSecret(): string | null {
+    const t = this.downloadTicket
+    if (!t) return null
+    const dot = t.indexOf('.')
+    return dot >= 0 ? t.slice(dot + 1) : t
+  }
+  private _downloadScope: DownloadScope | null = null
+  get downloadScope(): DownloadScope | null {
+    return this._downloadScope
+  }
+  /** 票据认证成功（hello.ok 下发范围）后触发，DownloadTicketPage 消费 */
+  onDownloadScope: (scope: DownloadScope) => void = () => {}
 
   get connState(): RemoteConnState {
     return this._connState
@@ -118,8 +143,17 @@ class RemoteTransportImpl implements Transport {
     }
   }
 
-  /** 入口：解析 URL（#token= / #pair=）或 localStorage，发起连接 */
+  /** 入口：解析 URL（?dl= / #token= / #pair=）或 localStorage，发起连接 */
   async boot(): Promise<void> {
+    // 票据页优先：受限会话只拉取单个文件，不进入主 UI 流程
+    if (this.downloadTicket) {
+      this.setConnState('connecting')
+      this._viaRelay = true
+      this.token = this.downloadTicket
+      this.closedByUser = false
+      this.open()
+      return
+    }
     const params = new URLSearchParams(location.hash.slice(1))
     const hashToken = params.get('token')
     const pairCode = params.get('pair')
@@ -235,6 +269,10 @@ class RemoteTransportImpl implements Transport {
         this._controllerLabel =
           msg.controller == null ? '' : msg.controller === 0 ? 'desktop' : String(msg.controller)
         this.appliedRevision = msg.revision
+        if (msg.downloadScope) {
+          this._downloadScope = msg.downloadScope
+          this.onDownloadScope(msg.downloadScope)
+        }
         // 连接/重连成功：服务端订阅集按连接划分，重连 = 全部 attach 失效，
         // 广播本地事件让会话层重拉列表并重新 attach 当前 Tab
         this.dispatchEvent('remote-connected', {})

@@ -36,6 +36,12 @@ pub const DEFAULT_FILE_MAX_DIRECT: u64 = 200 * 1024 * 1024;
 pub const DEFAULT_FILE_MAX_RELAY: u64 = 20 * 1024 * 1024;
 const SESSION_TTL: Duration = Duration::from_secs(600);
 const MAX_ACTIVE_UPLOADS: usize = 8;
+/// 下载票据 TTL：微信把链接交给系统浏览器/用户稍后打开都可能延迟
+const TICKET_TTL: Duration = Duration::from_secs(600);
+/// 票据并发上限（防止内存表被大量签发打满；成功下载会立即释放，正常不会接近）
+const MAX_TICKETS: usize = 64;
+/// 票据可用次数：20MB/512KB=40 块，再加 Range/重试余量
+const TICKET_USES: u32 = 256;
 /// 项目内上传目录名（会话 cwd 下按需创建）
 pub(crate) const UPLOAD_DIR_NAME: &str = ".cc-box-files";
 /// 上传临时文件名：.upload-<transferId>.part（file_list 过滤、启动清理识别）
@@ -228,19 +234,48 @@ struct DownloadSession {
     last_active: Instant,
 }
 
+/// 一次性下载票据：让系统浏览器/系统下载器不带 token 也能直接取文件
+/// （微信把 blob:/WebView 内 URL 交给外部进程时两者都不可用）。
+/// **不绑连接**——手机切到系统下载器后 WS 常立即断开，绑 conn 会让票据
+/// 随 cleanup_conn 一起失效；只按 TTL/次数回收。
+struct DownloadTicket {
+    path: PathBuf,
+    file_name: String,
+    size: u64,
+    mtime: Option<SystemTime>,
+    created: Instant,
+    uses_left: u32,
+    last_active: Instant,
+}
+
 static UPLOADS: LazyLock<Mutex<HashMap<String, UploadSession>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 static DOWNLOADS: LazyLock<Mutex<HashMap<String, DownloadSession>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+static TICKETS: LazyLock<Mutex<HashMap<String, DownloadTicket>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn is_hex32(s: &str) -> bool {
+    s.len() == 32 && s.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
 
 fn new_transfer_id() -> String {
     uuid::Uuid::new_v4().simple().to_string()
 }
 
 fn mtime_ms(md: &fs::Metadata) -> Option<u64> {
-    md.modified()
-        .ok()
-        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+    system_time_ms(md.modified().ok())
+}
+
+fn system_time_ms(t: Option<SystemTime>) -> Option<u64> {
+    t.and_then(|t| t.duration_since(UNIX_EPOCH).ok())
         .map(|d| d.as_millis() as u64)
 }
 
@@ -586,17 +621,12 @@ pub struct DownloadBeginResult {
     pub mtime: Option<u64>,
 }
 
-/// 下载会话开启：白名单（已知项目内）+ is_file + 限额；会话固化
-/// path/size/mtime（一致性锚点，后续 chunk 逐块比对）
-pub fn download_begin(
-    conn_id: Option<u64>,
+/// 下载源校验：白名单（已知项目内）+ is_file + 限额。
+/// 分块会话与一次性票据共用，保证两条下载路径的准入完全一致。
+fn validate_download_source(
     path: &str,
-    via_relay: Option<bool>,
-) -> Result<DownloadBeginResult, String> {
-    sweep_stale();
-    let conn_id = conn_id.ok_or("file transfer is remote-only")?;
-    let via_relay = via_relay.unwrap_or(true);
-
+    via_relay: bool,
+) -> Result<(PathBuf, String, u64, Option<SystemTime>), String> {
     let p_c = Path::new(path)
         .canonicalize()
         .map_err(|_| format!("not found: {}", path))?;
@@ -622,6 +652,30 @@ pub fn download_begin(
         .and_then(|n| n.to_str())
         .unwrap_or("download")
         .to_string();
+    Ok((p_c, file_name, size, md.modified().ok()))
+}
+
+/// 源文件一致性校验（打开后按句柄 metadata 比对——消除 stat→open 的 TOCTOU）
+pub(crate) fn source_unchanged(
+    md: &fs::Metadata,
+    size: u64,
+    mtime: Option<SystemTime>,
+) -> bool {
+    md.len() == size && md.modified().ok() == mtime
+}
+
+/// 下载会话开启：白名单（已知项目内）+ is_file + 限额；会话固化
+/// path/size/mtime（一致性锚点，后续 chunk 逐块比对）
+pub fn download_begin(
+    conn_id: Option<u64>,
+    path: &str,
+    via_relay: Option<bool>,
+) -> Result<DownloadBeginResult, String> {
+    sweep_stale();
+    let conn_id = conn_id.ok_or("file transfer is remote-only")?;
+    let via_relay = via_relay.unwrap_or(true);
+
+    let (p_c, file_name, size, mtime) = validate_download_source(path, via_relay)?;
 
     let download_id = new_transfer_id();
     {
@@ -636,7 +690,7 @@ pub fn download_begin(
                 path: p_c.clone(),
                 file_name: file_name.clone(),
                 size,
-                mtime: md.modified().ok(),
+                mtime,
                 via_relay,
                 last_active: Instant::now(),
             },
@@ -653,7 +707,7 @@ pub fn download_begin(
         download_id,
         file_name,
         size,
-        mtime: mtime_ms(&md),
+        mtime: system_time_ms(mtime),
     })
 }
 
@@ -708,6 +762,175 @@ pub fn download_chunk(
         bytes: n as u64,
         eof,
     })
+}
+
+// ==================== 一次性下载票据 ====================
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DownloadTicketInfo {
+    pub ticket: String,
+    pub file_name: String,
+    pub size: u64,
+    /// 过期时间（Unix 毫秒）
+    pub expires_at: u64,
+}
+
+/// 票据解析结果（直连流式与中继分块共用）
+pub(crate) struct TicketAccess {
+    pub path: PathBuf,
+    pub file_name: String,
+    pub size: u64,
+    pub mtime: Option<SystemTime>,
+}
+
+/// 签发票据：准入校验与分块下载完全一致（validate_download_source）。
+/// conn_id 仅用于日志，**不写入票据**——下载交给系统浏览器后 WS 会断开。
+pub fn create_download_ticket(
+    conn_id: Option<u64>,
+    path: &str,
+    via_relay: Option<bool>,
+) -> Result<DownloadTicketInfo, String> {
+    sweep_stale();
+    let conn_id = conn_id.ok_or("file transfer is remote-only")?;
+    let via_relay = via_relay.unwrap_or(true);
+    let (p_c, file_name, size, mtime) = validate_download_source(path, via_relay)?;
+
+    let ticket = new_transfer_id();
+    {
+        let mut tickets = TICKETS.lock();
+        if tickets.len() >= MAX_TICKETS {
+            return Err("too many pending downloads".into());
+        }
+        tickets.insert(
+            ticket.clone(),
+            DownloadTicket {
+                path: p_c.clone(),
+                file_name: file_name.clone(),
+                size,
+                mtime,
+                created: Instant::now(),
+                uses_left: TICKET_USES,
+                last_active: Instant::now(),
+            },
+        );
+    }
+    log::info!(
+        "[file-transfer] ticket issued conn={} via={} path={} size={}",
+        conn_id,
+        conn_kind(via_relay),
+        p_c.display(),
+        size
+    );
+    Ok(DownloadTicketInfo {
+        ticket,
+        file_name,
+        size,
+        expires_at: now_ms() + TICKET_TTL.as_millis() as u64,
+    })
+}
+
+/// 票据是否有效（认证/探活）：只续期，不扣次数
+pub(crate) fn touch_ticket(ticket: &str) -> bool {
+    if !is_hex32(ticket) {
+        return false;
+    }
+    let mut tickets = TICKETS.lock();
+    let valid = match tickets.get(ticket) {
+        Some(t) => t.created.elapsed() <= TICKET_TTL && t.uses_left > 0,
+        None => false,
+    };
+    if !valid {
+        tickets.remove(ticket);
+        return false;
+    }
+    if let Some(t) = tickets.get_mut(ticket) {
+        t.last_active = Instant::now();
+    }
+    true
+}
+
+/// 只看票据不扣次数（HTTP HEAD 探测：前端用它判断直链能力与错误）
+pub(crate) fn peek_ticket(ticket: &str) -> Option<TicketAccess> {
+    if !is_hex32(ticket) {
+        return None;
+    }
+    let tickets = TICKETS.lock();
+    let t = tickets.get(ticket)?;
+    if t.created.elapsed() > TICKET_TTL || t.uses_left == 0 {
+        return None;
+    }
+    Some(TicketAccess {
+        path: t.path.clone(),
+        file_name: t.file_name.clone(),
+        size: t.size,
+        mtime: t.mtime,
+    })
+}
+
+/// 取票据并扣一次使用额度（HTTP GET / 数据块读取前调用）
+pub(crate) fn take_ticket(ticket: &str) -> Result<TicketAccess, String> {
+    if !is_hex32(ticket) {
+        return Err("invalid download ticket".into());
+    }
+    let mut tickets = TICKETS.lock();
+    let valid = match tickets.get(ticket) {
+        Some(t) => t.created.elapsed() <= TICKET_TTL && t.uses_left > 0,
+        None => false,
+    };
+    if !valid {
+        tickets.remove(ticket);
+        return Err("download ticket not found or expired".into());
+    }
+    let t = tickets.get_mut(ticket).expect("checked above");
+    t.uses_left -= 1;
+    t.last_active = Instant::now();
+    Ok(TicketAccess {
+        path: t.path.clone(),
+        file_name: t.file_name.clone(),
+        size: t.size,
+        mtime: t.mtime,
+    })
+}
+
+/// 票据分块读取（中继模式）：票据即权限，不要求 conn 绑定
+pub fn download_ticket_chunk(ticket: &str, offset: u64) -> Result<DownloadChunkResult, String> {
+    let access = take_ticket(ticket)?;
+    if offset > access.size {
+        return Err(format!("offset beyond end of file (size {})", access.size));
+    }
+
+    let mut f = File::open(&access.path).map_err(|e| format!("cannot read source: {}", e))?;
+    let md = f
+        .metadata()
+        .map_err(|e| format!("cannot read source: {}", e))?;
+    if !source_unchanged(&md, access.size, access.mtime) {
+        return Err("source file changed during download".into());
+    }
+    f.seek(SeekFrom::Start(offset))
+        .map_err(|e| format!("cannot seek source: {}", e))?;
+    let want = ((access.size - offset) as usize).min(CHUNK_SIZE);
+    let mut buf = vec![0u8; want];
+    let n = f
+        .read(&mut buf)
+        .map_err(|e| format!("source read failed: {}", e))?;
+    buf.truncate(n);
+
+    let eof = offset + n as u64 >= access.size;
+    if eof {
+        // 中继下载完成：立即释放槽位（直连由 TicketGuard 在流结束时释放）
+        TICKETS.lock().remove(ticket);
+    }
+    Ok(DownloadChunkResult {
+        data_b64: base64::engine::general_purpose::STANDARD.encode(&buf),
+        bytes: n as u64,
+        eof,
+    })
+}
+
+/// 释放票据（直连流结束/中断时由 TicketGuard 调用；幂等）
+pub(crate) fn remove_ticket(ticket: &str) {
+    TICKETS.lock().remove(ticket);
 }
 
 // ==================== 列文件 ====================
@@ -784,9 +1007,17 @@ pub fn sweep_stale() {
         let _ = fs::remove_file(p);
     }
     DOWNLOADS.lock().retain(|_, s| now.duration_since(s.last_active) <= SESSION_TTL);
+    // 票据按签发时刻绝对过期（滑动续期会让泄露链接长期有效）；
+    // 已被使用且闲置 1 分钟的票据视为下载已结束/放弃，立即释放槽位
+    TICKETS.lock().retain(|_, t| {
+        let expired = now.duration_since(t.created) > TICKET_TTL;
+        let consumed_idle = t.uses_left < TICKET_USES
+            && now.duration_since(t.last_active) > Duration::from_secs(60);
+        !expired && !consumed_idle
+    });
 }
 
-/// 测试辅助：把全部会话标记为过期（触发 TTL sweep 路径）
+/// 测试辅助：把全部会话/票据标记为过期（触发 TTL sweep 路径）
 #[cfg(test)]
 pub(crate) fn test_expire_sessions() {
     let stale = Instant::now()
@@ -798,9 +1029,14 @@ pub(crate) fn test_expire_sessions() {
     for s in DOWNLOADS.lock().values_mut() {
         s.last_active = stale;
     }
+    for t in TICKETS.lock().values_mut() {
+        t.created = stale;
+    }
 }
 
-/// 连接断开时清理其传输会话（防僵死会话占满配额；由 remote_state remove_conn 调用）
+/// 连接断开时清理其传输会话（防僵死会话占满配额；由 remote_state remove_conn 调用）。
+/// **不清理 TICKETS**：票据用于把下载交给系统浏览器/下载器，此时 WS 必然断开，
+/// 随连接回收会让直链立即失效；票据只按 TTL/次数回收。
 pub fn cleanup_conn(conn_id: u64) {
     let expired_parts: Vec<PathBuf> = {
         let mut uploads = UPLOADS.lock();

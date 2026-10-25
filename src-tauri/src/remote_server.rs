@@ -5,16 +5,22 @@
 //! - `GET /ws` WebSocket，首条消息必须是 hello（token 认证）
 //! - 绑定 0.0.0.0:port（默认 8747），仅在远程开关开启时启动
 
+use std::io::SeekFrom;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
 use std::sync::LazyLock;
 use std::time::Duration;
 
+use axum::body::Body;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::response::Response;
+use axum::extract::Path as AxumPath;
+use axum::http::{header, HeaderMap, Method, StatusCode};
+use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
 use futures_util::{sink::SinkExt, StreamExt};
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
+use tokio_util::io::ReaderStream;
 use parking_lot::Mutex;
 use tauri::AppHandle;
 use tokio::sync::{mpsc, watch};
@@ -39,6 +45,8 @@ static RUNNING: AtomicBool = AtomicBool::new(false);
 /// 实际监听端口（bind 成功时记录）：stop 后等待端口释放以它为准——
 /// 不能现读配置（用户可能在停止前改过端口配置，等错端口）
 static CURRENT_PORT: AtomicU16 = AtomicU16::new(0);
+/// 共享配置监视代际：每次 start 递增，旧 watchdog 在下一轮自行退出
+static WATCHDOG_GEN: AtomicU64 = AtomicU64::new(0);
 
 /// 应用启动时调用：开关开启则启动服务器
 pub async fn init(_app_handle: AppHandle) {
@@ -75,6 +83,8 @@ pub async fn start() -> Result<(), String> {
 
     let app = Router::new()
         .route("/ws", get(ws_handler))
+        // 一次性票据直链（微信/系统浏览器不带 token 也能下载）
+        .route("/dl/:ticket", get(dl_handler))
         // Web UI 静态资源：磁盘目录（CC_BOX_WEB_DIR）优先、内嵌兜底
         .fallback(|uri| cc_box_web_assets::serve_static(WEB_DIR_ENV, uri));
 
@@ -85,10 +95,8 @@ pub async fn start() -> Result<(), String> {
         Ok(None) => return Ok(()),
         Err(e) => {
             log::error!("[remote] Failed to bind {}: {}", addr, e);
-            return Err(format!(
-                "failed to bind port {} (another CC-Box instance may be running): {}",
-                port, e
-            ));
+            // bind_with_retry 已给出完整、可执行的错误文案（含僵死实例提示）
+            return Err(e);
         }
     };
 
@@ -103,6 +111,7 @@ pub async fn start() -> Result<(), String> {
         }
     });
     *SERVER_TASK.lock() = Some(task);
+    spawn_config_watchdog();
 
     log::info!("[remote] Remote server listening on http://0.0.0.0:{}", port);
     // URL 含 token fragment，日志只打码展示（完整地址经 UI 复制/二维码给出）
@@ -112,6 +121,46 @@ pub async fn start() -> Result<(), String> {
         &token[..4.min(token.len())]
     );
     Ok(())
+}
+
+/// 远程开关是共享配置：任一实例关闭后，正在服务的宿主必须跟随停止。
+/// 多实例没有跨进程通道，用低频轮询兜底（读一个小 JSON，3s 一次开销可忽略）。
+/// 只在真正监听成功（非宿主制跳过）时启动；代际保证重开时旧 watchdog 退出。
+fn spawn_config_watchdog() {
+    let generation = WATCHDOG_GEN.fetch_add(1, Ordering::SeqCst) + 1;
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            if WATCHDOG_GEN.load(Ordering::SeqCst) != generation || !is_running() {
+                return;
+            }
+            let enabled = match crate::store::get_app_config() {
+                // 只有明确 false 才停；配置缺失/读失败都不视为关闭，避免误停
+                Ok(c) => c.remote.and_then(|r| r.enabled),
+                Err(_) => continue,
+            };
+            if enabled != Some(false) {
+                continue;
+            }
+            // 停服前复查代际与配置：另一实例可能刚重新开启（其 start 会推进
+            // 代际），此时不能把新服务误停
+            if WATCHDOG_GEN.load(Ordering::SeqCst) != generation || !is_running() {
+                return;
+            }
+            let still_disabled = crate::store::get_app_config()
+                .map(|c| c.remote.and_then(|r| r.enabled) == Some(false))
+                .unwrap_or(false);
+            if !still_disabled {
+                continue;
+            }
+            log::info!(
+                "[remote] shared config disabled by another instance, stopping server"
+            );
+            stop().await;
+            crate::remote_client::disconnect();
+            return;
+        }
+    });
 }
 
 /// 停止服务器：abort 监听任务 + 通知所有在线 WS 连接退出（各自清理后 remove_conn）。
@@ -126,10 +175,16 @@ pub async fn stop() {
     }
     let _ = SHUTDOWN.0.send(true);
     let port = CURRENT_PORT.swap(0, Ordering::SeqCst);
-    if let Some(task) = SERVER_TASK.lock().take() {
-        task.abort();
-    }
+    let task = SERVER_TASK.lock().take();
     RUNNING.store(false, Ordering::SeqCst);
+    if let Some(task) = task {
+        task.abort();
+        // abort 只是请求取消；必须等 axum::serve 的 future 真正 drop，listener
+        // 才会关闭。不等就会在 Windows 上留下「LISTENING 但不再 accept/响应」
+        // 的僵死 socket：后续 bind 10048，且 probe_host 也认不出宿主。
+        // 2s 上限防极端情况下挂死 UI；超时后仍走下方端口轮询。
+        let _ = tokio::time::timeout(Duration::from_secs(2), task).await;
+    }
     if port != 0 {
         let addr = SocketAddr::from(([0, 0, 0, 0], port));
         // 注：等待期间若并发 start() 抢先绑到端口，此处会空转满 5s 才返回——
@@ -177,7 +232,27 @@ async fn bind_with_retry(
             }
         }
     }
-    Err(last_err)
+    // 被占用但不响应 = 上一实例的僵死 listener（历史上 abort 未 await 导致）；
+    // 给用户可执行的提示，而不是笼统的「可能已有实例运行」
+    let stale = tokio::time::timeout(
+        Duration::from_millis(300),
+        tokio::net::TcpStream::connect(("127.0.0.1", port)),
+    )
+    .await
+    .map(|r| r.is_ok())
+    .unwrap_or(false);
+    if stale {
+        Err(format!(
+            "failed to bind port {}: {} (port accepts connections but does not respond — \
+             restart the stale CC-Box instance)",
+            port, last_err
+        ))
+    } else {
+        Err(format!(
+            "failed to bind port {} (another CC-Box instance may be running): {}",
+            port, last_err
+        ))
+    }
 }
 
 pub fn is_running() -> bool {
@@ -426,4 +501,258 @@ async fn handle_socket(mut socket: WebSocket) {
     REMOTE_STATE.remove_conn(conn_id);
     send_task.abort();
     log::info!("[remote] conn {} closed", conn_id);
+}
+
+// ==================== 一次性票据直链 ====================
+
+enum RangeSpec {
+    Full,
+    Partial(u64, u64),
+    /// 起点 >= 文件长度：按 RFC 返回 416 + `Content-Range: bytes */size`
+    Unsatisfiable,
+}
+
+/// 直连流结束/中断时释放票据（move 进 stream，drop 即回收）
+struct TicketGuard(String);
+
+impl Drop for TicketGuard {
+    fn drop(&mut self) {
+        crate::file_transfer::remove_ticket(&self.0);
+    }
+}
+
+/// 票据直链下载：微信把链接交给系统浏览器/系统下载器后不带 token，
+/// 票据本身即权限（128bit、TTL 10 分钟、单文件）。HEAD 只探测不扣次数。
+async fn dl_handler(
+    method: Method,
+    AxumPath(ticket): AxumPath<String>,
+    headers: HeaderMap,
+) -> Response {
+    let is_head = method == Method::HEAD;
+    let access = if is_head {
+        crate::file_transfer::peek_ticket(&ticket)
+    } else {
+        crate::file_transfer::take_ticket(&ticket).ok()
+    };
+    let Some(access) = access else {
+        return dl_error(
+            StatusCode::GONE,
+            "download ticket not found or expired",
+        );
+    };
+
+    let mut file = match tokio::fs::File::open(&access.path).await {
+        Ok(f) => f,
+        Err(_) => return dl_error(StatusCode::NOT_FOUND, "file not found"),
+    };
+    let md = match file.metadata().await {
+        Ok(m) => m,
+        Err(_) => return dl_error(StatusCode::NOT_FOUND, "cannot read source"),
+    };
+    // 打开后按句柄元数据复核（消除 stat→open 的 TOCTOU）
+    if !crate::file_transfer::source_unchanged(&md, access.size, access.mtime) {
+        return dl_error(
+            StatusCode::CONFLICT,
+            "source file changed during download",
+        );
+    }
+
+    let (start, end, status) = match parse_range(&headers, access.size) {
+        RangeSpec::Partial(s, e) => (s, e, StatusCode::PARTIAL_CONTENT),
+        RangeSpec::Full => (0, access.size.saturating_sub(1), StatusCode::OK),
+        RangeSpec::Unsatisfiable => {
+            return Response::builder()
+                .status(StatusCode::RANGE_NOT_SATISFIABLE)
+                .header(header::CONTENT_RANGE, format!("bytes */{}", access.size))
+                .body(Body::empty())
+                .unwrap_or_else(|_| {
+                    dl_error(StatusCode::INTERNAL_SERVER_ERROR, "response build failed")
+                });
+        }
+    };
+    let len = if access.size == 0 { 0 } else { end - start + 1 };
+
+    if start > 0 && file.seek(SeekFrom::Start(start)).await.is_err() {
+        return dl_error(StatusCode::INTERNAL_SERVER_ERROR, "cannot seek source");
+    }
+
+    let body = if is_head {
+        Body::empty()
+    } else {
+        let guard = TicketGuard(ticket.clone());
+        Body::from_stream(ReaderStream::new(file.take(len)).map(move |chunk| {
+            let _ = &guard; // 流结束或客户端断开时 drop → 释放票据
+            chunk
+        }))
+    };
+
+    let mut builder = Response::builder()
+        .status(status)
+        .header(header::CONTENT_TYPE, "application/octet-stream")
+        .header(header::CONTENT_LENGTH, len.to_string())
+        .header(
+            header::CONTENT_DISPOSITION,
+            content_disposition(&access.file_name),
+        )
+        .header(header::CACHE_CONTROL, "no-store")
+        .header(header::ACCEPT_RANGES, "bytes")
+        .header("referrer-policy", "no-referrer");
+    if status == StatusCode::PARTIAL_CONTENT {
+        builder = builder.header(
+            header::CONTENT_RANGE,
+            format!("bytes {}-{}/{}", start, end, access.size),
+        );
+    }
+    builder.body(body).unwrap_or_else(|_| {
+        dl_error(StatusCode::INTERNAL_SERVER_ERROR, "response build failed")
+    })
+}
+
+fn dl_error(status: StatusCode, msg: &str) -> Response {
+    (status, msg.to_string()).into_response()
+}
+
+/// 单区间 Range（多区间与 `bytes=-N` 尾部范围不支持 → 回退全量 200）
+fn parse_range(headers: &HeaderMap, size: u64) -> RangeSpec {
+    if size == 0 {
+        return RangeSpec::Full;
+    }
+    let Some(raw) = headers.get(header::RANGE).and_then(|v| v.to_str().ok()) else {
+        return RangeSpec::Full;
+    };
+    let Some(spec) = raw.strip_prefix("bytes=") else {
+        return RangeSpec::Full;
+    };
+    if spec.contains(',') {
+        return RangeSpec::Full;
+    }
+    let Some((a, b)) = spec.split_once('-') else {
+        return RangeSpec::Full;
+    };
+    let Ok(start) = a.trim().parse::<u64>() else {
+        return RangeSpec::Full;
+    };
+    if start >= size {
+        return RangeSpec::Unsatisfiable;
+    }
+    let end = if b.trim().is_empty() {
+        size - 1
+    } else {
+        match b.trim().parse::<u64>() {
+            Ok(v) => v.min(size - 1),
+            Err(_) => return RangeSpec::Full,
+        }
+    };
+    if end < start {
+        return RangeSpec::Full;
+    }
+    RangeSpec::Partial(start, end)
+}
+
+/// RFC 5987 文件名（中文/空格等）+ ASCII fallback，保证各下载器都能存对名字
+fn content_disposition(name: &str) -> String {
+    let ascii: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_graphic() && c != '"' && c != '\\' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    format!(
+        "attachment; filename=\"{}\"; filename*=UTF-8''{}",
+        ascii,
+        rfc5987_encode(name)
+    )
+}
+
+fn rfc5987_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.as_bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(*b as char)
+            }
+            _ => out.push_str(&format!("%{:02X}", b)),
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn range_header(v: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert(header::RANGE, v.parse().unwrap());
+        h
+    }
+
+    #[test]
+    fn RemoteServer_Range_Partial_1() {
+        assert!(matches!(
+            parse_range(&range_header("bytes=10-19"), 100),
+            RangeSpec::Partial(10, 19)
+        ));
+        assert!(matches!(
+            parse_range(&range_header("bytes=10-"), 100),
+            RangeSpec::Partial(10, 99)
+        ));
+    }
+
+    #[test]
+    fn RemoteServer_Range_ClampsEnd_1() {
+        assert!(matches!(
+            parse_range(&range_header("bytes=90-200"), 100),
+            RangeSpec::Partial(90, 99)
+        ));
+    }
+
+    #[test]
+    fn RemoteServer_Range_Unsatisfiable_1() {
+        // 起点越界 → 416
+        assert!(matches!(
+            parse_range(&range_header("bytes=100-"), 100),
+            RangeSpec::Unsatisfiable
+        ));
+        assert!(matches!(
+            parse_range(&range_header("bytes=1000-1200"), 100),
+            RangeSpec::Unsatisfiable
+        ));
+    }
+
+    #[test]
+    fn RemoteServer_Range_UnsupportedFallsBackFull_1() {
+        // 多区间 / 尾部范围 / 反向 / 无 Range / 空文件 → 全量 200
+        assert!(matches!(
+            parse_range(&range_header("bytes=0-1,5-6"), 100),
+            RangeSpec::Full
+        ));
+        assert!(matches!(
+            parse_range(&range_header("bytes=-10"), 100),
+            RangeSpec::Full
+        ));
+        assert!(matches!(
+            parse_range(&range_header("bytes=10-5"), 100),
+            RangeSpec::Full
+        ));
+        assert!(matches!(parse_range(&HeaderMap::new(), 100), RangeSpec::Full));
+        assert!(matches!(
+            parse_range(&range_header("bytes=0-"), 0),
+            RangeSpec::Full
+        ));
+    }
+
+    #[test]
+    fn RemoteServer_ContentDisposition_Rfc5987_1() {
+        let cd = content_disposition("报告 2024.pdf");
+        assert!(cd.starts_with("attachment; "));
+        assert!(cd.contains("filename*=UTF-8''"));
+        // 中文百分号编码（报 = E6 8A A5）
+        assert!(cd.contains("%E6%8A%A5%E5%91%8A"));
+        assert!(cd.contains("filename=\""));
+    }
 }

@@ -268,6 +268,8 @@ pub fn run(initial_dir: Option<String>) {
             commands::file_upload_abort,
             commands::file_download_begin,
             commands::file_download_chunk,
+            commands::file_download_ticket,
+            commands::file_download_ticket_chunk,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

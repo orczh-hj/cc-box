@@ -69,7 +69,7 @@
             type="text"
             class="dl-input"
             :placeholder="t('filesDownloadPlaceholder')"
-            :disabled="dlState === 'transferring'"
+            :disabled="dlInFlight"
             @keydown.enter="startDownload"
           />
           <button
@@ -88,13 +88,13 @@
         <div class="dl-actions">
           <button
             class="primary-btn compact dl-main-btn"
-            :disabled="dlState === 'transferring' || !dlPath.trim()"
+            :disabled="dlInFlight || !dlPath.trim()"
             @click="startDownload"
           >{{ t('filesDownloadBtn') }}</button>
           <button
             class="secondary-btn compact"
             :class="{ active: browserVisible }"
-            :disabled="dlState === 'transferring'"
+            :disabled="dlInFlight"
             @click="toggleBrowser"
           >{{ t('filesBrowse') }}</button>
           <button
@@ -139,8 +139,11 @@
           </div>
         </div>
 
-        <!-- transferring -->
-        <template v-if="dlState === 'transferring'">
+        <!-- preparing：签发票据 + 能力探测 -->
+        <p v-if="dlState === 'preparing'" class="hint">{{ t('filesPreparing') }}</p>
+
+        <!-- transferring：仅旧版本降级路径（Blob 分块） -->
+        <template v-else-if="dlState === 'transferring'">
           <div class="transfer-status">
             <div class="progress-row">
               <div class="progress-bar">
@@ -152,7 +155,12 @@
           </div>
         </template>
 
-        <!-- done -->
+        <!-- started：直连已交给浏览器原生下载 / 微信仅呈现链接 -->
+        <p v-else-if="dlState === 'started'" class="done-text">
+          {{ wechat ? t('filesLinkReady') : t('filesDownloadStarted', { name: dlResult }) }}
+        </p>
+
+        <!-- done：中继当前页拉取完成 / 降级 Blob 已保存 -->
         <p v-else-if="dlState === 'done' && dlResult" class="done-text">
           {{ t('filesDownloadDone', { name: dlResult }) }}
         </p>
@@ -164,6 +172,17 @@
             <button v-if="dlErrorIsController" class="primary-btn" @click="takeover">{{ t('filesTakeover') }}</button>
             <button class="secondary-btn" @click="dlState = 'idle'">{{ t('filesRetry') }}</button>
           </div>
+        </template>
+
+        <!-- 链接：成功路径统一展示（微信复制到系统浏览器；普通浏览器已自动开始） -->
+        <template v-if="dlUrl && (dlState === 'started' || dlState === 'done')">
+          <div class="path-row">
+            <code class="path-code ellipsis" :title="dlUrl">{{ dlUrl }}</code>
+            <button class="secondary-btn" @click="copyDownloadLink">
+              {{ dlLinkCopied ? t('filesCopied') : t('filesCopyLink') }}
+            </button>
+          </div>
+          <p class="hint">{{ t('filesDownloadHint') }}</p>
         </template>
       </section>
     </div>
@@ -189,10 +208,16 @@ import { controllerTakeover, fileList, fileTransferLimits, type FileEntryLite, t
 import {
   uploadFile,
   downloadFile,
+  downloadFileByTicket,
+  getDownloadTicket,
+  probeDownloadUrl,
+  triggerDownload,
   quotePath,
   TransferCancelled,
+  type DownloadTicket,
 } from '@/api/fileTransfer'
 import { saveBlobToFile } from '@/utils/platform'
+import { isWeChat } from '@/utils/ua'
 
 const { t } = useI18n()
 defineEmits<{ close: [] }>()
@@ -323,13 +348,23 @@ async function copyUploaded() {
 
 // ==================== 下载 ====================
 
-const dlState = ref<TransferState>('idle')
+type DlState = 'idle' | 'preparing' | 'started' | 'transferring' | 'done' | 'error'
+
+const dlState = ref<DlState>('idle')
 const dlPath = ref('')
 const dlProgress = ref({ transferred: 0, total: 0 })
 const dlResult = ref('')
+const dlUrl = ref('')
 const dlError = ref('')
 const dlCancelled = ref(false)
 const dlCopied = ref(false)
+const dlLinkCopied = ref(false)
+const wechat = isWeChat()
+
+/** 进行中：禁止重复触发与编辑路径 */
+const dlInFlight = computed(
+  () => dlState.value === 'preparing' || dlState.value === 'transferring',
+)
 
 const dlPercent = computed(() =>
   dlProgress.value.total > 0 ? Math.floor((dlProgress.value.transferred / dlProgress.value.total) * 100) : 0,
@@ -342,6 +377,8 @@ function clearDownloadPath() {
   dlState.value = 'idle'
   dlError.value = ''
   dlCopied.value = false
+  dlLinkCopied.value = false
+  dlUrl.value = ''
 }
 
 /** 仅复制当前路径（用户只想取路径、不下载） */
@@ -353,13 +390,10 @@ async function copyDownloadPath() {
   setTimeout(() => { dlCopied.value = false }, 2000)
 }
 
-async function startDownload() {
-  // 输入框支持项目内相对路径或绝对路径（服务端要求绝对路径，相对路径在此解析）
-  const path = resolveDownloadPath(dlPath.value)
-  if (!path || dlState.value === 'transferring') return
+/** 旧桌面（无 file_download_ticket）回退 Blob 分块：保留进度与取消 */
+async function fallbackBlobDownload(path: string) {
   dlState.value = 'transferring'
   dlProgress.value = { transferred: 0, total: 0 }
-  dlCancelled.value = false
   try {
     const { blob, fileName } = await downloadFile(path, {
       onProgress: (p) => { dlProgress.value = p },
@@ -372,6 +406,82 @@ async function startDownload() {
     dlState.value = 'error'
     dlError.value = err instanceof TransferCancelled ? t('filesCancelled') : mapError(err)
   }
+}
+
+function isUnknownCommand(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err)
+  return msg.includes('command not allowed')
+}
+
+/** 中继普通浏览器：当前页面直接按票据拉取并保存（不跳转、不依赖弹窗） */
+async function downloadByTicket(ticket: DownloadTicket) {
+  dlState.value = 'transferring'
+  dlProgress.value = { transferred: 0, total: ticket.size }
+  try {
+    const { blob } = await downloadFileByTicket(ticket.ticket, ticket.size, {
+      onProgress: (p) => { dlProgress.value = p },
+      shouldCancel: () => dlCancelled.value,
+    })
+    saveBlobToFile(blob, ticket.fileName)
+    dlResult.value = ticket.fileName
+    dlState.value = 'done'
+  } catch (err) {
+    dlState.value = 'error'
+    dlError.value = err instanceof TransferCancelled ? t('filesCancelled') : mapError(err)
+  }
+}
+
+/**
+ * 一步下载：
+ * - 微信：Blob 与自动下载都不可靠 → 只呈现链接，提示复制到系统浏览器
+ * - 普通浏览器 + 中继：当前页面按票据拉取 + Blob 保存（一步到位）
+ * - 普通浏览器 + 直连：/dl/<ticket> 浏览器原生下载（HEAD 探测能力）
+ * - 旧桌面：RPC 不存在 → 回退 Blob 分块
+ */
+async function startDownload() {
+  // 输入框支持项目内相对路径或绝对路径（服务端要求绝对路径，相对路径在此解析）
+  const path = resolveDownloadPath(dlPath.value)
+  if (!path || dlInFlight.value) return
+  dlState.value = 'preparing'
+  dlError.value = ''
+  dlUrl.value = ''
+  dlLinkCopied.value = false
+  dlCancelled.value = false
+  try {
+    const ticket = await getDownloadTicket(path)
+    dlResult.value = ticket.fileName
+    dlUrl.value = ticket.url
+
+    if (wechat) {
+      dlState.value = 'started'
+      return
+    }
+    if (viaRelay.value) {
+      await downloadByTicket(ticket)
+      return
+    }
+    // 直连：旧版本静态 fallback 会把 /dl/ 返回 index.html，必须确认响应是文件
+    if (await probeDownloadUrl(ticket.url, ticket.size)) {
+      triggerDownload(ticket.url, ticket.fileName)
+      dlState.value = 'started'
+      return
+    }
+    await fallbackBlobDownload(path)
+  } catch (err) {
+    if (isUnknownCommand(err)) {
+      await fallbackBlobDownload(path)
+      return
+    }
+    dlState.value = 'error'
+    dlError.value = err instanceof TransferCancelled ? t('filesCancelled') : mapError(err)
+  }
+}
+
+async function copyDownloadLink() {
+  if (!dlUrl.value) return
+  await copyText(dlUrl.value)
+  dlLinkCopied.value = true
+  setTimeout(() => { dlLinkCopied.value = false }, 2000)
 }
 
 // ==================== 项目内文件浏览器 ====================
@@ -508,7 +618,9 @@ function mapError(e: unknown): string {
   if (msg.includes('file too large') || msg.includes('exceeds declared size')) {
     return `${t('filesErrTooLarge')}（${msg}）`
   }
-  if (msg.includes('too many concurrent')) return t('filesErrTooMany')
+  if (msg.includes('too many concurrent') || msg.includes('too many pending')) {
+    return t('filesErrTooMany')
+  }
   if (msg.includes('authorized')) return t('filesErrNotAuthorized')
   if (msg.includes('changed during download')) return t('filesErrChanged')
   if (msg.includes('not found') || msg.includes('not a file') || msg.includes('cannot read')) {
