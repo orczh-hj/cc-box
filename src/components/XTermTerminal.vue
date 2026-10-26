@@ -61,6 +61,7 @@ import { useIsMobile } from '@/composables/useMediaQuery'
 import { safeDispose } from '@/utils/dispose'
 import { relativizePath } from '@/utils/path'
 import { mapTerminalGlyphs } from '@/utils/terminal-glyphs'
+import { buildTapMouseInit } from '@/utils/tap-mouse'
 import type { SnapshotData } from '@/utils/terminal-reflow'
 import { copyText as platformCopyText, readClipboardText as platformReadText } from '@/api/platform'
 import { transport } from '@/api/transport'
@@ -1093,14 +1094,38 @@ function handleGestureChange(e: Event) {
 /** tap 兜底聚焦：Gesture preventDefault touchstart 杀死合成 mousedown，
  *  xterm 内部无 TAP 消费者，不兜底则软键盘无法弹出。iOS/Android 对
  *  xterm 内部 focus（preventScroll:true）不弹键盘——直接聚焦裸 textarea
- *  才在用户激活态（tap 手势）可靠唤出 */
-function handleGestureTap() {
+ *  才在用户激活态（tap 手势）可靠唤出。
+ *  追加：mouse reporting 激活时合成 mousedown/mouseup 派发给 xterm，
+ *  让手机 tap 走桌面同一条鼠标上报链路（点击切光标等）。 */
+function handleGestureTap(e: Event) {
   if (!isMobile.value) return
   const instance = currentInstance()
   if (!instance) return
+  forwardTapAsMouseEvents(instance.term, e)
   const ta = instance.term.textarea
   if (ta) ta.focus()
   else instance.term.focus()
+}
+
+/**
+ * tap → 合成鼠标事件：Gesture 对触点在 .xterm-screen 内的 touchstart
+ * preventDefault，浏览器合成的 mousedown/mouseup 被杀，而 xterm 的鼠标
+ * 上报（SGR 序列 → onData → ptyInput → CLI）只挂在这些事件上——手机端
+ * 点击（如切换光标位置）到不了 Claude CLI。按 TAP 坐标合成一对事件派发
+ * 到 term.element：mousedown 内部会发 DOWN 序列并把 mouseup listener 注册
+ * 到 document，bubbles 的 mouseup 冒泡触发 UP 序列并自动清理。
+ * gate：仅在 CLI 开启 mouse reporting（enable-mouse-events class，由
+ * MouseService 按协议自动维护）时合成；未开启时点击维持原语义（聚焦 +
+ * 复制走快照阅读器），且此时 SelectionService 未被 disable，不触碰拖选。
+ */
+function forwardTapAsMouseEvents(term: Terminal, e: Event) {
+  const el = term.element
+  if (!el || !el.classList.contains('enable-mouse-events')) return
+  const ev = e as Event & { pageX?: number; pageY?: number; tapCount?: number }
+  const init = buildTapMouseInit(ev.pageX, ev.pageY, ev.tapCount, window.scrollX, window.scrollY)
+  if (!init) return
+  el.dispatchEvent(new MouseEvent('mousedown', { ...init, view: window, buttons: 1 }))
+  el.dispatchEvent(new MouseEvent('mouseup', { ...init, view: window, buttons: 0 }))
 }
 
 // 兼容：重启当前活跃 Tab
