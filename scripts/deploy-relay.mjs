@@ -3,13 +3,14 @@
 /**
  * relay 部署脚本(npm run deploy:relay)
  *
- * 背景:生产 relay(orczh.top:8800)已配置 CC_BOX_RELAY_WEB_DIR=/opt/cc-box/web
- * (Web UI 与二进制分离)——纯前端改动只需 npm run build + scp dist,无需本脚本;
- * 仅 relay/web-assets 二进制改动才重编部署。未配置磁盘目录的部署仍回退
- * 编译期内嵌 dist,同样用本脚本。
+ * 背景:relay 二进制**不内嵌 Web UI**(web-assets 以 --no-default-features 构建),
+ * 只做消息透传 + 磁盘静态服务——前端与 relay 完全独立:
+ *   - 纯前端改动: npm run build + scp dist 到 CC_BOX_RELAY_WEB_DIR,无需本脚本
+ *   - relay 源码/服务逻辑改动: 本脚本(无需前端构建,编译不依赖 dist)
+ *   - 磁盘目录 CC_BOX_RELAY_WEB_DIR 是硬性要求(未配置则页面 404)
  *
- * 流程:前端构建 → musl 交叉编译 → ssh 预检 → scp .new + md5 校验 →
- * 【人工确认】切换 + systemctl restart → 三查(md5 / bundle hash / 特征)。
+ * 流程: musl 交叉编译 → ssh 预检(必须配置磁盘目录) → scp .new + md5 校验 →
+ * 【人工确认】切换 + systemctl restart → 校验(md5 / 服务端 bundle hash / 特征)。
  * 切换保留人工确认:relay 重启断开在途连接(已配对手机凭 token v2 自动重连
  * 恢复,无需重扫;仅升级到 v2 版 relay 时存量 v1 手机需各重扫一次)。
  *
@@ -62,14 +63,7 @@ const md5 = (p) => createHash('md5').update(fs.readFileSync(p)).digest('hex')
 async function main() {
   const skipConfirm = process.argv.includes('--yes')
 
-  logStep('[1/6] 前端构建(dist 将内嵌进 relay)')
-  sh('npm run build', { cwd: PROJECT_ROOT })
-  if (!fs.existsSync(path.join(PROJECT_ROOT, 'dist', 'index.html'))) {
-    logErr('dist/index.html 不存在——构建失败?')
-    process.exit(1)
-  }
-
-  logStep('[2/6] musl 交叉编译 relay')
+  logStep('[1/5] musl 交叉编译 relay')
   // Windows 无 musl-gcc,统一用 rust-lld 链接(见 remote/docs/deploy.md)
   sh(`rustup target add ${MUSL_TARGET}`, { silent: true, allowFail: true })
   sh(`cargo build --release --target ${MUSL_TARGET}`, {
@@ -84,18 +78,21 @@ async function main() {
   const localMd5 = md5(bin)
   logOk(`产物就绪(${(fs.statSync(bin).size / 1024 / 1024).toFixed(1)} MB, md5 ${localMd5.slice(0, 8)}...)`)
 
-  logStep('[3/6] 服务器预检')
+  logStep('[2/5] 服务器预检')
   const pre = sh(`ssh -o BatchMode=yes -o ConnectTimeout=10 ${SERVER} "systemctl is-active cc-box-relay && (systemctl cat cc-box-relay | grep -c CC_BOX_RELAY_WEB_DIR || true)"`, { silent: true, allowFail: true })
   if (!pre) {
     logErr(`无法连接 ${SERVER} 或 relay 服务不存在——检查 ssh 免密与 systemd 单元`)
     process.exit(1)
   }
-  const webDirConfigured = pre.includes('1')
-  if (webDirConfigured) {
-    log('⚠ 服务器已配置 CC_BOX_RELAY_WEB_DIR(磁盘通道):仅前端更新时 scp dist 即可,无需重编(见 remote/docs/deploy.md)')
+  // relay 已不内嵌 UI：磁盘目录是 UI 的唯一来源，未配置时必须中止
+  if (!pre.includes('1')) {
+    logErr('systemd 未配置 CC_BOX_RELAY_WEB_DIR——relay 不内嵌 Web UI，页面将全部 404')
+    log('  在单元文件中添加 Environment=CC_BOX_RELAY_WEB_DIR=/opt/cc-box/web 后重试（见 remote/docs/deploy.md）')
+    process.exit(1)
   }
+  log('✓ 磁盘 Web 目录已配置（前端可独立 scp 更新，无需重编 relay）')
 
-  logStep('[4/6] 上传 .new 并校验')
+  logStep('[3/5] 上传 .new 并校验')
   sh(`scp "${bin}" ${SERVER}:${REMOTE_BIN}.new`)
   const remoteMd5 = sh(`ssh -o BatchMode=yes ${SERVER} "md5sum ${REMOTE_BIN}.new"`, { silent: true }).trim().split(/\s+/)[0]
   if (remoteMd5 !== localMd5) {
@@ -104,7 +101,7 @@ async function main() {
   }
   logOk('md5 一致')
 
-  logStep('[5/6] 切换(需确认)')
+  logStep('[4/5] 切换(需确认)')
   if (!skipConfirm) {
     log('\x1b[33mrelay 重启将短暂断开全部连接——已配对手机自动重连恢复(token v2 存活);\x1b[0m')
     log('\x1b[33m若本次是从 v1 版本升级,存量 v1 token 手机需各重扫一次!\x1b[0m')
@@ -118,14 +115,27 @@ async function main() {
   sh(`ssh -o BatchMode=yes ${SERVER} "cd /usr/local/bin && mv cc-box-relay cc-box-relay.old && mv cc-box-relay.new cc-box-relay && chmod +x cc-box-relay && systemctl restart cc-box-relay && sleep 2 && systemctl is-active cc-box-relay"`)
   logOk('relay 已切换并重启(旧版备份为 cc-box-relay.old)')
 
-  logStep('[6/6] 三查:md5 / bundle hash / HTTP 特征')
+  logStep('[5/5] 校验:md5 / 服务端 bundle / HTTP 特征')
   const activeMd5 = sh(`ssh -o BatchMode=yes ${SERVER} "md5sum ${REMOTE_BIN}"`, { silent: true }).trim().split(/\s+/)[0]
   console.log(activeMd5 === localMd5 ? '✓ md5 一致' : `✗ md5 不一致(${activeMd5})`)
+  // Web UI 由磁盘目录供给（与 relay 二进制无关）：只报告服务端 hash；
+  // 本地有 dist 时顺带比对（本地未构建不影响 relay 部署）
   const remoteIndex = sh(`curl -s --max-time 10 ${RELAY_URL}/`, { silent: true, allowFail: true }) || ''
   const remoteHash = (remoteIndex.match(/assets\/index-[^"']+/) || [''])[0]
-  const localHashFile = fs.readdirSync(path.join(PROJECT_ROOT, 'dist/assets')).find((f) => /^index-.*\.js$/.test(f))
+  const distAssets = path.join(PROJECT_ROOT, 'dist/assets')
+  const localHashFile = fs.existsSync(distAssets)
+    ? fs.readdirSync(distAssets).find((f) => /^index-.*\.js$/.test(f))
+    : undefined
   const localHash = localHashFile ? `assets/${localHashFile}` : ''
-  console.log(remoteHash && remoteHash === localHash ? `✓ bundle hash 一致(${remoteHash})` : `✗ bundle hash 不一致(remote=${remoteHash} local=${localHash})`)
+  if (!remoteHash) {
+    console.log('⚠ 服务端页面未取到 bundle（检查 CC_BOX_RELAY_WEB_DIR 与磁盘目录内容）')
+  } else if (localHash) {
+    console.log(remoteHash === localHash
+      ? `✓ 服务端 bundle 与本地一致(${remoteHash})`
+      : `ℹ 服务端 bundle=${remoteHash}，本地 dist=${localHash}（前端未 scp 时不一致属正常）`)
+  } else {
+    console.log(`ℹ 服务端 bundle=${remoteHash}（本地无 dist，跳过比对）`)
+  }
   const iconCode = (sh(`curl -s -o /dev/null -w "%{http_code}" --max-time 10 ${RELAY_URL}/icon.png`, { silent: true, allowFail: true }) || '').trim()
   console.log(iconCode === '200' ? '✓ HTTP 特征(icon.png 200)' : `⚠ icon.png: ${iconCode || '请求失败'}`)
 

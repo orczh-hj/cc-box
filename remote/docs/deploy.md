@@ -41,7 +41,7 @@ After=network.target
 ExecStart=/usr/local/bin/cc-box-relay
 Environment=CC_BOX_RELAY_BIND=127.0.0.1
 Environment=CC_BOX_RELAY_PORT=8801
-# Web UI 磁盘目录（优先于编译期内嵌；前端更新 scp dist 即生效）
+# Web UI 磁盘目录（relay 不内嵌 UI，必配；前端更新 scp dist 即生效）
 Environment=CC_BOX_RELAY_WEB_DIR=/opt/cc-box/web
 Restart=always
 RestartSec=3
@@ -126,7 +126,7 @@ sudo certbot -d cc.orczh.top   # 签发证书并自动配 443
 
 > **票据下载（远程文件直链）**：中继侧**零改动**——票据页面走现有 `/?dl=` 静态入口与 WS 透传（`<device_id>.<ticket>` 复用 token v2 前缀路由），relay 二进制无需重编/重启；只需按下方「仅前端更新」scp 新 dist。桌面必须同步升级（提供 `/dl` 与 `file_download_ticket`），否则前端自动降级为旧 Blob 分块下载。
 
-**仅前端更新（免重编 relay，生产已启用）**——服务器上 relay 由 `CC_BOX_RELAY_WEB_DIR=/opt/cc-box/web` 指向 Web 目录（systemd 已配置；目录存在即优先读磁盘，miss 回退内嵌保底）：
+**仅前端更新（免重编 relay，生产已启用）**——relay 二进制**不内嵌 UI**，`CC_BOX_RELAY_WEB_DIR=/opt/cc-box/web` 指向的磁盘目录是 UI 的唯一来源（systemd 已配置；未配置或磁盘 miss 即 404）：
 
 ```bash
 # 仓库根：构建最新前端并上传（无需重编/重启 relay，手机刷新页面即得新 UI）
@@ -137,7 +137,7 @@ curl -s https://orczh.top:8800/ | grep -o 'assets/index-[^"]*'   # hash 应为�
 
 > **生产配置记录（2026-10-25）**：`/opt/cc-box/web` 已创建并放入 dist，systemd 已加 `Environment=CC_BOX_RELAY_WEB_DIR=/opt/cc-box/web`（原 unit 备份为 `cc-box-relay.service.bak`），并用探针文件验证磁盘优先生效。新环境启用同样只需：`mkdir -p /opt/cc-box/web`、unit 加上述 `Environment=`、`systemctl daemon-reload && systemctl restart cc-box-relay`。桌面端对称支持 `CC_BOX_WEB_DIR`（release 桌面同样获得免重编更新通道；debug 本就实时读 dist）。
 
-**relay 二进制更新一条龙**（仅 `remote/relay/`、`remote/web-assets/` 改动时需要；纯前端改动不要跑，直接 scp dist。Windows Git Bash，在仓库根目录）：
+**relay 二进制更新一条龙**（仅 `remote/relay/` 或 `remote/web-assets/` 的**服务逻辑**改动时需要；纯前端内容改动不要跑，直接 scp dist。脚本不再构建前端、编译也不依赖 dist。Windows Git Bash，在仓库根目录）：
 
 ```bash
 # 构建 → musl 交叉编译 → scp .new + md5 校验 → 确认后切换重启 → 三查全自动
@@ -194,7 +194,7 @@ CC_BOX_RELAY_URL=192.168.5.105:8800 npm run tauri:dev
 | `CC_BOX_RELAY_BIND=0.0.0.0` | relay | 真机测试必须：默认 `127.0.0.1`（生产经 nginx 反代），手机无法访问 |
 | `CC_BOX_RELAY_URL=<IP>:8800` | 桌面端 | 连中继；**用局域网 IP（如 `192.168.5.105:8800`）而非 `127.0.0.1`**，否则手机扫出的配对 URL 打不开 |
 | `CC_BOX_RELAY_PORT=8800` | relay | 监听端口（默认 8800） |
-| `CC_BOX_RELAY_WEB_DIR=<dir>` | relay | Web UI 磁盘目录（优先于内嵌；**生产已设为 `/opt/cc-box/web`**，仅前端更新 scp dist 即生效，见 3.5 节） |
+| `CC_BOX_RELAY_WEB_DIR=<dir>` | relay | Web UI 磁盘目录（**relay 唯一 UI 来源，必配**；生产已设为 `/opt/cc-box/web`，仅前端更新 scp dist 即生效，见 3.5 节） |
 | `CC_BOX_WEB_DIR=<dir>` | 桌面端 | 桌面 8747 对称的 Web UI 磁盘目录（release 桌面免重编更新；debug 本就实时读 dist） |
 
 完整本地链路一条命令（`npm run dev:relay` = `scripts/dev-relay.mjs`：自动探测局域网 IP，按下述环境变量同时拉起 relay 与桌面端，任一进程退出全部退出；需单独手动起进程时才直接用环境变量）：

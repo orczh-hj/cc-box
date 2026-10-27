@@ -2,7 +2,7 @@
 
 ## 远程组件发布（每次版本发布的附加动作）
 
-一套 UI 三端运行（桌面 Tauri / 宽屏浏览器 / 手机浏览器），除桌面版本外多出两条发布线：**手机/浏览器 UI = 主应用 dist**（由 `remote/web-assets` 共享 crate 供给）。**生产（orczh.top:8800）已配置磁盘分离**（`CC_BOX_RELAY_WEB_DIR=/opt/cc-box/web`）：前端改动 scp dist 即生效，免重编、免重启；未配置磁盘目录的部署回退编译期内嵌，须重编 relay。**relay 二进制独立部署**（重启 = 内存态清空，所有手机配对失效）。
+一套 UI 三端运行（桌面 Tauri / 宽屏浏览器 / 手机浏览器），除桌面版本外多出两条发布线：**手机/浏览器 UI = 主应用 dist**。**relay 二进制不内嵌 UI**（web-assets 以 `--no-default-features` 构建），生产（orczh.top:8800）由 `CC_BOX_RELAY_WEB_DIR=/opt/cc-box/web` 指向的磁盘目录供给 UI：前端改动 scp dist 即生效，免重编、免重启；relay 与前端部署完全独立。**relay 重启 = 内存态清空，已配对手机凭 token v2 自动重连，无需重新扫码**（重新配对仅在桌面「刷新密钥」后需要）。
 
 ### 改动类型 → 发布动作
 
@@ -21,7 +21,7 @@
    - 协议改动：确认四处同步（crate 定义 / protocol.ts / samples / remote/docs/protocol.md，见 docs/development.md 新增功能检查清单）
    - 远程功能改动：remote/docs/manual-test-cases.md U/R 系列关键条目真机走查
 2. **桌面版本发布**：`npm run release -- --bump <type> --notes "..."`（见下节全自动流程）
-3. **relay 部署**（仅 relay 二进制改动时需要）：`npm run deploy:relay`（一键：前端构建 → musl 交叉编译 → scp `.new` + md5 校验 → 确认后切换重启 → 三查自动执行；手动细节见 remote/docs/deploy.md §3.5）
+3. **relay 部署**（仅 relay 服务逻辑改动时需要）：`npm run deploy:relay`（一键：musl 交叉编译 → 预检磁盘 Web 目录 → scp `.new` + md5 校验 → 确认后切换重启 → 校验自动执行；不构建前端；手动细节见 remote/docs/deploy.md §3.5）
    - **纯前端改动**：`npm run build` + scp dist 到 `/opt/cc-box/web/`，不重编、不重启
    - **顺序：先桌面版本，后 relay 部署**——新桌面向后兼容旧 UI；反序会出现新 UI 调用旧桌面 rpc 白名单外的命令
 4. **发布后验证**

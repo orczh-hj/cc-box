@@ -52,18 +52,18 @@ npm run release -- --bump <level> --notes "<notes>"
 
 ## 远程组件发布（relay 部署）
 
-**协作机制**：桌面 Rust 是唯一业务执行端；relay（orczh.top:8800）只做认证/配对/连接管理与消息透传，不承载业务。手机/浏览器 UI = 主应用 dist，由 `remote/web-assets` 共享 crate 供给——**生产已配置 `CC_BOX_RELAY_WEB_DIR=/opt/cc-box/web`：仅前端更新 scp dist 即生效、免重编免重启**；未配置/磁盘 miss 回退编译期内嵌。架构详见 remote/README.md。
+**协作机制**：桌面 Rust 是唯一业务执行端；relay（orczh.top:8800）只做认证/配对/连接管理与消息透传，不承载业务。手机/浏览器 UI = 主应用 dist。**relay 二进制不内嵌 UI**（web-assets 以 `--no-default-features` 构建），生产由 `CC_BOX_RELAY_WEB_DIR=/opt/cc-box/web` 磁盘目录供给——**仅前端更新 scp dist 即生效、免重编免重启**；未配置/磁盘 miss 即 404（桌面安装包仍内嵌 UI）。架构详见 remote/README.md。
 
 桌面版本发布 ≠ 全部生效。按本次改动追加：
 
 | 本次改动 | relay 部署 |
 |---|---|
-| 前端（src/） | **不需要重编**：`npm run build` 后 `scp -r dist/* root@orczh.top:/opt/cc-box/web/` 即生效（未配置磁盘目录的部署才需重编 relay） |
-| relay（remote/relay/）/ web-assets（remote/web-assets/） | **必须**重编（独立二进制） |
+| 前端（src/） | **不需要重编**：`npm run build` 后 `scp -r dist/* root@orczh.top:/opt/cc-box/web/` 即生效（relay 不内嵌 UI，前端与 relay 完全独立） |
+| relay（remote/relay/）/ web-assets（remote/web-assets/ 服务逻辑） | **必须**重编（独立二进制；不构建前端、编译不依赖 dist） |
 | 协议（remote/protocol/） | 不需要（relay 只透传应用层 payload）；桌面 + Web UI dist 同步 |
 | 仅桌面功能 / 仅桌面 Rust（src-tauri/） | 不需要（relay 透传原则，不解析应用层 payload） |
 
-**relay 重编部署（仅 relay 二进制改动时）**：`npm run deploy:relay`——自动完成前端构建 → musl 交叉编译（RUSTFLAGS=lld）→ ssh 预检 → scp `.new` + md5 校验 → **切换前人工确认**（`--yes` 跳过）→ 切换重启 → 三查（md5 / bundle hash / HTTP 特征）。手动细节与故障处理见 remote/docs/deploy.md §3.5。
+**relay 重编部署（仅 relay 服务逻辑改动时）**：`npm run deploy:relay`——musl 交叉编译（RUSTFLAGS=lld，**不构建前端、编译不依赖 dist**）→ ssh 预检（磁盘 Web 目录必配）→ scp `.new` + md5 校验 → **切换前人工确认**（`--yes` 跳过）→ 切换重启 → 校验（md5 / 服务端 bundle hash / HTTP 特征）。手动细节与故障处理见 remote/docs/deploy.md §3.5。
 
 **仅前端更新（scp 通道）**：`npm run build` → `timeout 90 scp -r dist/* root@orczh.top:/opt/cc-box/web/` → `curl -s https://orczh.top:8800/ | grep -o 'assets/index-[^"]*'` 确认 bundle hash 为本次构建。免重启：**手机无需重新配对**，浏览器强刷页面即可。
 

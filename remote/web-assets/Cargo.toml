@@ -5,6 +5,12 @@ edition = "2021"
 description = "CC-Box Web UI 静态资源服务（磁盘目录优先 + rust-embed 内嵌兜底，relay 与桌面 remote_server 共用）"
 license = "MIT"
 
+[features]
+# 内嵌 Web UI（桌面安装包必须内置 UI）；relay 用 --no-default-features 构建，
+# 二进制不含任何 UI 内容——relay 与前端部署完全独立，只服务磁盘目录
+default = ["embed"]
+embed = []
+
 [dependencies]
 axum = "0.7"
 tower = "0.5"

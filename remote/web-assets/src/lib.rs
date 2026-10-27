@@ -11,6 +11,7 @@
 use axum::body::Body;
 use axum::http::{header, Request, StatusCode, Uri};
 use axum::response::Response;
+#[cfg(feature = "embed")]
 use rust_embed::RustEmbed;
 use tower::ServiceExt;
 
@@ -34,7 +35,9 @@ fn apply_cache_headers(resp: &mut Response, path: &str) {
 use tower_http::services::ServeDir;
 
 /// 内嵌 Web UI（folder 相对本 crate：../../dist = 仓库根构建产物；
-/// debug 构建动态读目录、release 编译期嵌入——rust-embed 默认行为）
+/// debug 构建动态读目录、release 编译期嵌入——rust-embed 默认行为）。
+/// 仅 `embed` feature 开启时编译：桌面安装包需要，relay 关闭后二进制不含 UI
+#[cfg(feature = "embed")]
 #[derive(RustEmbed)]
 #[folder = "../../dist"]
 struct EmbeddedAssets;
@@ -47,7 +50,18 @@ pub async fn serve_static(env_var: &'static str, uri: Uri) -> Response {
     if let Some(resp) = serve_from_disk(env_var, &uri).await {
         return resp;
     }
-    embedded_response(&uri)
+    #[cfg(feature = "embed")]
+    {
+        embedded_response(&uri)
+    }
+    // relay（无 embed）：不提供任何 UI 内容，磁盘 miss 即 404
+    #[cfg(not(feature = "embed"))]
+    {
+        Response::builder()
+            .status(StatusCode::NOT_FOUND)
+            .body(Body::from("not found"))
+            .unwrap()
+    }
 }
 
 /// 磁盘目录命中返回 Some（环境变量未设置/目录为空串/请求 404 → None 回内嵌）
@@ -72,6 +86,7 @@ async fn serve_from_disk(env_var: &str, uri: &Uri) -> Option<Response> {
 }
 
 /// 内嵌资产响应（路径为空 → index.html；mime 按扩展名）
+#[cfg(feature = "embed")]
 fn embedded_response(uri: &Uri) -> Response {
     let path = uri.path().trim_start_matches('/');
     let path = if path.is_empty() { "index.html" } else { path };
@@ -91,7 +106,8 @@ fn embedded_response(uri: &Uri) -> Response {
     }
 }
 
-/// 扩展名 → Content-Type
+/// 扩展名 → Content-Type（仅内嵌响应使用）
+#[cfg(feature = "embed")]
 fn mime_for(path: &str) -> &'static str {
     match path.rsplit('.').next() {
         Some("html") => "text/html; charset=utf-8",
@@ -128,6 +144,7 @@ mod tests {
     }
 
     /// 环境变量未设置 → 内嵌兜底（dist 构建产物必有 index.html）
+    #[cfg(feature = "embed")]
     #[tokio::test]
     async fn WebAssets_未配置回内嵌() {
         let uri: Uri = "/".parse().unwrap();
@@ -138,6 +155,7 @@ mod tests {
     }
 
     /// 磁盘 404 miss（目录存在但文件未同步）→ 内嵌兜底，不透出 404
+    #[cfg(feature = "embed")]
     #[tokio::test]
     async fn WebAssets_磁盘miss回内嵌() {
         let dir = tempfile::tempdir().unwrap();
@@ -160,9 +178,19 @@ mod tests {
 
     /// 内嵌资产含 favicon（public/icon.png 经 vite build 拷入 dist；
     /// 若 public 拷贝链断裂或 dist 过期，index.html 的 /icon.png 将 404）
+    #[cfg(feature = "embed")]
     #[test]
     fn WebAssets_内嵌资产含图标() {
         assert!(EmbeddedAssets::get("icon.png").is_some());
+    }
+
+    /// relay（--no-default-features）：磁盘未配置/miss 一律 404，二进制不含 UI
+    #[cfg(not(feature = "embed"))]
+    #[tokio::test]
+    async fn WebAssets_无内嵌时磁盘miss404() {
+        let uri: Uri = "/".parse().unwrap();
+        let resp = serve_static("CC_TEST_WEB_DIR_UNSET_NOEMBED", uri).await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 
     /// 内嵌未知路径 404（与原两处实现行为一致）

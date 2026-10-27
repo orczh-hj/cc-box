@@ -8,7 +8,7 @@
 - 手机浏览器（PWA）打开即用：查看会话状态与终端、输入、审批
 - **双模式网络**：局域网直连（低延迟）+ 自建中继（orczh.top，公网穿透，桌面零入站端口）
 - 一次配对长期有效、可吊销；远程功能默认关闭
-- **一套 UI 走天下**：主应用 UI（src/）同时运行于桌面 Tauri、宽屏浏览器、手机浏览器；不再维护独立手机 Web UI（原 remote/web 已删除，Web UI = 主应用 vite 构建产物 dist，由 remote/web-assets 共享 crate 供给两端：磁盘目录优先、rust-embed 内嵌兜底）
+- **一套 UI 走天下**：主应用 UI（src/）同时运行于桌面 Tauri、宽屏浏览器、手机浏览器；不再维护独立手机 Web UI（原 remote/web 已删除，Web UI = 主应用 vite 构建产物 dist，由 remote/web-assets 共享 crate 供给两端：桌面安装包内嵌 UI，**relay 不内嵌（二进制不含 UI），只服务磁盘目录**）
 
 非目标：云执行（代码始终在用户电脑上）、E2E 加密（协议预留）、多用户协作、原生 App。
 
@@ -55,7 +55,7 @@ remote handler ──► pty.rs（tee 输出 / write 注入 / resize）
 | **事件单一出口** | `events.rs` 常量 + `emit_all`（Tauri emit + 远程广播二合一）；会话类事件 `remote_state::emit_event` / `emit_event_ex`（排除接管者）/ `emit_desktop_only` | 每个 emit 点手写两遍、事件名散落 |
 | **会话创建单一核心** | `pty::build_claude_args(resume, skip, custom_args)` 纯函数，session.create 与桌面 spawn 共用同一参数拼接规则 | 前端与 Rust 拼接规则两份漂移 |
 | **前端单一传输层** | `src/api/transport.ts` 三件套（接口 / tauri / remote），tauri.ts 与 provider.ts 导出签名不变，组件零感知环境 | 60 个 invoke 封装双轨 |
-| **Web UI 构建** | 一条 `npm run build` 产出主应用 dist（含产物安全检查）；静态服务收敛在共享 crate `remote/web-assets`（ServeDir 磁盘优先 + rust-embed 内嵌兜底），relay 与桌面 remote_server 共用同一实现，且支持磁盘目录热更（见 deploy.md 3.5「仅前端更新」） | 两端 UI 版本漂移、功能不对等、静态服务逻辑两份 |
+| **Web UI 构建** | 一条 `npm run build` 产出主应用 dist（含产物安全检查）；静态服务收敛在共享 crate `remote/web-assets`（ServeDir 磁盘优先；桌面默认 `embed` feature 内嵌兜底，**relay 关闭 embed、二进制不含 UI**），两端共用同一实现，支持磁盘目录热更（见 deploy.md 3.5「仅前端更新」） | 两端 UI 版本漂移、功能不对等、静态服务逻辑两份 |
 | **接管状态机** | `active_view` 只在 Rust 一处判定，桌面遮罩/手机提示均由事件驱动渲染 | 多端状态不一致 |
 | **日志追踪** | 三端统一 `[remote]` 前缀 + conn_id + 消息 type，一眼定位断链环节 | 链路长难排查 |
 | **协议演进** | 中继不解析 payload，应用层升级只动桌面 + 手机两端，relay 二进制不用动 | 升级需全链路协同 |
@@ -72,12 +72,12 @@ remote/
 │   ├── src/lib.rs       #   消息定义 + Rust 契约测试
 │   ├── protocol.ts      #   TS 类型与解析（src/api/remote-transport 引用，Vitest 契约测试共跑样例）
 │   └── samples/         #   JSON 固定样例（两端契约）
-├── web-assets/          # cc-box-web-assets 共享 crate（Web UI 静态服务：磁盘目录优先 + 内嵌兜底，relay 与桌面共用）
+├── web-assets/          # cc-box-web-assets 共享 crate（静态服务：磁盘优先；桌面内嵌兜底，relay 不含 UI）
 ├── relay/               # cc-box-relay 中继服务器（R3，独立 Rust 二进制，依赖 protocol + web-assets crate）
 └── docs/                # protocol.md、multi-instance-gateway.md（多实例实施与操作）、deploy.md、manual-test-cases.md
 ```
 
-**Web UI 已统一**：不再有独立手机 Web UI（原 remote/web 删除）。浏览器访问的是主应用 UI（src/，Vue 3 + xterm.js），经 `src/api/transport.ts` 传输层自动切换到 WS 远程实现；构建即主应用 `npm run build`，产物 dist 由 `remote/web-assets` crate 统一供给——环境变量指向的磁盘目录优先（`CC_BOX_RELAY_WEB_DIR` / `CC_BOX_WEB_DIR`，前端可独立 scp 更新免重编），未配置/未命中回退 rust-embed 编译期内嵌。**生产 relay 已启用磁盘分离（`/opt/cc-box/web`）**：前端改动 scp dist 即生效，免重编免重启。
+**Web UI 已统一**：不再有独立手机 Web UI（原 remote/web 删除）。浏览器访问的是主应用 UI（src/，Vue 3 + xterm.js），经 `src/api/transport.ts` 传输层自动切换到 WS 远程实现；构建即主应用 `npm run build`，产物 dist 由 `remote/web-assets` crate 统一供给——环境变量指向的磁盘目录优先（`CC_BOX_RELAY_WEB_DIR` / `CC_BOX_WEB_DIR`，前端可独立 scp 更新免重编）。**桌面安装包内嵌 UI（默认 embed feature）；relay 关闭 embed、二进制不含任何 UI**，生产 relay 必须配置 `/opt/cc-box/web`（前端改动 scp dist 即生效，免重编免重启）。
 
 桌面侧模块（挂 `src-tauri/src/`，依赖 protocol crate）：
 
@@ -230,7 +230,7 @@ relay 全内存态（在线连接路由表 + 配对码），无凭证存储、�
 - 桌面 Rust：`remote_server.rs`（局域网 WS + Web UI 静态（web-assets crate：`CC_BOX_WEB_DIR` 磁盘优先、内嵌兜底）+ token 认证 + 动态启停）、`remote_state.rs`（唯一 handler：会话聚合、256KB TailBuffer 输出回放（快照先于增量入队、慢消费者断连重拉）、working/pending 状态机、active_view 独占、订阅广播、新建/关闭、事件分发三变体）、`remote_client.rs`（中继出站连接 + 手机连接桥接）、`rpc_dispatch.rs`（`registry!` 命令单一注册表 + StateSection 枚举 + 差集守卫）、`macros/`（`#[cc_command]` 出口自动广播）、`events.rs`（事件常量 + emit_all）
 - 挂载点：`pty.rs` 输出 tee（emit 后 `push_output`）、spawn 注册、exit/kill 清理、`build_claude_args` 单一拼接核心；`hook_server.rs` 事件转发；`commands.rs` pty_resize 让位远程持有 + pty_claim 接管 + pty_kill 广播 remote-session-closed（与 session.kill 双路径对称）
 - 前端：`src/api/transport.ts`（接口）+ `tauri-transport.ts` / `remote-transport.ts`（WS + rpc 桥 + 消息→事件映射）；`src/state/sections.ts`（状态同步中心）；`TokenGate.vue` 认证门；IconBar「远程」按钮 → `RemoteModal`（直连 QR + 中继配置/配对 QR）；`XTermTerminal` taken-over 遮罩 + 接管回来；`TerminalView` 监听 remote-session-created 自动建 tab
-- 中继：`remote/relay`（透传 hub + /api/pair 配对 + device_key 绑定校验；静态资源经 web-assets crate（`CC_BOX_RELAY_WEB_DIR` 磁盘优先、内嵌兜底）；部署见 [docs/deploy.md](docs/deploy.md)）
+- 中继：`remote/relay`（透传 hub + /api/pair 配对 + device_key 绑定校验；静态资源经 web-assets crate，**无内嵌 UI**，只服务 `CC_BOX_RELAY_WEB_DIR` 磁盘目录；部署见 [docs/deploy.md](docs/deploy.md)）
 
 R1–R3 未动既有前端会话管理（手机新建会话经事件桥接建 tab，而非会话权威下沉）；UI 统一化后浏览器端与桌面共用同一套前端会话管理。
 
