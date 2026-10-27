@@ -1,6 +1,6 @@
 {
   "name": "cc-box",
-  "version": "0.16.10",
+  "version": "0.17.0",
   "description": "Claude Code Desktop GUI (Tauri) - Multi-terminal manager for Claude Code power users",
   "license": "MIT",
   "author": {

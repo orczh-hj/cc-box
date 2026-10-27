@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.17.0] - 2026-10-27
+
+### Features
+- Add device-level background Broker for multi-instance remote: phone sees sessions grouped by window, controls all windows, and can spawn a window remotely when none is open.
+- Add tray update notification: Broker checks for new versions every 2h and shows "Update to vX" with a red dot badge; click jumps to Settings > Update.
+- Add keyboard toggle icon to the mobile quick-key bar; tapping the terminal no longer summons the soft keyboard (scroll still dismisses it).
+- Add instance picker for new/restored sessions on mobile, attach-denied reason handling, and session-detached handling.
+- Add Cache-Control headers for the web UI (index.html no-cache, hashed assets immutable) to prevent stale bundles after updates.
+
+### Fixed
+- Fix rpc black hole after relay device reconnects (spawn window timed out while the phone held a zombie websocket).
+- Fix white terminal after refresh when another device holds control (attach denied was never surfaced).
+- Fix synthesized tap mouse events triggering xterm internal focus (keyboard popping up).
+- Fix provider preset ordering to use an explicit zh-CN locale (independent of machine locale).
+
+Note: refresh the phone browser to get the new bundle. If the relay is redeployed, paired phones must re-pair.
+
 ## [0.16.10] - 2026-10-25
 
 ### Fixed
