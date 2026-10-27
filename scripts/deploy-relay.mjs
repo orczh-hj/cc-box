@@ -118,17 +118,28 @@ async function main() {
   logStep('[5/5] 校验:md5 / 服务端 bundle / HTTP 特征')
   const activeMd5 = sh(`ssh -o BatchMode=yes ${SERVER} "md5sum ${REMOTE_BIN}"`, { silent: true }).trim().split(/\s+/)[0]
   console.log(activeMd5 === localMd5 ? '✓ md5 一致' : `✗ md5 不一致(${activeMd5})`)
-  // Web UI 由磁盘目录供给（与 relay 二进制无关）：只报告服务端 hash；
-  // 本地有 dist 时顺带比对（本地未构建不影响 relay 部署）
-  const remoteIndex = sh(`curl -s --max-time 10 ${RELAY_URL}/`, { silent: true, allowFail: true }) || ''
-  const remoteHash = (remoteIndex.match(/assets\/index-[^"']+/) || [''])[0]
+  // 用 Node fetch 而非 curl：Windows 下 `curl -o /dev/null` 因 NUL 路径写失败
+  // （exit 23）会恒报"请求失败"（与 relay 状态无关的误报）；重启窗口内带重试
+  const httpGet = async (p) => {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const res = await fetch(`${RELAY_URL}${p}`)
+        return { status: res.status, body: await res.text() }
+      } catch {
+        await new Promise((r) => setTimeout(r, 1000))
+      }
+    }
+    return { status: 0, body: '' }
+  }
+  const index = await httpGet('/')
+  const remoteHash = (index.body.match(/assets\/index-[^"']+/) || [''])[0]
   const distAssets = path.join(PROJECT_ROOT, 'dist/assets')
   const localHashFile = fs.existsSync(distAssets)
     ? fs.readdirSync(distAssets).find((f) => /^index-.*\.js$/.test(f))
     : undefined
   const localHash = localHashFile ? `assets/${localHashFile}` : ''
   if (!remoteHash) {
-    console.log('⚠ 服务端页面未取到 bundle（检查 CC_BOX_RELAY_WEB_DIR 与磁盘目录内容）')
+    console.log(`✗ 服务端页面未取到 bundle（HTTP ${index.status}；检查 CC_BOX_RELAY_WEB_DIR 与磁盘目录内容）`)
   } else if (localHash) {
     console.log(remoteHash === localHash
       ? `✓ 服务端 bundle 与本地一致(${remoteHash})`
@@ -136,8 +147,10 @@ async function main() {
   } else {
     console.log(`ℹ 服务端 bundle=${remoteHash}（本地无 dist，跳过比对）`)
   }
-  const iconCode = (sh(`curl -s -o /dev/null -w "%{http_code}" --max-time 10 ${RELAY_URL}/icon.png`, { silent: true, allowFail: true }) || '').trim()
-  console.log(iconCode === '200' ? '✓ HTTP 特征(icon.png 200)' : `⚠ icon.png: ${iconCode || '请求失败'}`)
+  const icon = await httpGet('/icon.png')
+  console.log(icon.status === 200
+    ? '✓ HTTP 特征(icon.png 200)'
+    : `✗ icon.png: HTTP ${icon.status || '请求失败'}（磁盘目录缺 icon.png 或页面未部署）`)
 
   log('\n部署完成。提醒:')
   log('  - 已配对手机自动重连恢复(v2 token 存活);从 v1 升级则存量手机各重扫一次')
