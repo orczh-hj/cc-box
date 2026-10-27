@@ -89,7 +89,8 @@ describe('providerPresets 生成物守卫（scripts/sync-provider-presets.mts �
       const ca = order[a.category ?? ''] ?? 99
       const cb = order[b.category ?? ''] ?? 99
       expect(
-        ca < cb || (ca === cb && a.name.localeCompare(b.name) <= 0),
+        // 与生成脚本同一显式 locale（默认 locale 随机器变化，CI 英文环境会失败）
+        ca < cb || (ca === cb && a.name.localeCompare(b.name, 'zh-CN') <= 0),
         `排序异常: ${a.name} 应先于 ${b.name}`,
       ).toBe(true)
     }

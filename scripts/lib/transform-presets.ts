@@ -157,7 +157,9 @@ export function transformAll(upstream: UpstreamPreset[]): ProviderPreset[] {
     const ca = CATEGORY_ORDER[a.category ?? ''] ?? 99
     const cb = CATEGORY_ORDER[b.category ?? ''] ?? 99
     if (ca !== cb) return ca - cb
-    return a.name.localeCompare(b.name)
+    // 显式 zh-CN：默认 locale 随系统变化（zh 拼音序 vs en 结果相反），
+    // 会导致不同机器重新生成时顺序漂移、CI（英文 locale）守卫失败
+    return a.name.localeCompare(b.name, 'zh-CN')
   })
   list.push({ ...CUSTOM_PRESET })
   return list
