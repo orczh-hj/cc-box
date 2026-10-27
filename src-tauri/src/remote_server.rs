@@ -22,7 +22,6 @@ use futures_util::{sink::SinkExt, StreamExt};
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio_util::io::ReaderStream;
 use parking_lot::Mutex;
-use tauri::AppHandle;
 use tokio::sync::{mpsc, watch};
 
 use cc_box_remote_protocol::{ClientMessage, ServerMessage};
@@ -53,21 +52,8 @@ static WATCHDOG_GEN: AtomicU64 = AtomicU64::new(0);
 pub(crate) static REMOTE_OP_LOCK: LazyLock<tokio::sync::Mutex<()>> =
     LazyLock::new(|| tokio::sync::Mutex::new(()));
 
-/// 应用启动时调用：开关开启则启动服务器
-pub async fn init(_app_handle: AppHandle) {
-    let enabled = crate::store::get_app_config()
-        .ok()
-        .and_then(|c| c.remote)
-        .and_then(|r| r.enabled)
-        .unwrap_or(false);
-    if enabled {
-        if let Err(e) = start().await {
-            log::error!("[remote] Remote server not started: {}", e);
-        }
-    }
-}
-
-/// 启动服务器（已运行则跳过）。失败返回错误原因（UI 可见），如端口被占用。
+/// 启动 Broker 的 LAN 服务器（已运行则跳过）。失败返回错误原因（面板可见），
+/// 如端口被占用。仅 Broker 进程调用；GUI 不启动 LAN/relay。
 pub async fn start() -> Result<(), String> {
     if RUNNING.load(Ordering::SeqCst) {
         return Ok(());
@@ -88,6 +74,9 @@ pub async fn start() -> Result<(), String> {
 
     let app = Router::new()
         .route("/ws", get(ws_handler))
+        // 设备级 Gateway：新版探针 + 成员注册 WS（仅 loopback，见 gateway.rs）
+        .route("/gateway.ok", get(crate::gateway::gateway_ok_handler))
+        .route("/internal/gw-ws", get(crate::gateway::gw_ws_handler))
         // 一次性票据直链（微信/系统浏览器不带 token 也能下载）
         .route("/dl/:ticket", get(dl_handler))
         // Web UI 静态资源：磁盘目录（CC_BOX_WEB_DIR）优先、内嵌兜底
@@ -95,9 +84,7 @@ pub async fn start() -> Result<(), String> {
 
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     let listener = match bind_with_retry(addr, port).await {
-        Ok(Some(l)) => l,
-        // 宿主制：本机另一实例已提供服务（token 共享），跳过启动
-        Ok(None) => return Ok(()),
+        Ok(l) => l,
         Err(e) => {
             log::error!("[remote] Failed to bind {}: {}", addr, e);
             // bind_with_retry 已给出完整、可执行的错误文案（含僵死实例提示）
@@ -111,7 +98,13 @@ pub async fn start() -> Result<(), String> {
     RUNNING.store(true, Ordering::SeqCst);
     let _ = SHUTDOWN.0.send(false); // 重置关停信号（再次开启时）
     let task = tokio::spawn(async move {
-        if let Err(e) = axum::serve(listener, app).await {
+        // ConnectInfo 供 /internal/gw-ws 做 loopback 校验
+        if let Err(e) = axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        {
             log::error!("[remote] Server error: {}", e);
         }
     });
@@ -166,6 +159,7 @@ fn spawn_config_watchdog() {
             );
             stop().await;
             crate::remote_client::disconnect();
+            crate::gateway::sync_relay_status();
             return;
         }
     });
@@ -232,36 +226,25 @@ pub(crate) fn clear_socket_inherit(listener: &tokio::net::TcpListener) {
 #[cfg(not(target_os = "windows"))]
 pub(crate) fn clear_socket_inherit(_listener: &tokio::net::TcpListener) {}
 
-/// bind + 失败时的宿主探测与短重试：
-/// - Ok(Some(listener))：绑定成功
-/// - Ok(None)：端口被本机另一 CC-Box 实例持有且服务可达（宿主制跳过，面板
-///   显示宿主 URL）；仅首轮探测——宿主在 ~1.5s 重试窗口内出现的竞态概率极
-///   低且误报后重开一次即命中跳过，不值得为此多付一次 3s 探测超时
-/// - Err：真错误。探测不通可能是「宿主刚停止、端口释放延迟」的残骸（TCP
-///   可连但不响应）——短窗口重试 bind；仍失败即端口被其他程序占用或残骸
-///   未消（v0.15.1 stop 泄漏场景），报错由用户处置。
-///   最坏耗时 ~4.5s（首轮探测 3s + 5×300ms），start 为 UI await 命令，
-///   失败路径的等待时长按此上限控制
+/// bind + 短重试（角色判定已上移 gateway::ensure_role，此处只负责绑定）：
+/// - Ok(listener)：绑定成功（竞选 Gateway 胜出）
+/// - Err：真错误。探测不通可能是「上一实例刚停止、端口释放延迟」的残骸
+///   （TCP 可连但不响应）——短窗口重试 bind；仍失败即端口被其他程序占用或
+///   残骸未消（v0.15.1 stop 泄漏场景），报错由用户处置。
+///   最坏耗时 ~1.5s（5×300ms），start 为 UI await 命令
 async fn bind_with_retry(
     addr: SocketAddr,
     port: u16,
-) -> Result<Option<tokio::net::TcpListener>, String> {
+) -> Result<tokio::net::TcpListener, String> {
     let mut last_err = String::new();
     for attempt in 0..6 {
         match tokio::net::TcpListener::bind(addr).await {
             Ok(l) => {
                 clear_socket_inherit(&l);
-                return Ok(Some(l));
+                return Ok(l);
             }
             Err(e) => {
                 last_err = e.to_string();
-                if attempt == 0 && probe_host(port).await {
-                    log::info!(
-                        "[remote] Remote already hosted by another instance on port {}, skipping start",
-                        port
-                    );
-                    return Ok(None);
-                }
                 if attempt < 5 {
                     tokio::time::sleep(Duration::from_millis(300)).await;
                 }
@@ -285,7 +268,7 @@ async fn bind_with_retry(
         ))
     } else {
         Err(format!(
-            "failed to bind port {} (another CC-Box instance may be running): {}",
+            "failed to bind port {} (port occupied by another program): {}",
             port, last_err
         ))
     }
@@ -295,8 +278,13 @@ pub fn is_running() -> bool {
     RUNNING.load(Ordering::SeqCst)
 }
 
+/// 关停信号（成员 WS 循环 select 用：Gateway stop() 时立即断开成员连接）
+pub(crate) fn shutdown_signal() -> watch::Receiver<bool> {
+    SHUTDOWN.1.clone()
+}
+
 /// 配置首选端口（用户设定或默认 8747）
-fn preferred_port() -> u16 {
+pub(crate) fn preferred_port() -> u16 {
     crate::store::get_app_config()
         .ok()
         .and_then(|c| c.remote)
@@ -304,10 +292,10 @@ fn preferred_port() -> u16 {
         .unwrap_or(DEFAULT_PORT)
 }
 
-/// 探测本机端口是否已有 CC-Box 远程服务（宿主实例）：
+/// 探测本机端口是否已有 CC-Box 远程服务（宿主/Gateway 实例）：
 /// TCP 可连、HTTP GET / 返回 200 且 body 含 "CC-Box"（index 特征，防其他
 /// HTTP 服务占用造成误判）。整体 3s 超时——端口被不响应的服务占用时不得挂起。
-pub async fn probe_host(port: u16) -> bool {
+pub(crate) async fn probe_host(port: u16) -> bool {
     tokio::time::timeout(std::time::Duration::from_secs(3), async {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let Ok(mut stream) = tokio::net::TcpStream::connect(("127.0.0.1", port)).await else {
@@ -336,13 +324,11 @@ pub async fn probe_host(port: u16) -> bool {
     .unwrap_or(false)
 }
 
-/// 宿主制：本实例未运行远程、但本机已有其他实例提供（探测动态判定，
-/// 宿主退出后探测失败，本实例下次开启即可无缝接管）
+/// 远程由本机 Broker 提供（GUI 进程永远不是宿主）。
+/// 保留给旧调用点/测试兼容；新命令直接读 Broker 状态镜像。
+#[allow(dead_code)]
 pub async fn hosted_elsewhere() -> bool {
-    if is_running() {
-        return false;
-    }
-    probe_host(preferred_port()).await
+    !is_running()
 }
 
 /// 供设置页展示的直连 URL（含 token fragment）
@@ -521,7 +507,7 @@ async fn handle_socket(mut socket: WebSocket) {
                 match msg {
                     Some(Ok(Message::Text(t))) => {
                         match serde_json::from_str::<ClientMessage>(&t) {
-                            Ok(m) => REMOTE_STATE.handle_client_message(conn_id, &m),
+                            Ok(m) => crate::gateway::dispatch(conn_id, &m).await,
                             Err(e) => {
                                 log::debug!("[remote] conn {} invalid message ignored: {}", conn_id, e);
                             }

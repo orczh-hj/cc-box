@@ -28,14 +28,17 @@ describe('QuickKeyBar（手机快捷键工具条）', () => {
     mockT.mockClear()
   })
 
-  // 键序：选择复制 action 按钮（第一位）+ 十一个字节键（Enter 在 Esc 后）；
-  // ^C 与「键盘」按钮（点击终端已可唤起软键盘）已按用户决策移除
+  // 键序：键盘开关（第一位，图标按钮——tap 终端不再自动唤出软键盘）+
+  // 选择复制 action 按钮 + 十一个字节键（Enter 在 Esc 后）；^C 已按用户决策移除
   it('QuickKeyBar_RendersAllKeys_001', () => {
     const wrapper = mount(QuickKeyBar)
-    const labels = wrapper.findAll('button').map(b => b.text())
-    expect(labels).toEqual(['quickKeySelectCopy', ...Object.keys(EXPECT)])
+    const buttons = wrapper.findAll('button')
+    // 键盘按钮以图标呈现（无文本），aria-label 供无障碍/按压识别
+    expect(buttons[0].find('svg').exists()).toBe(true)
+    expect(buttons[0].attributes('aria-label')).toBe('quickKeyKeyboard')
+    const labels = buttons.map(b => b.text())
+    expect(labels).toEqual(['', 'quickKeySelectCopy', ...Object.keys(EXPECT)])
     expect(labels).not.toContain('^C')
-    expect(labels).not.toContain('quickKeyKeyboard')
   })
 
   // 点击字节键发射对应转义序列（重点：模式切换、换行与清行）
@@ -87,5 +90,27 @@ describe('QuickKeyBar（手机快捷键工具条）', () => {
     expect(btn.classes()).toContain('pressing')
     await btn.trigger('pointerup')
     expect(btn.classes()).not.toContain('pressing')
+  })
+
+  // 键盘开关（tap 终端不再自动唤出软键盘后的唯一显式入口）：图标按钮，
+  // 开启态 qk-open 高亮 + aria-label 变为「收起」；点击 emit toggle-keyboard，不发字节
+  it('QuickKeyBar_键盘开关_006', async () => {
+    const closed = mount(QuickKeyBar, { props: { keyboardOpen: false } })
+    const btnClosed = closed.findAll('button')[0]
+    expect(btnClosed.classes()).toContain('qk-action')
+    expect(btnClosed.classes()).not.toContain('qk-open')
+    expect(btnClosed.attributes('aria-label')).toBe('quickKeyKeyboard')
+    await btnClosed.trigger('click')
+    expect(closed.emitted('toggleKeyboard')).toHaveLength(1)
+    expect(closed.emitted('send')).toBeUndefined()
+    closed.unmount()
+
+    const open = mount(QuickKeyBar, { props: { keyboardOpen: true } })
+    const btnOpen = open.findAll('button')[0]
+    expect(btnOpen.classes()).toContain('qk-open')
+    expect(btnOpen.attributes('aria-label')).toBe('quickKeyKeyboardHide')
+    await btnOpen.trigger('click')
+    expect(open.emitted('toggleKeyboard')).toHaveLength(1)
+    open.unmount()
   })
 })

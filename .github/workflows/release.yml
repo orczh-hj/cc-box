@@ -114,10 +114,12 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
+          # 更新器签名产物（*.sig）仅发布 CI 生成（本地默认构建跳过签名，
+          # 见 tauri.conf.json 无 createUpdaterArtifacts）
           if [ -n "${{ matrix.target }}" ]; then
-            npm run tauri build -- --target ${{ matrix.target }}
+            npm run tauri build -- --target ${{ matrix.target }} --config '{"bundle":{"createUpdaterArtifacts":true}}'
           else
-            npm run tauri build
+            npm run tauri build -- --config '{"bundle":{"createUpdaterArtifacts":true}}'
           fi
         shell: bash
 

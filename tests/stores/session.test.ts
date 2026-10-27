@@ -474,6 +474,97 @@ describe('session store', () => {
       expect(store.tabs.size).toBe(1)
     })
 
+    // 实例名单合并：Gateway 下发的全量名单优先（含零会话实例），Tab 兜底补齐
+    it('KnownInstances_MergeRemoteRoster_001', () => {
+      const store = useSessionStore()
+      // 只有一个实例有运行会话（Tab 推导仅能看到它）
+      store.adoptRemoteSessions([
+        { id: 'pty-i1', type: 'claude', cwd: '/p', working: false, pending: false, instanceId: 'inst-1', instanceName: '实例 1' },
+      ])
+      expect(store.knownInstances.map(i => i.id)).toEqual(['inst-1'])
+
+      // Gateway 名单补齐零会话实例；Tab 里未覆盖的实例也保留（旧桌面兜底）
+      store.setRemoteInstances([
+        { id: 'inst-1', name: '实例 1' },
+        { id: 'inst-2', name: '实例 2' },
+      ])
+      store.adoptRemoteSessions([
+        { id: 'pty-i9', type: 'claude', cwd: '/q', working: false, pending: false, instanceId: 'inst-9', instanceName: '实例 9' },
+      ])
+      expect(store.knownInstances).toEqual([
+        { id: 'inst-1', name: '实例 1' },
+        { id: 'inst-2', name: '实例 2' },
+        { id: 'inst-9', name: '实例 9' },
+      ])
+    })
+
+    // 零窗口判定：空名单也是有效状态；重连前必须回到“尚未加载”
+    it('RemoteInstances_EmptyKnownFlag_001', () => {
+      const store = useSessionStore()
+      expect(store.remoteInstancesKnown).toBe(false)
+      store.setRemoteInstances([])
+      expect(store.remoteInstancesKnown).toBe(true)
+      expect(store.remoteInstances).toEqual([])
+      store.resetRemoteInstances()
+      expect(store.remoteInstancesKnown).toBe(false)
+    })
+
+    // 零窗口：残留 Tab 的实例不能继续出现在选择器里
+    it('KnownInstances_EmptyRosterDropsTabs_001', () => {
+      const store = useSessionStore()
+      store.adoptRemoteSessions([
+        { id: 'pty-dead', type: 'claude', cwd: '/p', working: false, pending: false, instanceId: 'dead', instanceName: 'dead' },
+      ])
+      store.setRemoteInstances([])
+      expect(store.knownInstances).toEqual([])
+    })
+
+    // 多实例远程：instanceId/instanceName 透传到 Tab（会话列表分组渲染依据）
+    it('AdoptRemoteSessions_InstanceFields_001', () => {
+      const store = useSessionStore()
+      store.adoptRemoteSessions([
+        { id: 'pty-i1', type: 'claude', cwd: '/proj-a', working: false, pending: false, instanceId: 'inst-1', instanceName: '实例 1' },
+        { id: 'pty-i2', type: 'claude', cwd: '/proj-b', working: false, pending: false, instanceId: 'inst-2', instanceName: '实例 2' },
+        // 旧桌面/单实例：无实例字段，Tab 侧为 undefined（降级平铺）
+        { id: 'pty-i3', type: 'shell', cwd: '/proj-c', working: false, pending: false },
+      ])
+      expect(store.getTabByPtyId('pty-i1')?.instanceId).toBe('inst-1')
+      expect(store.getTabByPtyId('pty-i1')?.instanceName).toBe('实例 1')
+      expect(store.getTabByPtyId('pty-i2')?.instanceName).toBe('实例 2')
+      expect(store.getTabByPtyId('pty-i3')?.instanceId).toBeUndefined()
+    })
+
+    // 采纳远端会话不得消费用户待用的实例选择（刷新列表不能劫持下一步新建/恢复）
+    it('AdoptRemoteSessions_KeepsPendingInstance_001', () => {
+      const store = useSessionStore()
+      store.pendingInstanceId = 'inst-2'
+      store.adoptRemoteSessions([
+        { id: 'pty-i1', type: 'claude', cwd: '/proj-a', working: false, pending: false, instanceId: 'inst-1', instanceName: '实例 1' },
+      ])
+      // 采纳的 Tab 用自己的实例字段
+      expect(store.getTabByPtyId('pty-i1')?.instanceId).toBe('inst-1')
+      // 用户选择保留，下一步 createTab 仍路由到 inst-2
+      expect(store.pendingInstanceId).toBe('inst-2')
+      const tabId = store.createTab('/proj-new')
+      expect(store.tabs.get(tabId)?.instanceId).toBe('inst-2')
+      expect(store.pendingInstanceId).toBeNull()
+    })
+
+    // 已有 Tab 重复采纳时实例字段跟随更新（Gateway 重选后实例名可能变化）
+    it('AdoptRemoteSessions_InstanceFieldsUpdate_001', () => {
+      const store = useSessionStore()
+      store.adoptRemoteSessions([
+        { id: 'pty-i1', type: 'claude', cwd: '/proj-a', working: false, pending: false, instanceId: 'inst-1', instanceName: '实例 1' },
+      ])
+      store.adoptRemoteSessions([
+        { id: 'pty-i1', type: 'claude', cwd: '/proj-a', working: false, pending: false, instanceId: 'inst-1', instanceName: '实例 1' },
+        { id: 'pty-i1b', type: 'claude', cwd: '/proj-a', working: false, pending: false, instanceId: 'inst-9', instanceName: '实例 9' },
+      ])
+      // 原 Tab 实例字段保持；新 Tab 用新值
+      expect(store.getTabByPtyId('pty-i1')?.instanceId).toBe('inst-1')
+      expect(store.getTabByPtyId('pty-i1b')?.instanceId).toBe('inst-9')
+    })
+
     // 服务端下发 sessionId 时建 Tab 绑定该 id（重连后从历史恢复不再二次 spawn 的前提）
     it('AdoptRemoteSessions_WithSessionId_001', () => {
       const store = useSessionStore()
@@ -562,5 +653,54 @@ describe('session store', () => {
     const store = useSessionStore()
     expect(store.applyRemoteRename('ghost', '名字')).toBe(false)
   })
+  })
+})
+
+describe('session store 远程 attach 拒绝与剥离（同类问题回归）', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+  })
+
+  /** 建立一个 running 的远程 Tab（ptyId 绑定） */
+  function runningTab(): { tabId: string; ptyId: string } {
+    const store = useSessionStore()
+    const tabId = store.createTab('/project')
+    const ptyId = 'pty-denied-1'
+    store.setTabPty(tabId, ptyId)
+    return { tabId, ptyId }
+  }
+
+  /**
+   * attach 被拒必须按原因分支：控制权被占 → takenOver 遮罩（接管入口）；
+   * 会话不存在（窗口已关）→ Tab 置 stopped——若统一显示「被接管」，
+   * 用户点接管后会永久循环被拒
+   */
+  it('SessionStore_Attach被拒控制权分支_001', () => {
+    const store = useSessionStore()
+    const { tabId, ptyId } = runningTab()
+    store.handleAttachDenied(ptyId, 'controller held by another device')
+    const tab = store.tabs.get(tabId)!
+    expect(tab.takenOver).toBe(true)
+    expect(tab.status).toBe('running')
+  })
+
+  it('SessionStore_Attach被拒会话不存在分支_002', () => {
+    const store = useSessionStore()
+    const { tabId, ptyId } = runningTab()
+    store.handleAttachDenied(ptyId, 'session not found')
+    const tab = store.tabs.get(tabId)!
+    expect(tab.status).toBe('stopped')
+    expect(tab.takenOver).toBeUndefined()
+  })
+
+  /**
+   * 宿主窗口关闭时 Broker 广播 session.detached{instance disconnected}——
+   * 不处理的话 Tab 永远 running、终端冻结
+   */
+  it('SessionStore_远端剥离置Stopped_003', () => {
+    const store = useSessionStore()
+    const { tabId, ptyId } = runningTab()
+    store.handleRemoteDetached(ptyId)
+    expect(store.tabs.get(tabId)!.status).toBe('stopped')
   })
 })

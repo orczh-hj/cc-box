@@ -4,7 +4,7 @@
 //! 不强依赖 Tauri AppHandle（测试不设置即可）：事件 emit 在设置后启用。
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::LazyLock;
 
 use parking_lot::Mutex;
@@ -201,6 +201,42 @@ pub static REMOTE_STATE: LazyLock<RemoteState> =
 static NEXT_CONN_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_SEQ: AtomicU64 = AtomicU64::new(1);
 
+/// Broker 模式：本进程没有 PTY，禁止本地 spawn/kill 会话。
+static BROKER_MODE: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn set_broker_mode(enabled: bool) {
+    BROKER_MODE.store(enabled, Ordering::SeqCst);
+}
+
+pub(crate) fn is_broker() -> bool {
+    BROKER_MODE.load(Ordering::SeqCst)
+}
+
+/// 成员状态上行通道（SessionUpsert/SessionRemove/DesktopTakeover）。
+/// **无界**：状态帧数量受会话数约束，可靠优先于内存上限；输出流不走这里，
+/// 由每连接的 bridge 单独限流并带 seq 缺口标记。
+static UPLINK: LazyLock<Mutex<Option<mpsc::UnboundedSender<crate::gateway_proto::GwUp>>>> =
+    LazyLock::new(|| Mutex::new(None));
+
+/// 设置/清除成员状态上行通道（成员注册成功/断开时）
+pub(crate) fn set_uplink(tx: Option<mpsc::UnboundedSender<crate::gateway_proto::GwUp>>) {
+    *UPLINK.lock() = tx;
+}
+
+pub(crate) fn uplink_send(up: crate::gateway_proto::GwUp) {
+    let guard = UPLINK.lock();
+    if let Some(tx) = guard.as_ref() {
+        if tx.send(up).is_err() {
+            log::debug!("[remote] member uplink closed, state frame dropped");
+        }
+    }
+}
+
+/// 当前进程是否以 Broker 成员身份注册（有上行通道）
+fn has_uplink() -> bool {
+    UPLINK.lock().is_some()
+}
+
 /// 远程触发的会话创建并发上限（每消息一线程 + spawn Claude 进程，防资源耗尽）
 pub(crate) static REMOTE_SPAWN_INFLIGHT: AtomicUsize = AtomicUsize::new(0);
 const REMOTE_SPAWN_LIMIT: usize = 8;
@@ -300,6 +336,12 @@ fn emit_via_hook(name: &str, id: &str, data: &str) {
     }
 }
 
+/// Broker 扇出的桌面事件（DesktopEvent）直接投递到本地 Tauri EventHook，
+/// 不再进入 remote_state 广播（避免回环/重复）。
+pub(crate) fn fire_event_hook(name: &str, id: &str, data: &str) {
+    emit_via_hook(name, id, data);
+}
+
 impl RemoteState {
     /// 构造独立实例（单元测试用；生产代码使用全局 REMOTE_STATE）
     pub(crate) fn new() -> Self {
@@ -354,21 +396,35 @@ impl RemoteState {
     /// 当旧事件永久丢弃（遮罩/刷新状态丢失）
     fn broadcast_controller_changed(&self) {
         let name = crate::events::names::CONTROLLER_CHANGED;
-        let mut inner = self.inner.lock();
-        inner.revision += 1;
-        let rev = inner.revision;
-        let id = inner.controller.map(|c| c.id_label()).unwrap_or_default();
-        emit_via_hook(name, &id, &rev.to_string());
-        let msg = ServerMessage::RpcEvent {
-            name: name.to_string(),
-            payload: serde_json::json!({ "id": id, "data": rev.to_string() }),
-        };
-        for e in inner.conns.values() {
-            if e.download_scope.is_some() {
-                continue; // 票据受限连接不接收控制面事件
+        let (rev, holder, id) = {
+            let mut inner = self.inner.lock();
+            inner.revision += 1;
+            let rev = inner.revision;
+            let holder = inner.controller;
+            let id = holder.map(|c| c.id_label()).unwrap_or_default();
+            let msg = ServerMessage::RpcEvent {
+                name: name.to_string(),
+                payload: serde_json::json!({ "id": id, "data": rev.to_string() }),
+            };
+            for e in inner.conns.values() {
+                if e.download_scope.is_some() {
+                    continue; // 票据受限连接不接收控制面事件
+                }
+                let _ = e.tx.try_send(msg.clone());
             }
-            let _ = e.tx.try_send(msg.clone());
-        }
+            (rev, holder, id)
+        };
+        // 锁外调用 hook：Broker 的事件 hook 会取 GW_STATE，若在 inner 锁内调用
+        // 会与 unregister_member 的 GW_STATE→inner 形成 ABBA 死锁
+        emit_via_hook(name, &id, &rev.to_string());
+        // 多实例：向成员广播控制权影子（真源裁决结果；成员侧 pty.input 双重
+        // 校验依赖影子与真源一致）
+        crate::gateway::broadcast_down(crate::gateway_proto::GwDown::ControllerSet {
+            holder: holder.and_then(|c| match c {
+                ControllerHolder::Remote(conn) => Some(conn),
+                ControllerHolder::Desktop => None,
+            }),
+        });
     }
 
     /// 接管核心（远程 takeover 与桌面 controller_takeover 共用）：控制权转移给
@@ -376,7 +432,7 @@ impl RemoteState {
     /// 桌面尺寸）；旧持有者由 controller-changed 全局遮罩盖住，接管者以同一
     /// 广播确认并触发全量刷新
     fn transfer_controller(&self, new_holder: ControllerHolder) {
-        let stripped = {
+        let (old, stripped) = {
             let mut inner = self.inner.lock();
             let old = inner.controller;
             inner.controller = Some(new_holder);
@@ -391,7 +447,7 @@ impl RemoteState {
                     }
                 }
             }
-            ids
+            (old, ids)
         };
         for id in &stripped {
             // 与 remove_conn 归还同构：遮罩解除 + 尺寸恢复
@@ -399,12 +455,91 @@ impl RemoteState {
             resize_pty(id, self.desktop_size_of(id));
             log::info!("[remote] session {} stripped to desktop (takeover by {:?})", id, new_holder);
         }
+        // 多实例：旧持有者的会话可能在成员上——广播 Strip 让成员归还
+        if let Some(ControllerHolder::Remote(old_conn)) = old {
+            if ControllerHolder::Remote(old_conn) != new_holder {
+                crate::gateway::broadcast_down(crate::gateway_proto::GwDown::ControllerStrip {
+                    conn_id: old_conn,
+                });
+            }
+        }
         self.broadcast_controller_changed();
     }
 
     /// 远程显式接管（controller.takeover 消息）
     fn handle_takeover(&self, conn_id: u64) {
         self.transfer_controller(ControllerHolder::Remote(conn_id));
+    }
+
+    /// 控制权影子同步（Gateway 下发 ControllerSet，成员侧执行）：
+    /// 写影子状态 + 桌面 emit（不远程广播——真源在 Gateway，成员本地广播会被
+    /// 桥过滤器拦截）。emit 保证成员实例桌面在手机接管期间显示全局遮罩
+    pub(crate) fn sync_controller_shadow(&self, holder: Option<u64>) {
+        let id_label = holder.map(|c| c.to_string()).unwrap_or_default();
+        {
+            let mut inner = self.inner.lock();
+            inner.controller = holder.map(ControllerHolder::Remote);
+        }
+        emit_via_hook(crate::events::names::CONTROLLER_CHANGED, &id_label, "0");
+    }
+
+    /// v2 转发消息携带的 holder 先于消息应用：避免 ControllerSet 与
+    /// ClientMsg 在网络上交错时成员用过期影子拒绝输入。只在变化时 emit。
+    pub(crate) fn sync_controller_shadow_if_changed(&self, holder: Option<u64>) {
+        let current = {
+            let inner = self.inner.lock();
+            match inner.controller {
+                Some(ControllerHolder::Remote(c)) => Some(c),
+                _ => None,
+            }
+        };
+        if current != holder {
+            self.sync_controller_shadow(holder);
+        }
+    }
+
+    /// 成员重连/断连清理：所有远端接管的会话归还桌面、清空订阅索引。
+    /// 不触碰控制权真源（影子由 ControllerSet/holder 重新对齐）。
+    pub(crate) fn reset_remote_views(&self) {
+        let ids = {
+            let mut inner = self.inner.lock();
+            inner.subscribers.clear();
+            let mut ids = Vec::new();
+            for (id, entry) in inner.sessions.iter_mut() {
+                if matches!(entry.active, ActiveView::Remote(_)) {
+                    entry.active = ActiveView::Desktop;
+                    ids.push(id.clone());
+                }
+            }
+            ids
+        };
+        for id in ids {
+            emit_event("session-reclaimed", &id, "");
+            resize_pty(&id, self.desktop_size_of(&id));
+            log::info!("[remote] session {} reset to desktop (member reconnect)", id);
+        }
+    }
+
+    /// 剥离指定连接的全部 active 归属（Gateway 下发 ControllerStrip，成员侧
+    /// 执行）：归还桌面 + resize 恢复尺寸（与 transfer_controller 的本机 strip
+    /// 主体同构，但不触碰 controller 字段）
+    pub(crate) fn strip_controller_conn(&self, conn_id: u64) {
+        let ids = {
+            let mut inner = self.inner.lock();
+            let mut ids = Vec::new();
+            for (id, entry) in inner.sessions.iter_mut() {
+                if entry.active == ActiveView::Remote(conn_id) {
+                    entry.active = ActiveView::Desktop;
+                    ids.push(id.clone());
+                }
+            }
+            ids
+        };
+        for id in &ids {
+            emit_event("session-reclaimed", id, "");
+            resize_pty(id, self.desktop_size_of(id));
+            log::info!("[remote] session {} stripped to desktop (gateway takeover)", id);
+        }
     }
 
     /// 桌面显式接管（Tauri command controller_takeover / pty_claim 调用）：
@@ -415,6 +550,9 @@ impl RemoteState {
         }
         log::info!("[remote] desktop takeover");
         self.transfer_controller(ControllerHolder::Desktop);
+        // 多实例成员：桌面接管必须上报 Gateway（真源同步转 Desktop——
+        // 否则 Gateway 真源滞留 Remote(手机)，转发输入被成员影子门静默拒绝）
+        uplink_send(crate::gateway_proto::GwUp::DesktopTakeover);
     }
 
     /// 控制权释放（远程持有者断连时调用；广播空 id = 无人持有）
@@ -440,20 +578,37 @@ impl RemoteState {
     pub fn emit_state_changed(&self, section: StateSection) {
         let name = crate::events::names::STATE_CHANGED;
         let section = section.as_str();
+        let rev = {
+            let mut inner = self.inner.lock();
+            inner.revision += 1;
+            let rev = inner.revision;
+            let msg = ServerMessage::RpcEvent {
+                name: name.to_string(),
+                payload: serde_json::json!({ "id": section, "data": rev.to_string() }),
+            };
+            for e in inner.conns.values() {
+                if e.download_scope.is_some() {
+                    continue; // 票据受限连接不接收状态广播
+                }
+                let _ = e.tx.try_send(msg.clone());
+            }
+            rev
+        };
+        // 锁外调用 hook（Broker 中会取 GW_STATE，见 broadcast_controller_changed）
+        emit_via_hook(name, section, &rev.to_string());
+        // 成员模式：上行给 Broker，由 Broker 重新分配设备级 revision 后
+        // 扇出给其他 GUI 与全部手机。Broker 模式下 UPLINK 为 None，安全 no-op。
+        uplink_send(crate::gateway_proto::GwUp::StateChanged {
+            section: section.to_string(),
+        });
+    }
+
+    /// Broker 为成员上报的 state-changed 重新分配设备级 revision：
+    /// 成员进程的 revision 与 Broker 不可比，直接透传会被手机按旧事件丢弃。
+    pub(crate) fn next_revision(&self) -> u64 {
         let mut inner = self.inner.lock();
         inner.revision += 1;
-        let rev = inner.revision;
-        emit_via_hook(name, section, &rev.to_string());
-        let msg = ServerMessage::RpcEvent {
-            name: name.to_string(),
-            payload: serde_json::json!({ "id": section, "data": rev.to_string() }),
-        };
-        for e in inner.conns.values() {
-            if e.download_scope.is_some() {
-                continue; // 票据受限连接不接收状态广播
-            }
-            let _ = e.tx.try_send(msg.clone());
-        }
+        inner.revision
     }
 
     /// PTY 启动后注册（pty.rs spawn 成功时调用）
@@ -474,6 +629,11 @@ impl RemoteState {
                 session_id: None,
             },
         );
+        drop(inner);
+        // 成员模式：向 Gateway 上报新会话（手机聚合列表刷新依据）
+        uplink_send(crate::gateway_proto::GwUp::SessionUpsert {
+            session: self.session_snapshot(id),
+        });
     }
 
     /// PTY 退出/被杀后清理，通知所有连接。
@@ -495,7 +655,12 @@ impl RemoteState {
         if was_remote {
             emit_event("session-reclaimed", id, "");
         }
-        self.broadcast_to_all(ServerMessage::SessionExit { id: id.to_string() });
+        // 成员模式由 Broker 统一广播 SessionExit（见 SessionRemove）；
+        // 本地再广播会经 ToConn 让桥接手机收到两次。
+        if !has_uplink() {
+            self.broadcast_to_all(ServerMessage::SessionExit { id: id.to_string() });
+        }
+        uplink_send(crate::gateway_proto::GwUp::SessionRemove { id: id.to_string() });
     }
 
     /// 输出 tee（pty.rs 读取循环调用）：更新 tail 并转发给订阅者
@@ -503,18 +668,23 @@ impl RemoteState {
         if data.is_empty() {
             return;
         }
-        {
+        let seq = {
             let mut inner = self.inner.lock();
             match inner.sessions.get_mut(id) {
-                Some(entry) => entry.tail.push(data),
+                Some(entry) => {
+                    entry.tail.push(data);
+                    entry.seq = entry.seq.wrapping_add(1);
+                    entry.seq
+                }
                 None => return,
             }
-        }
+        };
         self.broadcast_to_subscribers(
             id,
             ServerMessage::PtyOutput {
                 id: id.to_string(),
                 data: data.to_string(),
+                seq,
             },
         );
     }
@@ -529,11 +699,43 @@ impl RemoteState {
 
     /// 记录会话 id（hook_server 收到 SessionStart 等 hook 事件时调用；幂等）
     pub fn set_session_id(&self, pty_id: &str, session_id: &str) {
-        let mut inner = self.inner.lock();
-        if let Some(entry) = inner.sessions.get_mut(pty_id) {
-            if entry.session_id.as_deref() != Some(session_id) {
-                entry.session_id = Some(session_id.to_string());
+        let changed = {
+            let mut inner = self.inner.lock();
+            match inner.sessions.get_mut(pty_id) {
+                Some(entry) => {
+                    if entry.session_id.as_deref() != Some(session_id) {
+                        entry.session_id = Some(session_id.to_string());
+                        true
+                    } else {
+                        false
+                    }
+                }
+                None => false,
             }
+        };
+        if changed {
+            // 成员模式：sessionId 建立后上报（手机端防二次 spawn 的关联依据）
+            uplink_send(crate::gateway_proto::GwUp::SessionUpsert {
+                session: self.session_snapshot(pty_id),
+            });
+        }
+    }
+
+    /// 单会话快照（uplink 上报用；不存在时 None）
+    fn session_snapshot(&self, id: &str) -> cc_box_remote_protocol::RemoteSession {
+        let inner = self.inner.lock();
+        let entry = inner.sessions.get(id);
+        cc_box_remote_protocol::RemoteSession {
+            id: id.to_string(),
+            pty_type: entry
+                .map(|e| e.pty_type.clone())
+                .unwrap_or_default(),
+            cwd: entry.map(|e| e.cwd.clone()).unwrap_or_default(),
+            working: entry.map(|e| e.working).unwrap_or(false),
+            pending: entry.map(|e| e.pending).unwrap_or(false),
+            session_id: entry.and_then(|e| e.session_id.clone()),
+            instance_id: None,
+            instance_name: None,
         }
     }
 
@@ -568,7 +770,11 @@ impl RemoteState {
         };
         if let Some(msg) = status_msg {
             // 广播给全部连接而非仅订阅者：列表页 working/pending 圆点也要实时变化（R1-2）
-            self.broadcast_to_all(msg);
+            self.broadcast_to_all(msg.clone());
+            // 成员模式：状态变化上报 Gateway 缓存（聚合列表下次拉取时一致）
+            uplink_send(crate::gateway_proto::GwUp::SessionUpsert {
+                session: self.session_snapshot(pty_id),
+            });
         }
         Some(status)
     }
@@ -582,6 +788,22 @@ impl RemoteState {
                 tx: sender,
                 via_relay,
                 authed: !via_relay,
+                download_scope: None,
+            },
+        );
+    }
+
+    /// 成员桥连接注册（Gateway 转发来的手机连接）：conn_id 透传，authed 直置
+    /// true（认证已在 Gateway 完成）；via_relay 透传保证文件限额档位正确。
+    /// 注册后所有广播（PtyOutput/SessionStatus/RpcEvent 等）自动发到桥通道，
+    /// 由成员桥任务封 ToConn 上行 Gateway——广播路径零改动
+    pub fn add_member_conn(&self, conn_id: u64, sender: mpsc::Sender<ServerMessage>, via_relay: bool) {
+        self.inner.lock().conns.insert(
+            conn_id,
+            ConnEntry {
+                tx: sender,
+                via_relay,
+                authed: true,
                 download_scope: None,
             },
         );
@@ -605,6 +827,8 @@ impl RemoteState {
     pub fn remove_conn(&self, conn_id: u64) {
         // 文件传输会话随连接回收（删 .part，防僵死会话占满配额）
         crate::file_transfer::cleanup_conn(conn_id);
+        // Gateway 侧：清 rpc 粘连路由（file_upload 后续命令不再跟随）
+        crate::gateway::conn_dropped(conn_id);
         // 控制权释放（持有者断连；广播空 id = 其他设备可自由操作）
         self.release_controller(conn_id);
         let reclaimed = {
@@ -628,6 +852,9 @@ impl RemoteState {
             resize_pty(id, self.desktop_size_of(id));
             log::info!("[remote] session {} auto-reclaimed (conn {} closed)", id, conn_id);
         }
+        // 多实例：通知成员清桥（成员侧 remove_conn 自带归还 + 传输会话回收）。
+        // 成员进程自身调用时 members 为空，广播为 no-op
+        crate::gateway::broadcast_down(crate::gateway_proto::GwDown::ConnDrop { conn_id });
     }
 
     fn desktop_size_of(&self, id: &str) -> Option<(u16, u16)> {
@@ -674,22 +901,59 @@ impl RemoteState {
     }
 
     /// 应用层消息分发（认证后的消息，局域网/中继同一条路径）
+    /// 连接级消息门闩：除 Hello（认证本身）外，未知/未认证连接一律拒绝；
+    /// 票据受限连接只放行该文件的下载分块与心跳。handler 与 Gateway 转发
+    /// 路径共用（转发到成员前必须先过同一道门，否则未认证中继连接可借成员
+    /// 桥的 authed 直置绕过认证）
+    pub fn conn_message_allowed(&self, conn_id: u64, msg: &ClientMessage) -> bool {
+        if matches!(msg, ClientMessage::Hello { .. }) {
+            return true;
+        }
+        let inner = self.inner.lock();
+        let Some(e) = inner.conns.get(&conn_id) else {
+            return false;
+        };
+        if !e.authed {
+            return false;
+        }
+        if e.download_scope.is_some() && !ticket_conn_allows(msg) {
+            return false;
+        }
+        true
+    }
+
     pub fn handle_client_message(&self, conn_id: u64, msg: &ClientMessage) {
-        // 票据受限连接只放行文件分块与心跳（见 ticket_conn_allows）
-        // 认证门闩：除 Hello（认证本身）外，未认证或未知连接的消息一律忽略
-        //（takeover/attach 等分支不查 conns 表，无门闩则可被盲注入）
-        if !matches!(msg, ClientMessage::Hello { .. }) {
-            let inner = self.inner.lock();
-            let Some(e) = inner.conns.get(&conn_id) else {
-                return;
-            };
-            if !e.authed {
-                return;
-            }
-            // 票据连接是受限会话：只放行该文件的下载分块与心跳，其余消息
-            // （session.* / rpc 写命令 / controller.takeover）一律忽略
-            if e.download_scope.is_some() && !ticket_conn_allows(msg) {
-                return;
+        // 认证门闩（takeover/attach 等分支不查 conns 表，无门闩则可被盲注入）
+        if !self.conn_message_allowed(conn_id, msg) {
+            return;
+        }
+        // Broker 没有 PTY：会话级消息只能由 gateway::dispatch 路由到成员。
+        // 到达本地说明路由表缺失/代码遗漏——显式拒绝，绝不落到空 PTY manager。
+        if is_broker() {
+            match msg {
+                ClientMessage::SessionCreate { .. } => {
+                    self.try_send(
+                        conn_id,
+                        ServerMessage::SessionCreateFailed {
+                            error: "no GUI instance available".to_string(),
+                        },
+                    );
+                    return;
+                }
+                ClientMessage::SessionKill { .. }
+                | ClientMessage::SessionAttach { .. }
+                | ClientMessage::SessionDetach { .. }
+                | ClientMessage::SessionSubscribe { .. }
+                | ClientMessage::SessionUnsubscribed { .. }
+                | ClientMessage::PtyInput { .. }
+                | ClientMessage::PtyResize { .. } => {
+                    log::warn!(
+                        "[remote] broker received un-routed session message for conn {}",
+                        conn_id
+                    );
+                    return;
+                }
+                _ => {}
             }
         }
         match msg {
@@ -739,7 +1003,9 @@ impl RemoteState {
                 );
             }
             ClientMessage::SessionsList => {
-                let list = self.session_list();
+                // 多实例聚合：Gateway 侧合并本机与成员实例的会话（带实例分组
+                // 字段）；单实例/无成员时输出与本机列表一致（实例字段照填）
+                let list = crate::gateway::merged_session_list(self.session_list());
                 let revision = self.revision();
                 self.try_send(conn_id, ServerMessage::Sessions { list, revision });
             }
@@ -754,7 +1020,7 @@ impl RemoteState {
                     .collect();
                 self.try_send(conn_id, ServerMessage::Projects { list });
             }
-            ClientMessage::SessionCreate { path, session_id, skip_permissions, custom_args, session_name } => {
+            ClientMessage::SessionCreate { path, session_id, skip_permissions, custom_args, session_name, .. } => {
                 // 设备互斥：写操作，他人持有时拒绝（前端遮罩是第一道，此处服务端兜底）
                 if let Err(holder) = self.controller_gate(conn_id) {
                     log::warn!(
@@ -909,15 +1175,19 @@ impl RemoteState {
                 // 锁内先发 SessionSubscribed，再插入订阅者
                 let queued = {
                     let mut inner = self.inner.lock();
-                    let tail = inner.sessions.get_mut(id).map(|e| e.tail.snapshot());
+                    let tail = inner
+                        .sessions
+                        .get_mut(id)
+                        .map(|e| (e.tail.snapshot(), e.seq));
                     match tail {
-                        Some(tail) => {
+                        Some((tail, tail_seq)) => {
                             let ok = send_locked(
                                 &inner,
                                 conn_id,
                                 ServerMessage::SessionSubscribed {
                                     id: id.clone(),
                                     tail,
+                                    tail_seq,
                                 },
                             );
                             inner
@@ -1070,9 +1340,9 @@ impl RemoteState {
                 if entry.pending {
                     entry.pending = false;
                 }
-                (old, entry.tail.snapshot(), pending_cleared)
+                (old, entry.tail.snapshot(), entry.seq, pending_cleared)
             });
-            let Some((old, tail, pending_cleared)) = old_and_tail else {
+            let Some((old, tail, tail_seq, pending_cleared)) = old_and_tail else {
                 drop(inner);
                 self.try_send(conn_id, ServerMessage::SessionExit { id: id.to_string() });
                 return;
@@ -1087,6 +1357,7 @@ impl RemoteState {
                     cols,
                     rows,
                     tail,
+                    tail_seq,
                 },
             );
             // attach 同时视为输出订阅者（旧订阅者保留，与桌面 claim 语义一致）
@@ -1116,6 +1387,11 @@ impl RemoteState {
                 serde_json::json!({ "id": id, "data": "" }),
                 Some(conn_id),
             );
+            // 成员实例：pending 变化立即上报 Gateway 聚合缓存，否则手机端
+            // 列表的待关注圆点要等下一次 hook/status 上报才消失
+            if let Some(s) = self.session_list().into_iter().find(|s| s.id == *id) {
+                uplink_send(crate::gateway_proto::GwUp::SessionUpsert { session: s });
+            }
         }
 
         // 旧持有者遮罩通知：远程互抢与桌面被抢统一走 taken-over 广播
@@ -1154,6 +1430,10 @@ impl RemoteState {
                         working: e.working,
                         pending: e.pending,
                         session_id: e.session_id.clone(),
+                        // 多实例聚合由 Gateway 侧 merged_session_list 填充（P3）；
+                        // 此处 None = 旧桌面同构输出（手机端降级平铺）
+                        instance_id: None,
+                        instance_name: None,
                     },
                 )
             })
@@ -1180,7 +1460,7 @@ impl RemoteState {
     /// 广播给全部在线连接（会话列表级信息：exit、working/pending 状态）。
     /// 票据受限连接不接收任何广播——它们只允许文件分块与心跳，
     /// 不该拿到会话/项目/配置等元数据
-    fn broadcast_to_all(&self, msg: ServerMessage) {
+    pub(crate) fn broadcast_to_all(&self, msg: ServerMessage) {
         let inner = self.inner.lock();
         for e in inner.conns.values() {
             if e.download_scope.is_some() {
@@ -1197,6 +1477,17 @@ impl RemoteState {
             name: name.to_string(),
             payload,
         });
+    }
+
+    /// 定向事件（单个连接）：实例名单等按需补发，避免广播噪声
+    pub fn send_event_to(&self, conn_id: u64, name: &str, payload: serde_json::Value) {
+        let inner = self.inner.lock();
+        if let Some(e) = inner.conns.get(&conn_id) {
+            let _ = e.tx.try_send(ServerMessage::RpcEvent {
+                name: name.to_string(),
+                payload,
+            });
+        }
     }
 
     /// 同 broadcast_event，排除指定连接（受众精准化的广播）
@@ -1223,6 +1514,40 @@ impl RemoteState {
         let inner = self.inner.lock();
         if let Some(tx) = inner.conns.get(&conn_id).map(|e| &e.tx) {
             let _ = tx.try_send(msg);
+        }
+    }
+
+    /// 成员上行消息投递给手机（非阻塞）：
+    /// - `PtyOutput` 可丢（成员侧已按 headroom 丢弃并保留真实 seq，客户端检测缺口）；
+    /// - 其余可靠消息入队失败（队列满/已关）→ 断开该手机（浏览器重连后全量
+    ///   拉取），绝不静默丢弃 attach 应答/RPC 结果/创建结果。
+    ///
+    /// 这里刻意不做 `send().await`：该函数在成员 IPC 读循环内联调用，等待慢
+    /// 手机会队头阻塞整个成员的上行（SessionUpsert/心跳/其他连接应答），
+    /// 最终把成员拖成重连。断开慢手机是显式、可恢复的。
+    pub(crate) fn deliver_to_conn(&self, conn_id: u64, msg: ServerMessage) {
+        let tx = {
+            let inner = self.inner.lock();
+            inner.conns.get(&conn_id).map(|e| e.tx.clone())
+        };
+        let Some(tx) = tx else {
+            return;
+        };
+        if matches!(msg, ServerMessage::PtyOutput { .. }) {
+            if tx.try_send(msg).is_err() {
+                log::debug!(
+                    "[remote] pty output dropped for conn {} (client backpressure)",
+                    conn_id
+                );
+            }
+            return;
+        }
+        if tx.try_send(msg).is_err() {
+            log::warn!(
+                "[remote] reliable delivery to conn {} failed; dropping connection",
+                conn_id
+            );
+            self.remove_conn(conn_id);
         }
     }
 }

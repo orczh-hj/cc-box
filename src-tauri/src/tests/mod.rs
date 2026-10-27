@@ -23,6 +23,12 @@ mod remote_state;
 #[cfg(test)]
 mod remote_host;
 #[cfg(test)]
+mod gateway;
+#[cfg(test)]
+mod broker_ipc;
+#[cfg(test)]
+mod broker_lifecycle;
+#[cfg(test)]
 mod dir_listing;
 #[cfg(test)]
 mod state_broadcast;

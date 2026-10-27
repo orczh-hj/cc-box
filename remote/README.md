@@ -74,7 +74,7 @@ remote/
 │   └── samples/         #   JSON 固定样例（两端契约）
 ├── web-assets/          # cc-box-web-assets 共享 crate（Web UI 静态服务：磁盘目录优先 + 内嵌兜底，relay 与桌面共用）
 ├── relay/               # cc-box-relay 中继服务器（R3，独立 Rust 二进制，依赖 protocol + web-assets crate）
-└── docs/                # protocol.md、deploy.md、manual-test-cases.md
+└── docs/                # protocol.md、multi-instance-gateway.md（多实例实施与操作）、deploy.md、manual-test-cases.md
 ```
 
 **Web UI 已统一**：不再有独立手机 Web UI（原 remote/web 删除）。浏览器访问的是主应用 UI（src/，Vue 3 + xterm.js），经 `src/api/transport.ts` 传输层自动切换到 WS 远程实现；构建即主应用 `npm run build`，产物 dist 由 `remote/web-assets` crate 统一供给——环境变量指向的磁盘目录优先（`CC_BOX_RELAY_WEB_DIR` / `CC_BOX_WEB_DIR`，前端可独立 scp 更新免重编），未配置/未命中回退 rust-embed 编译期内嵌。**生产 relay 已启用磁盘分离（`/opt/cc-box/web`）**：前端改动 scp dist 即生效，免重编免重启。

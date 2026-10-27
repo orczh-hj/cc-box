@@ -16,7 +16,8 @@ use serde::de::DeserializeOwned;
 use serde_json::{Map, Value};
 
 /// 显式排除（不可经远程调用）：installer 12 个系统级 + PTY 6 个（走专用消息）
-/// + 文件管理器/新实例（桌面级）+ app_path/log（仅桌面有意义）
+/// + 文件管理器/app_path/log/开机自启动（桌面级）。
+/// 注意：`spawn_new_instance` 不在此列——远程零窗口时需要 Broker 拉起窗口。
 pub const EXCLUDED: &[&str] = &[
     // installer（系统级：下载/安装/杀进程）
     "get_latest_versions",
@@ -45,8 +46,12 @@ pub const EXCLUDED: &[&str] = &[
     // 桌面级（打开本地文件/文件夹）
     "open_in_file_manager",
     "open_claude_user_settings",
-    "spawn_new_instance",
     "get_app_path",
+    // 窗口标题回传 / 待处理远程面板请求（仅桌面窗口）
+    "update_window_title",
+    "take_pending_open_remote",
+    "take_pending_open_update",
+    "resume_broker_connection",
     // 安全：中继重定向=窃取 device_key 的通道（详见 rpc_table 尾注释）
     "set_relay_url",
     // 桌面专属：重申一次性配对码，新码仅经桌面扫码面板展示，远程调用无意义
@@ -54,6 +59,10 @@ pub const EXCLUDED: &[&str] = &[
     // 桌面专属：密钥轮换只应由桌面「刷新密钥」按钮发起（会踢掉一切连接，
     // 远程调用等于让已连接设备自毁）
     "rotate_remote_secret",
+    // 桌面专属：更新安装前退出 Broker（远程调用无意义且会中断后台服务）
+    "prepare_for_update",
+    // 桌面专属：开机自启动是本机配置，远程设备不应改动宿主登录项
+    "set_broker_autostart",
 ];
 
 /// 状态广播 section（state-changed 事件 payload 的 id 字段）。
@@ -208,6 +217,11 @@ registry! {
     "import_from_cc_switch" => write(Providers) => | | crate::commands::import_from_cc_switch,
     "test_provider_connection" => read() => |provider_id: String| crate::commands::test_provider_connection,
 
+    // ==== 窗口管理 ====
+    // 远程在零窗口时拉起新的 GUI 窗口（Broker 本地执行，无需成员在线）。
+    // 服务端在 broker/windows.rs 做 12 窗口上限与 2s 冷却。
+    "spawn_new_instance" => write(None) => | | spawn_new_instance_rpc,
+
     // ==== 远程设置（浏览器端查看/管理远程开关） ====
     "get_remote_status" => read() => | | crate::commands::get_remote_status,
     "set_remote_enabled" => write(None) => |enabled: bool| crate::commands::set_remote_enabled,
@@ -258,6 +272,11 @@ pub async fn dispatch(cmd: &str, args: &Map<String, Value>) -> Result<Value, Str
 async fn log_message_rpc(level: String, message: String) -> Result<(), String> {
     crate::commands::log_message(level, message).await;
     Ok(())
+}
+
+/// 远程零窗口拉起 GUI（handler 是同步 Tauri command，包成 async）
+async fn spawn_new_instance_rpc() -> Result<(), String> {
+    crate::commands::spawn_new_instance().await
 }
 
 /// 文件传输命令的服务端权威注入：connId 供会话归属校验（他人 uploadId/
@@ -391,6 +410,14 @@ pub fn handle_rpc(conn_id: u64, rpc_id: u64, cmd: &str, args: &Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn Rpc_SpawnNewInstanceWhitelisted_001() {
+        assert!(RPC_WHITELIST.contains(&"spawn_new_instance"));
+        assert!(!EXCLUDED.contains(&"spawn_new_instance"));
+        assert!(is_remote_write("spawn_new_instance"));
+        assert!(write_section("spawn_new_instance").is_none());
+    }
 
     /// 从 lib.rs 源码提取 invoke_handler 注册的命令名：截取 `generate_handler![`
     /// 到 `])` 的块，按行取 `module::name` 的 name 段（跳过注释与属性行；

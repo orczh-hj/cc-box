@@ -404,7 +404,7 @@ dependencies = [
 
 [[package]]
 name = "cc-box"
-version = "0.16.9"
+version = "0.16.10"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -418,6 +418,7 @@ dependencies = [
  "encoding_rs",
  "futures-util",
  "hostname",
+ "libc",
  "log",
  "once_cell",
  "parking_lot",
@@ -442,6 +443,7 @@ dependencies = [
  "uuid",
  "webview2-com",
  "windows-core 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4670,6 +4672,7 @@ dependencies = [
  "gtk",
  "heck 0.5.0",
  "http 1.4.0",
+ "image",
  "jni",
  "libc",
  "log",

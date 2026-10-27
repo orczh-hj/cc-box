@@ -65,6 +65,9 @@ export interface SpawnSessionOptions {
   resumeName?: string
   skipPermissions?: boolean
   customArgs?: string
+  /** 多实例远程：目标 CC-Box 实例（session.create 路由用；缺省 = 网关本机。
+   *  桌面模式忽略——桌面新建天然在本实例） */
+  instanceId?: string
 }
 
 export interface SpawnSessionResult {

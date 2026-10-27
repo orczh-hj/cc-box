@@ -34,6 +34,8 @@ pub mod names {
     pub const STATE_CHANGED: &str = "state-changed";
     /// 全局控制权变更（payload {id: connId 或空串, data: revision}；远程端显示/解除全局遮罩）
     pub const CONTROLLER_CHANGED: &str = "controller-changed";
+    /// 多实例：实例上/下线或会话集合变化（前端重拉聚合会话列表）
+    pub const INSTANCES_CHANGED: &str = "instances-changed";
 }
 
 /// 控制类事件统一出口：Tauri emit + 远程 rpc.event 广播

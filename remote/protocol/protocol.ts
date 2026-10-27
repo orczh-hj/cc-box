@@ -13,7 +13,7 @@ export type ClientMessage =
   | { type: 'hello'; ver: number; client: string; token: string }
   | { type: 'sessions.list' }
   | { type: 'projects.list' }
-  | { type: 'session.create'; path: string; sessionId?: string; skipPermissions?: boolean; customArgs?: string; sessionName?: string }
+  | { type: 'session.create'; path: string; sessionId?: string; skipPermissions?: boolean; customArgs?: string; sessionName?: string; instanceId?: string }
   | { type: 'session.kill'; id: string; quiet?: boolean }
   | { type: 'sessions.history'; path: string }
   | { type: 'session.subscribe'; id: string }
@@ -43,6 +43,10 @@ export interface RemoteSession {
   pending: boolean
   /** Claude 会话 id（hook SessionStart 建立；shell 会话与旧版桌面端缺失） */
   sessionId?: string
+  /** 会话所属 CC-Box 实例 id（设备级 Gateway 多实例聚合；单实例/旧版缺失） */
+  instanceId?: string
+  /** 实例展示名（如「实例 2」；缺失时手机端降级为不分组平铺） */
+  instanceName?: string
 }
 
 /** 远程可见的项目（新建会话用） */
@@ -79,15 +83,15 @@ export type ServerMessage =
   | { type: 'session.created'; id: string; path: string }
   | { type: 'session.create.failed'; error: string }
   | { type: 'history.sessions'; list: RemoteHistorySession[] }
-  | { type: 'session.subscribed'; id: string; tail: string }
+  | { type: 'session.subscribed'; id: string; tail: string; tailSeq?: number }
   | { type: 'session.unsubscribed'; id: string }
-  | { type: 'session.attached'; id: string; cols: number; rows: number; tail: string }
+  | { type: 'session.attached'; id: string; cols: number; rows: number; tail: string; tailSeq?: number }
   /** attach 被拒：全局控制权被其他设备持有（先 controller.takeover 接管） */
   | { type: 'session.attach.denied'; id: string; reason: string }
   | { type: 'session.detached'; id: string; reason: string }
   | { type: 'session.status'; id: string; working: boolean; pending: boolean }
   | { type: 'session.exit'; id: string }
-  | { type: 'pty.output'; id: string; data: string }
+  | { type: 'pty.output'; id: string; data: string; seq?: number }
   | { type: 'pong' }
   | { type: 'rpc.result'; id: number; ok: boolean; data?: unknown; error?: string }
   | { type: 'rpc.event'; name: string; payload: unknown }
@@ -127,6 +131,7 @@ export function parseClientMessage(raw: unknown): ClientMessage | null {
         const skipPermissions = raw.skipPermissions
         const customArgs = raw.customArgs
         const sessionName = raw.sessionName
+        const instanceId = raw.instanceId
         return {
           type: 'session.create',
           path: raw.path,
@@ -134,6 +139,7 @@ export function parseClientMessage(raw: unknown): ClientMessage | null {
           ...(typeof skipPermissions === 'boolean' ? { skipPermissions } : {}),
           ...(str(customArgs) ? { customArgs } : {}),
           ...(str(sessionName) ? { sessionName } : {}),
+          ...(str(instanceId) ? { instanceId } : {}),
         }
       }
       return null
@@ -227,7 +233,9 @@ export function parseServerMessage(raw: unknown): ServerMessage | null {
           if (
             isObject(item) && str(item.id) && str(item.type) &&
             str(item.cwd) && bool(item.working) && bool(item.pending) &&
-            (item.sessionId === undefined || str(item.sessionId))
+            (item.sessionId === undefined || str(item.sessionId)) &&
+            (item.instanceId === undefined || str(item.instanceId)) &&
+            (item.instanceName === undefined || str(item.instanceName))
           ) {
             list.push({
               id: item.id,
@@ -236,6 +244,8 @@ export function parseServerMessage(raw: unknown): ServerMessage | null {
               working: item.working,
               pending: item.pending,
               ...(item.sessionId !== undefined ? { sessionId: item.sessionId } : {}),
+              ...(item.instanceId !== undefined ? { instanceId: item.instanceId } : {}),
+              ...(item.instanceName !== undefined ? { instanceName: item.instanceName } : {}),
             })
           } else {
             return null
@@ -280,14 +290,30 @@ export function parseServerMessage(raw: unknown): ServerMessage | null {
       }
       return null
     case 'session.subscribed':
-      if (str(raw.id) && str(raw.tail)) return { type: 'session.subscribed', id: raw.id, tail: raw.tail }
+      if (str(raw.id) && str(raw.tail)) {
+        const tailSeq = num(raw.tailSeq) ? raw.tailSeq : undefined
+        return {
+          type: 'session.subscribed',
+          id: raw.id,
+          tail: raw.tail,
+          ...(tailSeq !== undefined ? { tailSeq } : {}),
+        }
+      }
       return null
     case 'session.unsubscribed':
       if (str(raw.id)) return { type: 'session.unsubscribed', id: raw.id }
       return null
     case 'session.attached':
       if (str(raw.id) && num(raw.cols) && num(raw.rows) && str(raw.tail)) {
-        return { type: 'session.attached', id: raw.id, cols: raw.cols, rows: raw.rows, tail: raw.tail }
+        const tailSeq = num(raw.tailSeq) ? raw.tailSeq : undefined
+        return {
+          type: 'session.attached',
+          id: raw.id,
+          cols: raw.cols,
+          rows: raw.rows,
+          tail: raw.tail,
+          ...(tailSeq !== undefined ? { tailSeq } : {}),
+        }
       }
       return null
     case 'session.attach.denied':
@@ -309,7 +335,15 @@ export function parseServerMessage(raw: unknown): ServerMessage | null {
       if (str(raw.id)) return { type: 'session.exit', id: raw.id }
       return null
     case 'pty.output':
-      if (str(raw.id) && str(raw.data)) return { type: 'pty.output', id: raw.id, data: raw.data }
+      if (str(raw.id) && str(raw.data)) {
+        const seq = num(raw.seq) ? raw.seq : undefined
+        return {
+          type: 'pty.output',
+          id: raw.id,
+          data: raw.data,
+          ...(seq !== undefined ? { seq } : {}),
+        }
+      }
       return null
     case 'pong':
       return { type: 'pong' }

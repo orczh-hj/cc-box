@@ -129,11 +129,9 @@ pub struct ImportResult {
     pub active_provider_name: Option<String>,
 }
 
-/// 获取 GUI 配置目录
+/// 获取 GUI 配置目录（复用 store 的 CC_BOX_CONFIG_DIR/测试覆盖）
 fn get_gui_config_dir() -> Result<PathBuf> {
-    dirs::home_dir()
-        .map(|h| h.join(".cc-box"))
-        .context("Home directory not found")
+    crate::store::get_gui_config_dir()
 }
 
 /// 获取 providers.json 文件路径

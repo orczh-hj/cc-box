@@ -54,7 +54,7 @@ describe('Remote_ProtocolContract_字段值保真', () => {
       expect(msg.list.length).toBe(2)
       // 全量刷新的状态版本基线（防旧事件覆盖）
       expect(msg.revision).toBe(3)
-      // claude 会话携带 sessionId（hook SessionStart 建立）
+      // claude 会话携带 sessionId（hook SessionStart 建立）与实例分组字段
       expect(msg.list[0]).toEqual({
         id: expect.any(String),
         type: 'claude',
@@ -62,16 +62,40 @@ describe('Remote_ProtocolContract_字段值保真', () => {
         working: true,
         pending: false,
         sessionId: expect.any(String),
+        instanceId: expect.any(String),
+        instanceName: '实例 1',
       })
-      // shell 会话无 sessionId（可选字段缺失合法）
+      // shell 会话无 sessionId（可选字段缺失合法），归属另一实例
       expect(msg.list[1]).toEqual({
         id: expect.any(String),
         type: 'shell',
         cwd: expect.any(String),
         working: false,
         pending: false,
+        instanceId: expect.any(String),
+        instanceName: '实例 2',
       })
     }
+  })
+
+  it('旧桌面 sessions 无实例字段时降级（向后兼容，不分组平铺）', () => {
+    const msg = parseServerMessage(loadSample('server-sessions-ungrouped.json'))
+    expect(msg?.type).toBe('sessions')
+    if (msg?.type === 'sessions') {
+      for (const s of msg.list) {
+        expect(s).not.toHaveProperty('instanceId')
+        expect(s).not.toHaveProperty('instanceName')
+      }
+    }
+  })
+
+  it('session.create 多实例路由字段保真（instanceId）', () => {
+    const msg = parseClientMessage(loadSample('client-session-create-instance.json'))
+    expect(msg).toEqual({
+      type: 'session.create',
+      path: expect.any(String),
+      instanceId: 'a3bb189e8f14ca27169d9a391f98a3ab',
+    })
   })
 
   it('hello.ok 携带连接标识/控制者/版本基线', () => {

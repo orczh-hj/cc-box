@@ -29,7 +29,9 @@ pub enum ClientMessage {
     ProjectsList,
     /// 在指定项目新建 Claude 会话；带 sessionId 时为恢复历史会话（--resume）；
     /// skipPermissions/customArgs 与桌面新建选项一致（拼 CLI 参数）；
-    /// sessionName 为恢复会话的显示名（历史列表提供，桌面建 Tab 用，防编码名）
+    /// sessionName 为恢复会话的显示名（历史列表提供，桌面建 Tab 用，防编码名）；
+    /// instanceId 为多实例路由：设备级 Gateway 按此转发到成员实例执行，
+    /// 旧手机端不带 = 网关本机执行（serde default 兼容）
     #[serde(rename = "session.create")]
     SessionCreate {
         path: String,
@@ -41,6 +43,8 @@ pub enum ClientMessage {
         custom_args: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         session_name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        instance_id: Option<String>,
     },
     /// 关闭（杀掉）指定会话；quiet=true 为重启场景的内部清理——不广播
     /// remote-session-closed（各端保留 Tab 等 respawn，pty-exit 只置 stopped），
@@ -132,12 +136,26 @@ pub enum ServerMessage {
     HistorySessions { list: Vec<RemoteHistorySession> },
     /// 订阅成功，附最近输出 tail
     #[serde(rename = "session.subscribed")]
-    SessionSubscribed { id: String, tail: String },
+    SessionSubscribed {
+        id: String,
+        tail: String,
+        /// tail 末尾对应的输出序号（客户端据此校准后续 PtyOutput；旧桌面端缺省 0）
+        #[serde(default, skip_serializing_if = "is_zero_u64")]
+        tail_seq: u64,
+    },
     #[serde(rename = "session.unsubscribed")]
     SessionUnsubscribed { id: String },
     /// 接管成功，附快照 tail
     #[serde(rename = "session.attached")]
-    SessionAttached { id: String, cols: u16, rows: u16, tail: String },
+    SessionAttached {
+        id: String,
+        cols: u16,
+        rows: u16,
+        tail: String,
+        /// tail 末尾对应的输出序号（客户端据此校准后续 PtyOutput；旧桌面端缺省 0）
+        #[serde(default, skip_serializing_if = "is_zero_u64")]
+        tail_seq: u64,
+    },
     /// attach 被拒：全局控制权被其他设备持有（先 controller.takeover 接管）
     #[serde(rename = "session.attach.denied")]
     SessionAttachDenied { id: String, reason: String },
@@ -151,7 +169,13 @@ pub enum ServerMessage {
     #[serde(rename = "session.exit")]
     SessionExit { id: String },
     #[serde(rename = "pty.output")]
-    PtyOutput { id: String, data: String },
+    PtyOutput {
+        id: String,
+        data: String,
+        /// 会话内单调递增输出序号（客户端检测丢帧缺口；旧桌面端缺省 0）
+        #[serde(default, skip_serializing_if = "is_zero_u64")]
+        seq: u64,
+    },
     #[serde(rename = "pong")]
     Pong,
     /// RPC 调用结果（与 rpc.call 的 id 对应）
@@ -171,6 +195,11 @@ pub enum ServerMessage {
         name: String,
         payload: serde_json::Value,
     },
+}
+
+/// 序列化辅助：0 值省略，保证旧样例/旧客户端的 JSON 形态不变
+fn is_zero_u64(v: &u64) -> bool {
+    *v == 0
 }
 
 /// 票据连接的下载范围（受限会话：只允许拉取这一个文件的分块）
@@ -194,6 +223,12 @@ pub struct RemoteSession {
     /// Claude 会话 id（hook SessionStart 建立；shell 会话与旧版桌面端缺失）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
+    /// 会话所属 CC-Box 实例 id（设备级 Gateway 多实例聚合用；单实例/旧版缺失）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instance_id: Option<String>,
+    /// 实例展示名（如「实例 2」；缺失时手机端降级为不分组平铺）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instance_name: Option<String>,
 }
 
 /// 远程可见的项目（新建会话用）
@@ -263,6 +298,26 @@ mod tests {
     #[test]
     fn contract_client_session_create_opts() {
         round_trip_client(include_str!("../samples/client-session-create-opts.json"));
+    }
+
+    /// 多实例路由：session.create 带 instanceId（Gateway 转发到成员实例执行）
+    #[test]
+    fn contract_client_session_create_instance() {
+        round_trip_client(include_str!("../samples/client-session-create-instance.json"));
+        let msg: ClientMessage =
+            serde_json::from_str(include_str!("../samples/client-session-create-instance.json"))
+                .unwrap();
+        assert_eq!(
+            msg,
+            ClientMessage::SessionCreate {
+                path: "D:\\projects\\demo".to_string(),
+                session_id: None,
+                skip_permissions: None,
+                custom_args: None,
+                session_name: None,
+                instance_id: Some("a3bb189e8f14ca27169d9a391f98a3ab".to_string()),
+            }
+        );
     }
 
     #[test]
@@ -390,6 +445,22 @@ mod tests {
         round_trip_server(include_str!("../samples/server-sessions.json"));
     }
 
+    /// 向后兼容：旧桌面端 sessions 列表不带实例字段（serde default → None，
+    /// 手机端降级为不分组平铺）
+    #[test]
+    fn contract_server_sessions_ungrouped() {
+        round_trip_server(include_str!("../samples/server-sessions-ungrouped.json"));
+        let msg: ServerMessage =
+            serde_json::from_str(include_str!("../samples/server-sessions-ungrouped.json"))
+                .unwrap();
+        match msg {
+            ServerMessage::Sessions { list, .. } => {
+                assert!(list.iter().all(|s| s.instance_id.is_none() && s.instance_name.is_none()));
+            }
+            other => panic!("expected Sessions, got {:?}", other),
+        }
+    }
+
     #[test]
     fn contract_server_projects() {
         round_trip_server(include_str!("../samples/server-projects.json"));
@@ -469,6 +540,52 @@ mod tests {
     fn unknown_type_is_rejected() {
         assert!(serde_json::from_str::<ClientMessage>(r#"{"type":"nonexistent"}"#).is_err());
         assert!(serde_json::from_str::<ServerMessage>(r#"{"type":"nonexistent"}"#).is_err());
+    }
+
+    /// 输出序号：新字段往返 + 旧帧缺省 0
+    #[test]
+    fn seq_fields_roundtrip_and_defaults() {
+        let out = ServerMessage::PtyOutput {
+            id: "p".into(),
+            data: "x".into(),
+            seq: 7,
+        };
+        let json = serde_json::to_string(&out).unwrap();
+        assert!(json.contains(r#""seq":7"#));
+        assert_eq!(serde_json::from_str::<ServerMessage>(&json).unwrap(), out);
+
+        let old: ServerMessage =
+            serde_json::from_str(r#"{"type":"pty.output","id":"p","data":"x"}"#).unwrap();
+        assert!(matches!(old, ServerMessage::PtyOutput { seq: 0, .. }));
+
+        let att = ServerMessage::SessionAttached {
+            id: "p".into(),
+            cols: 80,
+            rows: 24,
+            tail: "t".into(),
+            tail_seq: 9,
+        };
+        let json = serde_json::to_string(&att).unwrap();
+        assert!(json.contains(r#""tailSeq":9"#));
+        assert_eq!(serde_json::from_str::<ServerMessage>(&json).unwrap(), att);
+
+        let old: ServerMessage = serde_json::from_str(
+            r#"{"type":"session.attached","id":"p","cols":80,"rows":24,"tail":"t"}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            old,
+            ServerMessage::SessionAttached { tail_seq: 0, .. }
+        ));
+
+        let sub = ServerMessage::SessionSubscribed {
+            id: "p".into(),
+            tail: "t".into(),
+            tail_seq: 3,
+        };
+        let json = serde_json::to_string(&sub).unwrap();
+        assert!(json.contains(r#""tailSeq":3"#));
+        assert_eq!(serde_json::from_str::<ServerMessage>(&json).unwrap(), sub);
     }
 
     #[test]

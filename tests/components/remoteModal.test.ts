@@ -18,8 +18,6 @@ import RemoteModal from '@/components/RemoteModal.vue'
 /** 直连已启用、中继未配置的典型初始状态 */
 const LAN_STATUS = {
   enabled: true,
-  running: true,
-  hostedElsewhere: false,
   port: 8747,
   token: 'abc',
   url: 'http://192.168.1.2:8747/#token=abc',
@@ -27,6 +25,10 @@ const LAN_STATUS = {
   relayConnected: false,
   relayPairUrl: '',
   relayPairCode: '',
+  brokerConnected: true,
+  legacyOwned: false,
+  lanRunning: true,
+  autostart: false,
 }
 
 /** set_relay_url 后的状态（中继启用、配对码未就绪） */
@@ -127,12 +129,80 @@ describe('RemoteModal（统一扫码：默认公网中继 + 局域访问复选�
     wrapper.unmount()
   })
 
-  // 宿主制：远程由另一实例提供（running=false + hostedElsewhere=true）→
-  // 显示宿主提示 + 共享 token 的局域 URL（可直接扫码）+ 无停止按钮/无模式切换
-  it('RemoteModal_HostedElsewhere_005', async () => {
+  // 所有实例内容一致：状态行、局域 URL、停止/模式切换都可见（不再有角色差异）
+  it('RemoteModal_SameContent_005', async () => {
+    mockIPC((cmd) => {
+      if (cmd === 'get_remote_status') return LAN_STATUS
+      return null
+    })
+
+    const wrapper = mountModal()
+    await flushPromises()
+
+    const text = bodyText()
+    // 设备级状态统一来自 Broker：不再展示宿主角色/在线数量
+    expect(text).not.toContain('remoteBrokerRunning')
+    expect(text).toContain('192.168.1.2')
+    expect(text).toContain('remoteQrHint')
+    expect(text).toContain('remoteStop')
+    // 开机自启动已移到“设置 → 启动”，远程面板不再展示
+    expect(text).not.toContain('startupBrokerAutostart')
+    expect(document.body.querySelector('.lan-toggle')).not.toBeNull()
+    wrapper.unmount()
+  })
+
+  // relay 已启用但配对码为空/过期：切到中继视图后仍可点“更新连接码”
+  it('RemoteModal_RelayEnabledNoCode_CanRefresh_017', async () => {
     mockIPC((cmd) => {
       if (cmd === 'get_remote_status') {
-        return { ...LAN_STATUS, running: false, hostedElsewhere: true }
+        return { ...LAN_STATUS, relayEnabled: true, relayPairUrl: '', relayPairCode: '' }
+      }
+      return null
+    })
+
+    const wrapper = mountModal()
+    await flushPromises()
+
+    // 默认局域视图（无中继码）；手动切到中继视图
+    const checkbox = document.body.querySelector('.lan-toggle input[type="checkbox"]') as HTMLInputElement
+    checkbox.click()
+    await flushPromises()
+
+    expect(bodyText()).toContain('remoteRefreshPair')
+    wrapper.unmount()
+  })
+
+  // 中继配对码对所有实例可见，更新连接码/刷新密钥按钮也一致
+  it('RemoteModal_SharedRelayCode_014', async () => {
+    mockIPC((cmd) => {
+      if (cmd === 'get_remote_status') return RELAY_READY
+      return null
+    })
+
+    const wrapper = mountModal()
+    await flushPromises()
+
+    const text = bodyText()
+    expect(text).toContain('https://cc.orczh.top/#pair=584744A5')
+    expect(text).toContain('remoteRelayPairHint')
+    expect(text).toContain('remoteRefreshPair')
+    expect(text).toContain('remoteRotateSecret')
+    wrapper.unmount()
+  })
+
+  // LAN 不可用 + 中继启用但配对码未就绪：必须停在可用的中继视图
+  it('RemoteModal_LanDownUsesRelayView_018', async () => {
+    mockIPC((cmd) => {
+      if (cmd === 'get_remote_status') {
+        return {
+          ...LAN_STATUS,
+          lanRunning: false,
+          url: '',
+          relayEnabled: true,
+          relayConnected: false,
+          relayPairUrl: '',
+          relayPairCode: '',
+        }
       }
       return null
     })
@@ -141,13 +211,47 @@ describe('RemoteModal（统一扫码：默认公网中继 + 局域访问复选�
     await flushPromises()
 
     const text = bodyText()
-    expect(text).toContain('remoteHostedElsewhere')
-    // 宿主的直连 URL 正常展示（token 共享）
-    expect(text).toContain('192.168.1.2')
-    expect(text).toContain('remoteQrHint')
-    // 停的是宿主的服务：非宿主不显示停止；无中继可切（隐藏 lan-toggle）
-    expect(text).not.toContain('remoteStop')
-    expect(document.body.querySelector('.lan-toggle')).toBeNull()
+    expect(text).toContain('remoteRelayPairHint')
+    expect(text).not.toContain('remoteQrHint')
+    wrapper.unmount()
+  })
+
+  // 旧版占用入口：明确警告，隐藏二维码/更新/轮换，保留停止
+  it('RemoteModal_LegacyOwned_015', async () => {
+    mockIPC((cmd) => {
+      if (cmd === 'get_remote_status') {
+        return { ...LAN_STATUS, legacyOwned: true, url: '', lanRunning: false }
+      }
+      return null
+    })
+
+    const wrapper = mountModal()
+    await flushPromises()
+
+    const text = bodyText()
+    expect(text).toContain('remoteLegacyOwned')
+    expect(text).not.toContain('192.168.1.2')
+    expect(text).not.toContain('remoteRefreshPair')
+    expect(text).not.toContain('remoteRotateSecret')
+    expect(text).toContain('remoteStop')
+    wrapper.unmount()
+  })
+
+  // 已开启但 Broker 尚未连上：显示启动中与重试
+  it('RemoteModal_BrokerStarting_016', async () => {
+    mockIPC((cmd) => {
+      if (cmd === 'get_remote_status') {
+        return { ...LAN_STATUS, brokerConnected: false, role: 'starting', running: false }
+      }
+      return null
+    })
+
+    const wrapper = mountModal()
+    await flushPromises()
+
+    const text = bodyText()
+    expect(text).toContain('remoteBrokerStarting')
+    expect(text).toContain('remoteBrokerRetry')
     wrapper.unmount()
   })
 
@@ -353,12 +457,10 @@ describe('RemoteModal（统一扫码：默认公网中继 + 局域访问复选�
     wrapper.unmount()
   })
 
-  // 宿主制：凭证属宿主实例，非宿主不显示刷新密钥（与停止按钮同规则）
-  it('RemoteModal_HostedNoRotate_012', async () => {
+  // 设备凭证由 Broker 统一管理：每个实例都显示刷新密钥（请求经 IPC 转发）
+  it('RemoteModal_AllInstancesRotate_012', async () => {
     mockIPC((cmd) => {
-      if (cmd === 'get_remote_status') {
-        return { ...LAN_STATUS, running: false, hostedElsewhere: true }
-      }
+      if (cmd === 'get_remote_status') return LAN_STATUS
       return null
     })
 
@@ -366,8 +468,8 @@ describe('RemoteModal（统一扫码：默认公网中继 + 局域访问复选�
     await flushPromises()
 
     const text = bodyText()
-    expect(text).not.toContain('remoteRotateSecret')
-    expect(text).not.toContain('remoteStop')
+    expect(text).toContain('remoteRotateSecret')
+    expect(text).toContain('remoteStop')
     wrapper.unmount()
   })
 })

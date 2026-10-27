@@ -122,6 +122,20 @@ describe('remote-transport 控制权与 revision', () => {
     un()
   })
 
+  // 切换设备：旧 socket 必须被摘除回调并关闭，否则其 onclose 会按新 token
+  // 再开一条连接（同 token 双连接互踢），在途帧也会串到新设备
+  it('RemoteTransport_切换设备关闭旧连接_009', async () => {
+    const ws1 = await connect()
+    remoteTransport.connectWithToken('other-token')
+    const ws2 = lastWs()
+    expect(ws2).not.toBe(ws1)
+    expect(FakeWebSocket.instances.length).toBe(2)
+    // 旧连接回调已摘除：即使触发 onclose 也不会排重连
+    expect(ws1.onclose).toBeNull()
+    expect(ws1.onmessage).toBeNull()
+    expect(ws1.onopen).toBeNull()
+  })
+
   // 释放（空 id）：controllerId 置 null，不触发重同步
   it('RemoteTransport_释放广播_005', async () => {
     const ws = await connect({ controller: 8, connId: 5, revision: 4 })
@@ -220,5 +234,183 @@ describe('remote-transport sessionKill quiet 参数', () => {
     await connectAndCollect()
     await remoteTransport.sessionKill('pty-1', true)
     expect(sentKills()).toEqual([{ type: 'session.kill', id: 'pty-1', quiet: true }])
+  })
+})
+
+describe('remote-transport 输出序号与缺口', () => {
+  beforeEach(() => {
+    FakeWebSocket.instances = []
+    FakeWebSocket.SENT = []
+  })
+
+  it('RemoteTransport_SeqGapMarker_010', async () => {
+    remoteTransport.connectWithToken('seq-token')
+    const ws = lastWs()
+    ws.serverOpen()
+    ws.serverSend({
+      type: 'hello.ok',
+      ver: 1,
+      deviceName: 'D',
+      connId: 1,
+      controller: null,
+      revision: 0,
+    })
+
+    const outputs: string[] = []
+    const un = await remoteTransport.listen<{ id: string; data: string }>(
+      'pty-output',
+      ({ data }) => outputs.push(data),
+    )
+
+    ws.serverSend({ type: 'session.attached', id: 'p1', cols: 80, rows: 24, tail: 'base', tailSeq: 5 })
+    ws.serverSend({ type: 'pty.output', id: 'p1', data: 'ok', seq: 6 })
+    // 与快照重叠的旧序号：丢弃
+    ws.serverSend({ type: 'pty.output', id: 'p1', data: 'dup', seq: 6 })
+    // 7/8 丢失：可见缺口提示 + 后续内容继续
+    ws.serverSend({ type: 'pty.output', id: 'p1', data: 'next', seq: 9 })
+
+    const joined = outputs.join('')
+    expect(joined).toContain('base')
+    expect(joined).toContain('ok')
+    expect(joined).not.toContain('dup')
+    expect(joined).toContain('跳过 2 段')
+    expect(joined).toContain('next')
+    un()
+  })
+
+  it('RemoteTransport_ClaimDoesNotLowerSeqBaseline_011', async () => {
+    remoteTransport.connectWithToken('seq-token')
+    const ws = lastWs()
+    ws.serverOpen()
+    ws.serverSend({
+      type: 'hello.ok',
+      ver: 1,
+      deviceName: 'D',
+      connId: 1,
+      controller: null,
+      revision: 0,
+    })
+
+    const outputs: string[] = []
+    const un = await remoteTransport.listen<{ id: string; data: string }>(
+      'pty-output',
+      ({ data }) => outputs.push(data),
+    )
+
+    ws.serverSend({ type: 'session.attached', id: 'p2', cols: 80, rows: 24, tail: 'base', tailSeq: 5 })
+    ws.serverSend({ type: 'pty.output', id: 'p2', data: 'live-6', seq: 6 })
+    ws.serverSend({ type: 'pty.output', id: 'p2', data: 'live-7', seq: 7 })
+
+    // claim 重 attach 携带旧 tailSeq；不能让基线从 7 降回 5
+    void remoteTransport.sessionClaim('p2')
+    ws.serverSend({ type: 'session.attached', id: 'p2', cols: 80, rows: 24, tail: 'stale', tailSeq: 5 })
+    ws.serverSend({ type: 'pty.output', id: 'p2', data: 'live-8', seq: 8 })
+
+    const joined = outputs.join('')
+    expect(joined).toContain('live-8')
+    expect(joined).not.toContain('stale')
+    expect(joined).not.toContain('输出中断')
+    un()
+  })
+})
+
+describe('remote-transport 设备离线与 attach 拒绝（重启实测回归）', () => {
+  beforeEach(() => {
+    FakeWebSocket.instances = []
+    FakeWebSocket.SENT = []
+  })
+
+  /** 建立连接并完成 hello 握手，返回注入用 ws（与首个 describe 的辅助同构） */
+  async function connect(helloOk: Record<string, unknown> = {}): Promise<FakeWebSocket> {
+    remoteTransport.connectWithToken('test-token')
+    const ws = lastWs()
+    ws.serverOpen()
+    ws.serverSend({ type: 'hello.ok', ver: 1, deviceName: 'D', connId: 7, controller: 7, revision: 3, ...helloOk })
+    return ws
+  }
+
+  /**
+   * Bug 回归（win 重启 + Broker 自启）：桌面 relay 短暂断连重连后，relay 已移除
+   * 手机桥但保持 WS——前端若无动作，rpc 经僵尸连接发出即被丢弃（实测
+   * spawn_new_instance 15s 超时，Broker 侧零日志），直到 ~100s 后心跳死亡才重连。
+   * 期望：收到 device.status online:false 立即主动断开并按最小退避重连；
+   * online:true 不触发断开。
+   */
+  it('RemoteTransport_设备离线主动重连_001', async () => {
+    vi.useFakeTimers()
+    try {
+      const ws = await connect()
+      expect(remoteTransport.connState).toBe('connected')
+
+      // 桌面在线通知：连接保持
+      ws.serverSend({ type: 'device.status', online: true })
+      expect(remoteTransport.connState).toBe('connected')
+
+      // 桌面离线：立即断开僵尸 WS 进入重连
+      ws.serverSend({ type: 'device.status', online: false })
+      expect(remoteTransport.connState).toBe('reconnecting')
+
+      // retry 归零 → 最小退避 1s 后建立新连接，握手后恢复 connected
+      await vi.advanceTimersByTimeAsync(1_100)
+      const ws2 = lastWs()
+      expect(ws2).not.toBe(ws)
+      ws2.serverOpen()
+      ws2.serverSend({ type: 'hello.ok', ver: 1, deviceName: 'D', connId: 8, controller: 8, revision: 3 })
+      expect(remoteTransport.connState).toBe('connected')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  /**
+   * Bug 回归（手机刷新终端白屏）：桌面持控制权时手机 attach 被 gate_write 拒绝，
+   * 服务端已回 session.attach.denied——前端必须分发事件（会话层置 Tab 遮罩 +
+   * 接管入口），否则 attach 悬挂、终端永久白屏。
+   */
+  it('RemoteTransport_attach被拒分发事件_002', async () => {
+    const ws = await connect({ controller: 0, connId: 9 })
+    const got: Array<{ id: string; reason: string }> = []
+    const un = (await remoteTransport.listen('session-attach-denied', (p) => {
+      got.push(p as { id: string; reason: string })
+    })) as Unlisten
+    ws.serverSend({
+      type: 'session.attach.denied',
+      id: 'pty-1',
+      reason: 'controller held by another device',
+    })
+    un()
+    expect(got).toEqual([{ id: 'pty-1', reason: 'controller held by another device' }])
+  })
+})
+
+describe('remote-transport 会话剥离分发（同类问题回归）', () => {
+  beforeEach(() => {
+    FakeWebSocket.instances = []
+    FakeWebSocket.SENT = []
+  })
+
+  async function connect(helloOk: Record<string, unknown> = {}): Promise<FakeWebSocket> {
+    remoteTransport.connectWithToken('test-token')
+    const ws = lastWs()
+    ws.serverOpen()
+    ws.serverSend({ type: 'hello.ok', ver: 1, deviceName: 'D', connId: 7, controller: 7, revision: 3, ...helloOk })
+    return ws
+  }
+
+  /**
+   * 宿主窗口关闭 → Broker 广播 session.detached：必须分发事件并清输出序号
+   * 基线（否则 Tab 冻结在 running、会话层无感知）
+   */
+  it('RemoteTransport_会话剥离分发事件_003', async () => {
+    const ws = await connect()
+    // 先建立序号基线（模拟已收到输出）
+    ws.serverSend({ type: 'session.attached', id: 'p9', cols: 80, rows: 24, tail: 'x', tailSeq: 4 })
+    const got: Array<{ id: string; reason: string }> = []
+    const un = (await remoteTransport.listen('session-detached', (p) => {
+      got.push(p as { id: string; reason: string })
+    })) as Unlisten
+    ws.serverSend({ type: 'session.detached', id: 'p9', reason: 'instance disconnected' })
+    un()
+    expect(got).toEqual([{ id: 'p9', reason: 'instance disconnected' }])
   })
 })

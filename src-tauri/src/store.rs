@@ -241,10 +241,14 @@ pub(crate) static GUI_CONFIG_DIR_OVERRIDE: std::sync::LazyLock<
 > = std::sync::LazyLock::new(|| parking_lot::Mutex::new(None));
 
 /// 获取 GUI 配置目录
-fn get_gui_config_dir() -> Result<PathBuf> {
+pub(crate) fn get_gui_config_dir() -> Result<PathBuf> {
     #[cfg(test)]
     if let Some(dir) = GUI_CONFIG_DIR_OVERRIDE.lock().clone() {
         return Ok(dir);
+    }
+    // CI/E2E 隔离：生产 Broker 与 GUI 共享同一目录
+    if let Some(dir) = std::env::var_os("CC_BOX_CONFIG_DIR") {
+        return Ok(PathBuf::from(dir));
     }
     dirs::home_dir()
         .map(|h| h.join(".cc-box"))
@@ -1103,6 +1107,23 @@ pub fn get_app_config() -> Result<AppConfig> {
 /// config.json 写入互斥：多线程（多实例共享文件）读-合并-写竞争防护
 static CONFIG_WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// 跨进程配置锁：Broker 与多个 GUI 共享 config.json，进程内互斥不够。
+/// OS advisory lock 在进程崩溃时自动释放；最多等待 500ms，超时继续写
+/// （宁可极小概率丢一个字段，也不能让 UI 命令卡死）。
+struct ConfigFileLock(#[allow(dead_code)] crate::file_lock::FileLock);
+
+fn acquire_config_file_lock(dir: &std::path::Path) -> Option<ConfigFileLock> {
+    let path = dir.join("config.lock");
+    for _ in 0..20 {
+        if let Ok(lock) = crate::file_lock::FileLock::try_exclusive(&path) {
+            return Some(ConfigFileLock(lock));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    log::warn!("[config] cross-process lock timeout; proceeding");
+    None
+}
+
 /// 更新应用配置（读-合并-写全程持锁；临时文件 + rename 原子落盘——
 /// 直接 fs::write 截断写会让并发读者拿到半截 JSON，进而触发身份重建
 /// 等灾难性默认值）
@@ -1117,6 +1138,8 @@ pub fn update_app_config(updates: serde_json::Value) -> Result<()> {
     if !config_dir.exists() {
         fs::create_dir_all(config_dir)?;
     }
+    // 跨进程互斥必须覆盖 read-merge-write 全过程（Broker 与 GUI 并发写）
+    let _file_lock = acquire_config_file_lock(config_dir);
 
     let existing = get_app_config()?;
     let existing_json = serde_json::to_value(existing)?;

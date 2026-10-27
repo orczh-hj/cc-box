@@ -13,15 +13,30 @@
           <div class="modal-body">
             <p v-if="loading" class="hint">{{ t('loading') }}</p>
 
-            <template v-else-if="status?.running || status?.hostedElsewhere">
+            <!-- 旧版 CC-Box 占用设备入口：设备级多实例控制暂不可用 -->
+            <template v-else-if="status?.legacyOwned">
+              <p class="hint role-hint legacy-hint">{{ t('remoteLegacyOwned') }}</p>
+              <p class="hint security-hint">{{ t('remoteSecurityHint') }}</p>
+              <button class="stop-btn" :disabled="stopping" @click="stopRemote">
+                {{ t('remoteStop') }}
+              </button>
+            </template>
+
+            <template v-else-if="status?.enabled && status?.brokerConnected">
               <!-- 安全逻辑说明（顶部）：令牌认证 / 停止即断 / 刷新密钥作废全部设备 -->
               <p class="hint security-hint">{{ t('remoteSecurityHint') }}</p>
 
-              <!-- 宿主制：远程由本机另一实例提供，扫码连接的是该实例 -->
-              <p v-if="status.hostedElsewhere" class="hint">{{ t('remoteHostedElsewhere') }}</p>
+              <!-- 所有窗口内容一致：设备级状态由 Broker 镜像下发，不展示宿主/数量 -->
+              <p v-if="status.lanError" class="hint warn-hint">
+                {{ t('remoteLanUnavailable', { error: status.lanError }) }}
+              </p>
+              <p v-else-if="status.relayEnabled && !status.relayConnected" class="hint warn-hint">
+                {{ t('remoteRelayDisconnected') }}
+              </p>
 
-              <!-- 模式切换：默认公网中继，勾选切局域直连（宿主态无中继，强制局域） -->
-              <label v-if="!status.hostedElsewhere" class="lan-toggle">
+              <!-- 模式切换：默认公网中继，勾选切局域直连。所有实例都可选——
+                   中继状态（含配对码）由 Gateway 镜像同步，成员面板同样可扫 -->
+              <label class="lan-toggle">
                 <input type="checkbox" v-model="lanOnly" />
                 <span>{{ t('remoteLanOnly') }}</span>
               </label>
@@ -62,11 +77,10 @@
                 </div>
               </template>
 
-              <!-- 操作行：更新连接码 + 刷新密钥同行（少量间距）；停止远程访问单独一行。
-                   停止/刷新密钥仅宿主实例显示（非宿主停不了、也轮换不了宿主的服务） -->
+              <!-- 操作行：所有实例一致（更新连接码 / 刷新密钥 / 停止远程） -->
               <div class="action-row">
                 <button
-                  v-if="!lanOnly && status.relayPairUrl"
+                  v-if="!lanOnly && status.relayEnabled"
                   class="refresh-btn"
                   :disabled="refreshingPair || rotating || stopping"
                   @click="refreshPairCode"
@@ -74,7 +88,6 @@
                   {{ refreshingPair ? t('loading') : t('remoteRefreshPair') }}
                 </button>
                 <button
-                  v-if="!status.hostedElsewhere"
                   class="refresh-btn rotate-btn"
                   :class="{ armed: rotateArmed }"
                   :disabled="rotating || stopping || refreshingPair"
@@ -84,7 +97,6 @@
                 </button>
               </div>
               <button
-                v-if="!status.hostedElsewhere"
                 class="stop-btn"
                 :disabled="stopping || rotating"
                 @click="stopRemote"
@@ -92,6 +104,14 @@
                 {{ t('remoteStop') }}
               </button>
             </template>
+
+            <!-- 已开启但 Broker 尚未连上：显示启动中并提供重试 -->
+            <div v-else-if="status?.enabled" class="enable-block">
+              <p class="hint">{{ t('remoteBrokerStarting') }}</p>
+              <button class="enable-btn" :disabled="starting" @click="enableRemote">
+                {{ starting ? t('loading') : t('remoteBrokerRetry') }}
+              </button>
+            </div>
 
             <!-- 未开启：不自动启动（安全阻断由用户显式操作），点按钮开启 -->
             <div v-else-if="!error" class="enable-block">
@@ -174,14 +194,33 @@ async function refreshRelayQr() {
 
 function startRelayPoll() {
   stopRelayPoll()
+  // 关闭面板后不再启动新轮询（open/rotate 等 await 返回时可能已关闭）
+  if (!props.visible) return
   // 面板打开期间持续轮询（get_remote_status 轻量）：既等配对码就绪，
   // 也在码过期后触发按需重申（pair.created 到达即刷新二维码）
   relayPollTimer = window.setInterval(async () => {
-    if (!status.value?.relayEnabled) return
+    if (!props.visible) {
+      stopRelayPoll()
+      return
+    }
+    // 不提前退出：Broker 可能从启动中转为在线，或从 legacy 接管完成
     try {
       const s = await getRemoteStatus()
       const prev = status.value
       status.value = s
+      // 首次连上 Broker：按真实能力选择默认视图（之后尊重用户手动切换）
+      if (!prev?.brokerConnected && s.brokerConnected) {
+        // LAN 不可用时只能走中继视图（即使配对码尚未就绪）
+        lanOnly.value = s.lanRunning
+          && (!s.relayEnabled || !s.relayPairUrl)
+      }
+      if (s.url && s.url !== prev?.url) {
+        qrDataUrl.value = await QRCode.toDataURL(s.url, {
+          width: 220,
+          margin: 1,
+          color: { dark: '#1e1e1e', light: '#ffffff' },
+        })
+      }
       if (s.relayPairUrl && s.relayPairUrl !== prev?.relayPairUrl) {
         await refreshRelayQr()
       }
@@ -195,9 +234,8 @@ function startRelayPoll() {
 async function applyStatus(s: RemoteStatus) {
   status.value = s
   // 中继地址由环境变量 CC_BOX_RELAY_URL 配置（后台调试入口，UI 不暴露）；
-  // 未配置中继、或配对码无效（连接中/已过期，一次性消费后需中继重连才有新码）
-  // 时默认切到局域视图——面板始终有可扫的 URL/二维码
-  lanOnly.value = !s.relayEnabled || !s.relayPairUrl
+  // 未配置中继/无配对码时默认局域视图；LAN 不可用则只能走中继视图
+  lanOnly.value = s.lanRunning && (!s.relayEnabled || !s.relayPairUrl)
   if (s.url) {
     qrDataUrl.value = await QRCode.toDataURL(s.url, {
       width: 220,
@@ -208,9 +246,8 @@ async function applyStatus(s: RemoteStatus) {
   if (s.relayPairUrl) {
     await refreshRelayQr()
   }
-  if (s.relayEnabled) {
-    startRelayPoll()
-  }
+  // 面板打开期间持续轮询：等 Broker 上线 / legacy 接管 / 配对码就绪
+  startRelayPoll()
 }
 
 /** 打开面板只查状态——不自动开启（远程通断由用户显式控制，安全可控） */
@@ -519,6 +556,20 @@ async function copyUrl() {
   opacity: 0.85;
   max-width: 320px;
   margin-bottom: 2px;
+}
+
+.warn-hint {
+  color: #d39e00;
+  font-size: 11px;
+  line-height: 1.6;
+  max-width: 320px;
+}
+
+.legacy-hint {
+  color: #d39e00;
+  font-size: 12px;
+  line-height: 1.7;
+  max-width: 320px;
 }
 
 /* 未开启状态：显式开启入口（安全阻断——远程默认不通） */

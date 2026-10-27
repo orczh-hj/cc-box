@@ -80,6 +80,20 @@
         <div class="header-row">
           <h2>{{ t('projects') }}</h2>
           <div class="header-actions">
+            <!-- 浏览器/手机：宿主零窗口时提供“启动窗口”（Broker 经 RPC 拉起空窗口） -->
+            <button
+              v-if="showLaunchWindow"
+              class="header-btn launch-window-btn"
+              :disabled="launching"
+              :title="launching ? t('launchingWindow') : t('launchWindow')"
+              :aria-label="t('launchWindow')"
+              @click="handleLaunchWindow"
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <rect x="3" y="4" width="18" height="16" rx="2"/>
+                <line x1="3" y1="9" x2="21" y2="9"/>
+              </svg>
+            </button>
             <!-- 窗口管理按钮（置顶/半屏停靠）：与终端 header 一致，仅桌面 Tauri -->
             <template v-if="isTauriEnv">
               <button class="header-btn" :class="{ active: appStore.alwaysOnTop }" @click="appStore.toggleAlwaysOnTop()" :title="t('toggleAlwaysOnTop', { key: cmd + '+Shift+T' })">
@@ -209,10 +223,12 @@ import { useAppStore } from '@/stores/app'
 import { useSessionStore } from '@/stores/session'
 import { useSidebarStore } from '@/stores/sidebar'
 import { useIsMobile } from '@/composables/useMediaQuery'
+import { useToast } from '@/composables/useToast'
 import { snapWindow } from '@/composables/useAppShortcuts'
 import { ctrl, cmd } from '@/utils/platform'
 import { isTauriEnv } from '@/api/platform'
-import type { SessionInfo } from '@/api/tauri'
+import { spawnNewInstance, type SessionInfo } from '@/api/tauri'
+import { shouldOfferLaunchWindow } from '@/utils/remoteWindows'
 
 const { t } = useI18n()
 
@@ -226,6 +242,7 @@ const emit = defineEmits<{
 const appStore = useAppStore()
 const sessionStore = useSessionStore()
 const sidebarStore = useSidebarStore()
+const toast = useToast()
 const searchQuery = ref('')
 const projectListRef = ref<HTMLElement | null>(null)
 const isMobile = useIsMobile()
@@ -239,6 +256,29 @@ const localOptions = ref({
 
 const isSaving = ref(false)
 const saveSuccess = ref(false)
+
+/** 宿主零窗口：浏览器/手机可拉起一个新 GUI 窗口（Broker RPC） */
+const showLaunchWindow = computed(() =>
+  shouldOfferLaunchWindow(
+    isTauriEnv,
+    sessionStore.remoteInstancesKnown,
+    sessionStore.remoteInstances.length,
+  )
+)
+const launching = ref(false)
+
+async function handleLaunchWindow() {
+  if (launching.value) return
+  launching.value = true
+  try {
+    await spawnNewInstance()
+  } catch (err) {
+    toast.error(t('launchWindowFailed', { error: String(err) }))
+  } finally {
+    // 窗口注册/events 到达前保持短暂 pending，防连点
+    window.setTimeout(() => { launching.value = false }, 3000)
+  }
+}
 
 const projects = computed(() => appStore.cachedProjects)
 

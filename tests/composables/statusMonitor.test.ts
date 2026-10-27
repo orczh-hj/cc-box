@@ -45,6 +45,7 @@ vi.mock('@/api/tauri', () => ({
     capturedDispatch = cb
     return Promise.resolve(() => {})
   }),
+  onSessionViewed: vi.fn(() => Promise.resolve(() => {})),
 }))
 
 // Mock Tauri window API

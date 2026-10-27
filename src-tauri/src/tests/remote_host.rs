@@ -67,16 +67,15 @@ async fn spawn_silent_tcp_owner() -> u16 {
     port
 }
 
-/// 宿主制跳过：端口已有本机另一实例的 CC-Box HTTP 服务时，start 应 Ok
-/// 返回（不报端口冲突）、不置运行态、无 watchdog；hosted_elsewhere 为 true
+/// 旧版 Gateway 占口：Broker 进入 legacy-owned，不启动 LAN、不抢所有权；
+/// 面板据此显示“设备级多实例控制暂不可用”。
 #[tokio::test]
-async fn Start_宿主制跳过_001() {
+async fn Broker_旧版Gateway占口进入legacy_001() {
     let _lock = super::REMOTE_SERVER_TEST_LOCK.lock();
     let _cfg_lock = super::CONFIG_DIR_TEST_LOCK.lock();
-    let _cfg = super::TestConfigDirGuard::new("remote-hosted-skip");
+    let _cfg = super::TestConfigDirGuard::new("broker-legacy");
 
-    // 模拟宿主实例的 HTTP 服务（200 + CC-Box 特征）。绑 0.0.0.0 才能挡住
-    // 本实例对同端口的通配 bind（Windows 通配与回环不冲突）
+    // 模拟旧版实例的 HTTP 服务（200 + CC-Box 特征、无 /gateway.ok 路由）
     let app = axum::Router::new().route(
         "/",
         axum::routing::get(|| async { "<html><head><title>CC-Box</title></head><body>ok</body></html>" }),
@@ -86,7 +85,6 @@ async fn Start_宿主制跳过_001() {
     tokio::spawn(async move {
         let _ = axum::serve(listener, app).await;
     });
-    // 等服务就绪（probe 通过即宿主特征可见）
     let mut ready = false;
     for _ in 0..20 {
         if remote_server::probe_host(port).await {
@@ -95,13 +93,17 @@ async fn Start_宿主制跳过_001() {
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
-    assert!(ready, "模拟宿主服务应先就绪");
-    remote_server::save_remote_config(None, None, Some(port)).unwrap();
+    assert!(ready, "模拟旧版服务应先就绪");
+    remote_server::save_remote_config(Some(true), None, Some(port)).unwrap();
 
-    // Ok + 不置运行态：后开实例凭探测跳过启动，静默借用宿主服务
-    remote_server::start().await.unwrap();
-    assert!(!remote_server::is_running(), "宿主制跳过不应置运行态");
-    assert!(remote_server::hosted_elsewhere().await, "应探测到宿主存在");
+    crate::broker::start_remote_service().await;
+    assert!(crate::broker::legacy_owned(), "旧版占口应进入 legacy-owned");
+    assert!(!remote_server::is_running(), "legacy-owned 不应启动 LAN");
+    assert!(crate::broker::lan_error().is_some());
+    assert!(remote_server::hosted_elsewhere().await);
+
+    crate::broker::stop_remote_service().await;
+    assert!(!crate::broker::legacy_owned());
 }
 
 /// 端口被静默 TCP（可连但不响应）占用：start 应 Err 且文案区分 stale
@@ -124,15 +126,12 @@ async fn Start_静默占用报stale文案_002() {
     assert!(!remote_server::is_running());
 }
 
-/// set_remote_enabled(true) 启动失败时必须回滚 enabled 为操作前的值：
-/// - prev=false：回滚 false（本地开关语义）
-/// - prev=true（另一实例正在服务）：回滚 true——否则写 false 会把宿主实例
-///   的 config watchdog 误停，破坏多实例「远程开关顺利开/关」
+/// Broker 管理操作：停止远程只写配置并停服务，不退出进程、不影响成员连接。
 #[tokio::test]
-async fn SetRemoteEnabled_启动失败回滚enabled_003() {
+async fn Broker_Control停止远程写配置_003() {
     let _lock = super::REMOTE_SERVER_TEST_LOCK.lock();
     let _cfg_lock = super::CONFIG_DIR_TEST_LOCK.lock();
-    let _cfg = super::TestConfigDirGuard::new("remote-rollback");
+    let _cfg = super::TestConfigDirGuard::new("broker-control-stop");
 
     fn read_enabled() -> Option<bool> {
         crate::store::get_app_config()
@@ -142,21 +141,11 @@ async fn SetRemoteEnabled_启动失败回滚enabled_003() {
     }
 
     let port = spawn_silent_tcp_owner().await;
-
-    // 场景 1：prev=false，失败后保持 false
-    remote_server::save_remote_config(Some(false), None, Some(port)).unwrap();
-    let err = crate::commands::set_remote_enabled(true).await.unwrap_err();
-    assert!(err.contains("failed to bind"), "应报端口占用，实际: {}", err);
-    assert_eq!(read_enabled(), Some(false), "prev=false 失败应回滚 false");
-
-    // 场景 2：prev=true（模拟他实例服务中），失败后必须保持 true
-    remote_server::save_remote_config(Some(true), None, None).unwrap();
-    crate::commands::set_remote_enabled(true).await.unwrap_err();
-    assert_eq!(
-        read_enabled(),
-        Some(true),
-        "prev=true 失败必须回滚 true，否则宿主 watchdog 被误停"
-    );
+    remote_server::save_remote_config(Some(true), None, Some(port)).unwrap();
+    crate::broker::control(crate::gateway_proto::BrokerOp::SetEnabled { enabled: false })
+        .await
+        .unwrap();
+    assert_eq!(read_enabled(), Some(false));
     assert!(!remote_server::is_running());
 }
 

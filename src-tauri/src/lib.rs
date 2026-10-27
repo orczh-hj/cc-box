@@ -11,9 +11,14 @@ mod hook_config;
 mod installer;
 mod providers;
 mod platform;
+mod file_lock;
 mod remote_state;
 mod remote_server;
 mod remote_client;
+mod gateway;
+mod gateway_proto;
+mod broker;
+mod broker_client;
 mod file_transfer;
 mod rpc_dispatch;
 mod events;
@@ -26,8 +31,88 @@ use tauri::Emitter;
 use tauri::menu::MenuBuilder;
 
 /// 全局缓存环境检查结果（setup 前执行，仅一次）
-use std::sync::LazyLock;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{LazyLock, Mutex, OnceLock};
+
+/// GUI 主进程句柄：Broker 要求关闭/重启窗口时由 broker_client 调用。
+static GUI_APP_HANDLE: OnceLock<tauri::AppHandle> = OnceLock::new();
+/// 新建窗口注册后 Broker 很快下发 openRemote；前端可能尚未挂载监听。
+/// 记录最近一次请求，前端启动时取走（5s 内有效）。
+static PENDING_OPEN_REMOTE_MS: AtomicU64 = AtomicU64::new(0);
+/// 托盘「更新到新版本」请求（与 openRemote 同机制：前端尚未挂载时暂存 5s）
+static PENDING_OPEN_UPDATE_MS: AtomicU64 = AtomicU64::new(0);
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// 结束本 GUI：先杀掉全部 PTY，再退出 Tauri 事件循环。
+/// Broker 下发的 `WindowCommand::Close` 走这里（测试环境无窗口句柄时安全返回）。
+pub(crate) fn request_gui_exit() {
+    if let Some(manager) = pty::get_pty_manager() {
+        manager.kill_all();
+    }
+    match GUI_APP_HANDLE.get() {
+        Some(handle) => {
+            log::info!("[gui] exit requested by broker");
+            handle.exit(0);
+        }
+        None => log::warn!("[gui] exit requested before app handle init; ignored"),
+    }
+}
+
+/// 当前 GUI 窗口标题（注册时上报给 Broker，供托盘窗口列表展示）。
+pub(crate) fn gui_window_title() -> Option<String> {
+    let handle = GUI_APP_HANDLE.get()?;
+    let window = handle.get_webview_window("main")?;
+    window
+        .title()
+        .ok()
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+}
+
+/// 还原、显示并聚焦本窗口（托盘“显示”）。
+pub(crate) fn request_gui_show() {
+    if let Some(handle) = GUI_APP_HANDLE.get() {
+        if let Some(window) = handle.get_webview_window("main") {
+            let _ = window.show();
+            let _ = window.unminimize();
+            let _ = window.set_focus();
+        }
+    }
+}
+
+/// 请求前端打开远程连接面板（托盘“远程连接”）。
+pub(crate) fn request_gui_open_remote() {
+    PENDING_OPEN_REMOTE_MS.store(now_ms(), Ordering::SeqCst);
+    if let Some(handle) = GUI_APP_HANDLE.get() {
+        let _ = handle.emit("open-remote-panel", ());
+    }
+}
+
+/// 前端启动时领取尚未消费的 openRemote 请求（5s 内有效）。
+pub(crate) fn take_pending_open_remote() -> bool {
+    let ts = PENDING_OPEN_REMOTE_MS.swap(0, Ordering::SeqCst);
+    ts != 0 && now_ms().saturating_sub(ts) < 5_000
+}
+
+/// 请求前端打开设置 → 更新（托盘「更新到新版本」）。
+pub(crate) fn request_gui_open_update() {
+    PENDING_OPEN_UPDATE_MS.store(now_ms(), Ordering::SeqCst);
+    if let Some(handle) = GUI_APP_HANDLE.get() {
+        let _ = handle.emit("open-update", ());
+    }
+}
+
+/// 前端启动时领取尚未消费的 openUpdate 请求（5s 内有效）。
+pub(crate) fn take_pending_open_update() -> bool {
+    let ts = PENDING_OPEN_UPDATE_MS.swap(0, Ordering::SeqCst);
+    ts != 0 && now_ms().saturating_sub(ts) < 5_000
+}
 static CHECK_RESULTS: LazyLock<Mutex<Vec<checks::CheckResult>>> = LazyLock::new(|| {
     let result = checks::run_checks();
     for failed in result.failed_checks() {
@@ -58,8 +143,84 @@ pub fn rerun_checks() -> Vec<checks::CheckResult> {
     result.checks
 }
 
+/// Broker 模式：纯 tokio 无头进程（无 Tauri 窗口/托盘初始化）。
+pub fn run_broker_headless(autostart: bool) {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("failed to build broker runtime");
+    rt.block_on(broker::run_headless(autostart));
+}
+
+/// Broker 模式入口：Windows/macOS 带托盘，Linux 无头（托盘缺失时优雅降级）。
+pub fn run_broker(autostart: bool) {
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    {
+        run_broker_with_tray(autostart);
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        run_broker_headless(autostart);
+    }
+}
+
+/// `--quit-broker`：无托盘/无窗口场景下发送退出请求（会关闭所有窗口）。
+pub fn quit_broker_blocking() -> Result<(), String> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| e.to_string())?;
+    rt.block_on(broker_client::control_direct(
+        gateway_proto::BrokerOp::Quit,
+    ))
+    .map(|_| ())
+}
+
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+fn run_broker_with_tray(autostart: bool) {
+    tauri::Builder::default()
+        // 托盘破坏性操作的原生确认对话框
+        .plugin(tauri_plugin_dialog::init())
+        // 托盘更新提示：Broker 常驻期间定期检查新版本
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .setup(move |app| {
+            #[cfg(target_os = "macos")]
+            app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+
+            let handle = app.handle().clone();
+            // 托盘先装上：即使服务启动失败/已有实例，用户也能看到并退出
+            if let Err(e) = broker::tray::install(&handle) {
+                log::warn!("[broker] tray unavailable: {}", e);
+            }
+            // 托盘更新红点：Broker 常驻期间定期检查新版本
+            broker::update::spawn_checker(handle.clone());
+
+            // Broker 服务跑在独立 tokio 线程；Tauri 事件循环只负责托盘
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Builder::new_multi_thread()
+                    .enable_all()
+                    .build()
+                    .expect("failed to build broker runtime");
+                rt.block_on(async move {
+                    broker::run_headless(autostart).await;
+                    handle.exit(0);
+                });
+            });
+            Ok(())
+        })
+        .build(tauri::generate_context!())
+        .expect("error while building broker application")
+        .run(|_app, event| {
+            // 只有外部事件导致的 ExitRequested（code=None）才阻止；
+            // app.exit(0) 必须能真正退出
+            if let tauri::RunEvent::ExitRequested { code: None, api, .. } = event {
+                api.prevent_exit();
+            }
+        });
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
-pub fn run(initial_dir: Option<String>) {
+pub fn run(initial_dir: Option<String>, new_window: bool) {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
@@ -77,8 +238,28 @@ pub fn run(initial_dir: Option<String>) {
                 _ => {}
             }
         })
-        .setup(|app| {
+        .setup(move |app| {
             logger::init();
+
+            // 主窗口由代码创建（tauri.conf.json 的 windows 为空，供 Broker
+            // 模式复用同一 Tauri 上下文但不弹窗）
+            let window_builder = tauri::WebviewWindowBuilder::new(
+                app,
+                "main",
+                tauri::WebviewUrl::App("index.html".into()),
+            )
+            .title("CC-Box")
+            .inner_size(800.0, 600.0)
+            .min_inner_size(500.0, 400.0)
+            .resizable(true);
+            #[cfg(target_os = "macos")]
+            let window_builder =
+                window_builder.title_bar_style(tauri::TitleBarStyle::Overlay);
+            if let Err(e) = window_builder.build() {
+                log::error!("Failed to create main window: {}", e);
+                return Err(e.into());
+            }
+            let _ = GUI_APP_HANDLE.set(app.handle().clone());
 
             // Provider 配置一次性迁移（schema v1 → v2）。
             // 放在启动阶段，保证读命令（含远程只读 RPC）不产生隐式写盘。
@@ -152,11 +333,12 @@ pub fn run(initial_dir: Option<String>) {
                 // Hook HTTP 服务器
                 hook_server::init(handle.clone()).await;
 
-                // 远程访问服务器（局域网直连，开关开启时才监听）
-                remote_server::init(handle.clone()).await;
-
-                // 远程中继出站客户端（配置了 relay_url 时自动连接）
-                remote_client::init().await;
+                // 手动启动 GUI = 重新打开 CC-Box：清除上次“退出 CC-Box”的
+                // 持久抑制，恢复 Broker（托盘退出后没有 GUI 会再拉起它）。
+                broker::lifecycle::clear_user_quit();
+                // GUI 不再直接持有 LAN/relay：连接/拉起本机 Broker，注册为成员。
+                // 即使远程开关为关也保持 Broker 在线（托盘可再次开启远程）。
+                broker_client::spawn_connect_loop();
 
                 // 文件传输清理：启动扫一次（删崩溃遗留的上传临时文件）
                 file_transfer::startup_cleanup();
@@ -172,10 +354,19 @@ pub fn run(initial_dir: Option<String>) {
                     }
                 });
 
-                // 如果通过命令行参数传入了目录（右键菜单打开），延迟 emit 事件给前端
-                if let Some(dir) = initial_dir {
+                // 启动模式事件：右键目录打开 / 新建窗口（新建窗口停留在项目页，
+                // 不自动进入终端）
+                if initial_dir.is_some() || new_window {
                     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                    let _ = handle.emit("open-directory", dir);
+                    if let Some(dir) = initial_dir {
+                        let _ = handle.emit("open-directory", dir);
+                    }
+                    if new_window {
+                        let _ = handle.emit(
+                            "launch-mode",
+                            serde_json::json!({ "newWindow": true }),
+                        );
+                    }
                 }
             });
 
@@ -223,6 +414,10 @@ pub fn run(initial_dir: Option<String>) {
             commands::get_mcp_server_detail,
             commands::test_communication,
             commands::get_app_path,
+            commands::update_window_title,
+            commands::take_pending_open_remote,
+            commands::take_pending_open_update,
+            commands::resume_broker_connection,
             commands::spawn_new_instance,
             commands::log_message,
             installer::get_latest_versions,
@@ -257,8 +452,10 @@ pub fn run(initial_dir: Option<String>) {
             commands::get_remote_status,
             commands::set_remote_enabled,
             commands::set_relay_url,
+            commands::set_broker_autostart,
             commands::refresh_relay_pair_code,
             commands::rotate_remote_secret,
+            commands::prepare_for_update,
             // File Transfer Commands（远程浏览器模式；桌面 invoke 走 conn_id=None 拒绝上传/下载）
             commands::file_transfer_limits,
             commands::file_list,

@@ -6,11 +6,8 @@
       @toggle="handleTogglePanel"
       @toggle-settings="sidebarStore.toggleSettings()"
       @open-folder="handleOpenFolder"
-      @open-remote="showRemoteModal = true"
+      @open-remote="openRemotePanel()"
     />
-
-    <!-- 远程访问弹窗（二维码 + 复制地址） -->
-    <RemoteModal :visible="showRemoteModal" @close="showRemoteModal = false" />
 
     <!-- 侧边栏 + 终端 -->
     <SidebarPanel
@@ -41,11 +38,20 @@
         <!-- 空状态提示：没有任何 session -->
         <div v-if="showEmptyState" class="empty-state-overlay">
           <div class="empty-state-content">
-            <p class="empty-state-text">{{ t('startNewSession') }}</p>
-            <button class="empty-state-btn" @click="handleNewSession">
-              <img src="@/assets/icons/plus.svg" alt="New" />
-              {{ t('newSession') }}
-            </button>
+            <template v-if="showLaunchWindow">
+              <p class="empty-state-text">{{ t('noWindowsHint') }}</p>
+              <button class="empty-state-btn" :disabled="launching" @click="handleLaunchWindow">
+                <img src="@/assets/icons/plus.svg" alt="New window" />
+                {{ launching ? t('launchingWindow') : t('launchWindow') }}
+              </button>
+            </template>
+            <template v-else>
+              <p class="empty-state-text">{{ t('startNewSession') }}</p>
+              <button class="empty-state-btn" @click="handleNewSession">
+                <img src="@/assets/icons/plus.svg" alt="New" />
+                {{ t('newSession') }}
+              </button>
+            </template>
           </div>
         </div>
         <XTermTerminal
@@ -53,9 +59,15 @@
           :font-size="appStore.fontSize"
           @pty-started="handlePtyStarted"
         />
-        <!-- 快捷键工具条（仅手机：窄屏触屏）：选择复制 + 软键盘按不出的控制键；
-             桌面鼠标设备窗口再窄也不渲染 -->
-        <QuickKeyBar v-if="isMobile" @send="handleQuickKey" @select="handleSelectCopy" />
+        <!-- 快捷键工具条（仅手机：窄屏触屏）：键盘开关 + 选择复制 + 软键盘
+             按不出的控制键；桌面鼠标设备窗口再窄也不渲染 -->
+        <QuickKeyBar
+          v-if="isMobile"
+          :keyboard-open="terminalRef?.softKeyboardOpen ?? false"
+          @send="handleQuickKey"
+          @select="handleSelectCopy"
+          @toggle-keyboard="terminalRef?.toggleSoftKeyboard()"
+        />
         <!-- 复制阅读器（手机复制部分内容）：buffer 快照 + 反渲染，系统原生长按选择 -->
         <TerminalCopyReader
           v-if="copyReaderData"
@@ -75,23 +87,26 @@ import { ref, onMounted, onUnmounted, watch, nextTick, computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useAppStore } from '@/stores/app'
 import { useSessionStore } from '@/stores/session'
+import { useInstancePicker } from '@/composables/useInstancePicker'
 import { useSidebarStore, type SidebarPanelType } from '@/stores/sidebar'
 import { useConfigStore } from '@/stores/config'
-import { openInFileManager, logMessage, onRemoteSessionCreated, onRemoteSessionClosed, onSessionRenamed, renameSession } from '@/api/tauri'
+import { openInFileManager, logMessage, onRemoteSessionCreated, onRemoteSessionClosed, onSessionRenamed, renameSession, spawnNewInstance, updateMemberWindowTitle } from '@/api/tauri'
 import { sendTerminalCommand } from '@/composables/useTerminalCommand'
 import { useWindowAttention } from '@/composables/useWindowAttention'
 import { useStatusMonitor } from '@/composables/useStatusMonitor'
+import { useToast } from '@/composables/useToast'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { isTauriEnv } from '@/api/platform'
+import { shouldOfferLaunchWindow } from '@/utils/remoteWindows'
 import TerminalHeader from './TerminalHeader.vue'
 import XTermTerminal from './XTermTerminal.vue'
 import IconBar from './IconBar.vue'
 import QuickKeyBar from './QuickKeyBar.vue'
 import TerminalCopyReader from './TerminalCopyReader.vue'
 import { reflowSnapshot } from '@/utils/terminal-reflow'
-import RemoteModal from './RemoteModal.vue'
 import SidebarPanel from './sidebar/SidebarPanel.vue'
 import { useIsMobile } from '@/composables/useMediaQuery'
+import { useRemotePanel } from '@/composables/useRemotePanel'
 
 const emit = defineEmits<{
   back: []
@@ -102,9 +117,8 @@ const props = defineProps<{
 }>()
 
 const appStore = useAppStore()
+const { open: openRemotePanel } = useRemotePanel()
 
-// 远程访问弹窗
-const showRemoteModal = ref(false)
 // 远程新建会话监听清理函数
 let unlistenRemoteCreated: (() => void) | null = null
 // 远程关闭会话监听清理函数
@@ -112,6 +126,8 @@ let unlistenRemoteClosed: (() => void) | null = null
 // 会话重命名同步监听清理函数
 let unlistenSessionRenamed: (() => void) | null = null
 const sessionStore = useSessionStore()
+const { pick } = useInstancePicker()
+const toast = useToast()
 const sidebarStore = useSidebarStore()
 const configStore = useConfigStore()
 const terminalRef = ref()
@@ -164,13 +180,37 @@ const { isFocused } = useWindowAttention()
 const isTerminalVisible = computed(() => props.visible ?? false)
 useStatusMonitor({ isFocused, isTerminalVisible })
 
-// 空状态：当前项目没有任何 tab
+/** 浏览器/手机且宿主零窗口：空状态改为“启动窗口” */
+const showLaunchWindow = computed(() =>
+  shouldOfferLaunchWindow(
+    isTauriEnv,
+    sessionStore.remoteInstancesKnown,
+    sessionStore.remoteInstances.length,
+  )
+)
+
+// 空状态：当前项目没有任何 tab；宿主零窗口时即使残留 stopped Tab
+// 也优先显示“启动窗口”，否则手机无法从终端页重新拉起窗口。
 const showEmptyState = computed(() => {
+  if (showLaunchWindow.value) return true
   const cwd = appStore.cwd
   if (!cwd) return false
   const projectTabs = sessionStore.getProjectTabs(cwd)
   return projectTabs.length === 0
 })
+const launching = ref(false)
+
+async function handleLaunchWindow() {
+  if (launching.value) return
+  launching.value = true
+  try {
+    await spawnNewInstance()
+  } catch (err) {
+    toast.error(t('launchWindowFailed', { error: String(err) }))
+  } finally {
+    window.setTimeout(() => { launching.value = false }, 3000)
+  }
+}
 
 // 会话面板打开时刷新服务端运行中会话列表（浏览器远程模式：
 // 其他端新建/关闭的会话经此同步到本地 Tabs）
@@ -183,9 +223,18 @@ function updateWindowTitle(cwd: string) {
   const parts = cwd.replace(/\\/g, '/').split('/')
   const folderName = parts[parts.length - 1] || 'CC-Box'
   getCurrentWindow().setTitle(folderName).catch(() => {})
+  // 同步给 Broker 托盘（窗口列表显示真实 Title）
+  void updateMemberWindowTitle(folderName).catch(() => {})
 }
 
 async function startResumeSession(projectPath: string, sessionId: string, sessionName?: string) {
+  // 多实例远程：未命中已有 Tab（将新建）时先选目标实例——单实例/桌面无感
+  const existing = sessionStore.getTabBySessionId(sessionId)
+  if (!existing || existing.projectPath !== projectPath) {
+    const inst = await pick(sessionStore.knownInstances)
+    if (inst === undefined && sessionStore.knownInstances.length > 1) return // 取消
+    sessionStore.pendingInstanceId = inst ?? null
+  }
   // 复用优先（resumeSessionTab）：已有该对话的 Tab 切换/重启，未命中才新建
   const { tabId } = sessionStore.resumeSessionTab(projectPath, sessionId, sessionName)
   sessionStore.setActiveTab(tabId)
@@ -280,6 +329,11 @@ onUnmounted(() => {
 })
 
 // KeepAlive 激活 → 改为 visible watcher（v-show 常驻 DOM）
+// 项目切换（已在终端页时）也同步窗口标题给 Broker
+watch(() => appStore.cwd, (cwd) => {
+  if (cwd && props.visible) updateWindowTitle(cwd)
+})
+
 watch(() => props.visible, async (isVisible) => {
   if (isVisible) {
     const cwd = appStore.cwd
@@ -341,8 +395,13 @@ function handleRenameSession(tabId: string, name: string) {
   }
 }
 
-// 新建会话
-function handleNewSession() {
+// 新建会话（多实例远程：先选目标实例——单实例/桌面不弹窗无感）
+async function handleNewSession() {
+  // 宿主零窗口：新建会话无处路由，改为拉起窗口
+  if (showLaunchWindow.value) {
+    await handleLaunchWindow()
+    return
+  }
   const cwd = appStore.cwd
   if (!cwd) {
     logMessage('warn', 'handleNewSession: no cwd')
@@ -352,6 +411,9 @@ function handleNewSession() {
     logMessage('warn', 'handleNewSession: no terminalRef')
     return
   }
+  const inst = await pick(sessionStore.knownInstances)
+  if (inst === undefined && sessionStore.knownInstances.length > 1) return // 取消
+  sessionStore.pendingInstanceId = inst ?? null
   terminalRef.value.startNewSession(cwd)
 }
 
@@ -362,8 +424,9 @@ function handleRestartSession() {
   }
 }
 
-// 恢复历史会话（复用优先：已有 Tab 切换/重启，未命中才新建 Tab --resume）
-function handleResumeSession(sessionId: string) {
+// 恢复历史会话（复用优先：已有 Tab 切换/重启，未命中才新建 Tab --resume；
+// 多实例远程：未命中时先选目标实例——单实例/桌面不弹窗无感）
+async function handleResumeSession(sessionId: string) {
   const cwd = appStore.cwd
   if (!cwd || !terminalRef.value) return
 
@@ -371,6 +434,12 @@ function handleResumeSession(sessionId: string) {
   const historySession = sessionStore.historySessions.find(s => s.sessionId === sessionId)
   const name = historySession?.name
 
+  const existing = sessionStore.getTabBySessionId(sessionId)
+  if (!existing || existing.projectPath !== cwd) {
+    const inst = await pick(sessionStore.knownInstances)
+    if (inst === undefined && sessionStore.knownInstances.length > 1) return // 取消
+    sessionStore.pendingInstanceId = inst ?? null
+  }
   const { tabId } = sessionStore.resumeSessionTab(cwd, sessionId, name)
   sessionStore.setActiveTab(tabId)
 

@@ -54,6 +54,7 @@ import {
   onPtyError,
   onSessionTakenOver,
   onSessionReclaimed,
+  controllerTakeover,
   logMessage,
 } from '@/api/tauri'
 import { registerTerminalCommand } from '@/composables/useTerminalCommand'
@@ -146,6 +147,8 @@ let unlistenPtyError: (() => void) | null = null
 let unlistenDragDrop: (() => void) | null = null
 let unlistenWindowResized: (() => void) | null = null
 let unlistenRemoteConn: (() => void) | null = null
+let unlistenAttachDenied: (() => void) | null = null
+let unlistenSessionDetached: (() => void) | null = null
 
 // 浏览器远程模式：已 attach 的 ptyId 集合（attach = 接管输出流 + 控制权）。
 // 重连后服务端订阅清空，标记失效需清空重 attach
@@ -444,6 +447,36 @@ function createTerminal(tabId: string): Terminal {
 // 必须在 onMounted 持有引用才能完成 removeEventListener
 let gestureHostEl: HTMLElement | undefined
 
+/** 软键盘唤出状态（工具条「键盘」按钮的开关反馈）：由 xterm helper textarea
+ * 的 focus/blur 驱动（focusin/focusout 冒泡到容器统一监听，覆盖所有 Tab 实例） */
+const softKeyboardOpen = ref(false)
+
+function isXtermTextarea(el: EventTarget | null): boolean {
+  return (el as HTMLElement | null)?.classList?.contains('xterm-helper-textarea') ?? false
+}
+
+function handleFocusIn(e: FocusEvent) {
+  if (isXtermTextarea(e.target)) softKeyboardOpen.value = true
+}
+
+function handleFocusOut(e: FocusEvent) {
+  if (!isXtermTextarea(e.target)) return
+  // focusout 先于新焦点落定：下一帧复查 activeElement（Tab 切换时新实例
+  // textarea 立即聚焦，不应闪断按钮状态）
+  requestAnimationFrame(() => {
+    softKeyboardOpen.value = isXtermTextarea(document.activeElement)
+  })
+}
+
+/** 工具条「键盘」按钮：软键盘唯一显式开关（tap 终端不自动唤出——避免阅读
+ * 输出时误弹；移动端软键盘只经此用户激活态入口唤出） */
+function toggleSoftKeyboard() {
+  const ta = currentInstance()?.term.textarea
+  if (!ta) return
+  if (document.activeElement === ta) ta.blur()
+  else ta.focus()
+}
+
 onMounted(async () => {
   await setupEventListeners()
   window.addEventListener('copy', handleNativeCopy)
@@ -451,6 +484,9 @@ onMounted(async () => {
   gestureHostEl = containerRef.value
   gestureHostEl?.addEventListener(GESTURE_CHANGE, handleGestureChange, true)
   gestureHostEl?.addEventListener(GESTURE_TAP, handleGestureTap, true)
+  // focusin/focusout 冒泡：容器级统一跟踪各 Tab textarea 的聚焦态
+  gestureHostEl?.addEventListener('focusin', handleFocusIn)
+  gestureHostEl?.addEventListener('focusout', handleFocusOut)
 
   // webfont 迟到兜底：Cascadia Code woff2 加载完成晚于 term.open 时，
   // 清掉按 fallback 字体缓存的 glyph atlas 并重新测量/重绘
@@ -564,6 +600,25 @@ async function setupEventListeners() {
   unlistenTakenOver = await onSessionTakenOver(({ id }) => {
     const tab = sessionStore.getTabByPtyId(id)
     if (tab) tab.takenOver = true
+  })
+
+  // attach 被全局控制权拒绝（服务端 session.attach.denied）：按 reason 分支
+  // （控制权被占 → Tab 级遮罩 + 接管入口；会话不存在 → 置 stopped）——
+  // 不处理的话 attach 悬挂、终端白屏。同时清 attach 标记，
+  // 接管后的重挂不被 attachedPtyIds 挡住
+  unlistenAttachDenied = await transport.listen<{ id: string; reason: string }>(
+    'session-attach-denied',
+    ({ id, reason }) => {
+      attachedPtyIds.delete(id)
+      sessionStore.handleAttachDenied(id, reason)
+    },
+  )
+
+  // 会话被剥离（宿主窗口断开，服务端 session.detached）：Tab 置 stopped，
+  // 清 attach 标记——否则 Tab 永远 running、终端冻结无输出
+  unlistenSessionDetached = await transport.listen<{ id: string }>('session-detached', ({ id }) => {
+    attachedPtyIds.delete(id)
+    sessionStore.handleRemoteDetached(id)
   })
 
   // 远程归还（手机断连/主动 detach/桌面 claim）→ 解除遮罩并触发一次 fit 恢复尺寸
@@ -769,6 +824,8 @@ async function startTab(tabId: string) {
       // 浏览器远程模式：结构化启动选项（Rust 侧按同一规则拼接 CLI 参数）；
       // resumeName 带上有意义的显示名（历史会话名/prompt 名），桌面建 Tab 防编码名
       resume: tab.sessionId ?? undefined,
+      // 多实例远程：随 session.create 路由到 Tab 所属实例（重启沿用原归属）
+      instanceId: tab.instanceId,
       resumeName: tab.name && tab.name !== 'New Session' && tab.name !== tab.sessionId?.slice(0, 8)
         ? tab.name
         : undefined,
@@ -850,6 +907,8 @@ async function restartTab(tabId: string) {
       args,
       // 浏览器远程模式：结构化启动选项（与 buildClaudeArgs 同一规则）
       resume: tab.sessionId ?? undefined,
+      // 多实例远程：随 session.create 路由到 Tab 所属实例（重启沿用原归属）
+      instanceId: tab.instanceId,
       skipPermissions: appStore.claudeOptions.skipPermissions || undefined,
       customArgs: appStore.claudeOptions.customArgs || undefined,
     })
@@ -978,7 +1037,7 @@ async function cleanup() {
   await sessionStore.cleanupAll()
 }
 
-// 向活跃终端发送文字。移动端一律不聚焦：软键盘只由用户 tap 终端唤出
+// 向活跃终端发送文字。移动端一律不聚焦：软键盘只由工具条「键盘」按钮唤出
 // （gesturetap 兜底），侧边栏插入/工具条按键/拖放等程序化路径聚焦会突然弹出
 // 键盘打断操作；桌面无软键盘问题，保持聚焦（接管/插入后键盘输入立即可用）
 function sendText(text: string, focusAfter = true) {
@@ -1091,20 +1150,16 @@ function handleGestureChange(e: Event) {
   if (ta && document.activeElement === ta) ta.blur()
 }
 
-/** tap 兜底聚焦：Gesture preventDefault touchstart 杀死合成 mousedown，
- *  xterm 内部无 TAP 消费者，不兜底则软键盘无法弹出。iOS/Android 对
- *  xterm 内部 focus（preventScroll:true）不弹键盘——直接聚焦裸 textarea
- *  才在用户激活态（tap 手势）可靠唤出。
- *  追加：mouse reporting 激活时合成 mousedown/mouseup 派发给 xterm，
- *  让手机 tap 走桌面同一条鼠标上报链路（点击切光标等）。 */
+/** tap 处理：不再自动聚焦唤出软键盘（用户反馈：点击终端非输入区阅读输出时
+ *  误弹键盘打扰；唤出唯一入口 = 工具条「键盘」按钮，toggleSoftKeyboard）。
+ *  仅保留 mouse reporting 合成：Gesture preventDefault touchstart 杀死合成
+ *  mousedown，而 xterm 鼠标上报（SGR → onData → CLI）只挂在这些事件上——
+ *  不合成则手机 tap（点击切光标等）到不了 CLI。 */
 function handleGestureTap(e: Event) {
   if (!isMobile.value) return
   const instance = currentInstance()
   if (!instance) return
   forwardTapAsMouseEvents(instance.term, e)
-  const ta = instance.term.textarea
-  if (ta) ta.focus()
-  else instance.term.focus()
 }
 
 /**
@@ -1124,8 +1179,18 @@ function forwardTapAsMouseEvents(term: Terminal, e: Event) {
   const ev = e as Event & { pageX?: number; pageY?: number; tapCount?: number }
   const init = buildTapMouseInit(ev.pageX, ev.pageY, ev.tapCount, window.scrollX, window.scrollY)
   if (!init) return
-  el.dispatchEvent(new MouseEvent('mousedown', { ...init, view: window, buttons: 1 }))
-  el.dispatchEvent(new MouseEvent('mouseup', { ...init, view: window, buttons: 0 }))
+  // xterm 内部 _handleMouseDown 会无条件 textarea.focus()（点击=聚焦语义）：
+  // 合成事件会被它当作真实点击 → 弹软键盘。dispatch 期间临时屏蔽 focus，
+  // 软键盘只由工具条「键盘」图标开关控制
+  const ta = term.textarea
+  const originalFocus = ta?.focus
+  if (ta) ta.focus = () => {}
+  try {
+    el.dispatchEvent(new MouseEvent('mousedown', { ...init, buttons: 1 }))
+    el.dispatchEvent(new MouseEvent('mouseup', { ...init, buttons: 0 }))
+  } finally {
+    if (ta && originalFocus) ta.focus = originalFocus
+  }
 }
 
 // 兼容：重启当前活跃 Tab
@@ -1141,12 +1206,16 @@ onUnmounted(() => {
   window.removeEventListener('copy', handleNativeCopy)
   gestureHostEl?.removeEventListener(GESTURE_CHANGE, handleGestureChange, true)
   gestureHostEl?.removeEventListener(GESTURE_TAP, handleGestureTap, true)
+  gestureHostEl?.removeEventListener('focusin', handleFocusIn)
+  gestureHostEl?.removeEventListener('focusout', handleFocusOut)
   gestureHostEl = undefined
   unlistenPtyOutput?.()
   unlistenPtyExit?.()
   unlistenPtyError?.()
   unlistenTakenOver?.()
   unlistenReclaimed?.()
+  unlistenAttachDenied?.()
+  unlistenSessionDetached?.()
   unlistenDragDrop?.()
   unlistenWindowResized?.()
   unlistenRemoteConn?.()
@@ -1162,13 +1231,16 @@ async function handleClaim(tabId: string) {
     // 浏览器端 claim = 重新 attach（sessionClaim），记录标记防重复；
     // 传当前实际尺寸（attach 会 resize PTY，默认值会把终端打回 80×24）
     attachedPtyIds.add(instance.ptyId)
+    // 浏览器端 attach 受全局控制权门拦截：先显式接管（同连接消息有序，
+    // 服务端先处理 takeover 再处理 attach），否则重挂被拒、遮罩解不开
+    if (!isTauriEnv) await controllerTakeover()
     await ptyClaim(instance.ptyId, instance.term.cols, instance.term.rows)
     // claim 后 Rust 会 emit session-reclaimed 解除遮罩；主动 fit 恢复尺寸。
     // 接管者自身的遮罩没有对应的解除事件（taken-over 只发给被抢方），本地解除
     const tab = sessionStore.getTabByPtyId(instance.ptyId)
     if (tab) tab.takenOver = false
     instance.fitAddon.fit()
-    // 移动端不聚焦：接管是点按钮触发的，聚焦会突然弹出软键盘（键盘只由 tap 终端唤出）
+    // 移动端不聚焦：接管是点按钮触发的，聚焦会突然弹出软键盘（键盘只由工具条「键盘」按钮唤出）
     if (!isMobile.value) instance.term.focus()
   }
 }
@@ -1188,6 +1260,9 @@ defineExpose({
   fitCurrentTerminal,
   refreshRemoteSessions,
   captureSnapshot,
+  /** 软键盘开关状态与切换（手机工具条「键盘」按钮） */
+  softKeyboardOpen,
+  toggleSoftKeyboard,
 })
 </script>
 

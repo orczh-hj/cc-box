@@ -172,7 +172,7 @@ async fn RemoteState_Subscribe_订阅后收到输出与状态推送() {
     // 订阅：先收到 subscribed（tail 为空）
     state.handle_client_message(conn, &ClientMessage::SessionSubscribe { id: "p5".into() });
     match recv_timeout(&mut rx).await {
-        ServerMessage::SessionSubscribed { id, tail } => {
+        ServerMessage::SessionSubscribed { id, tail, .. } => {
             assert_eq!(id, "p5");
             assert!(tail.is_empty());
         }
@@ -497,7 +497,7 @@ async fn RemoteState_Attach_接管成功附快照并成为输出订阅者() {
         &ClientMessage::SessionAttach { id: "a1".into(), cols: 80, rows: 24 },
     );
     match recv_timeout(&mut rx).await {
-        ServerMessage::SessionAttached { id, cols, rows, tail } => {
+        ServerMessage::SessionAttached { id, cols, rows, tail, .. } => {
             assert_eq!(id, "a1");
             assert_eq!((cols, rows), (80, 24));
             assert_eq!(tail, "snapshot content\n");
@@ -740,6 +740,7 @@ async fn RemoteState_SessionCreate_未知项目拒绝() {
             skip_permissions: None,
             custom_args: None,
             session_name: None,
+            instance_id: None,
         },
     );
     match recv_timeout(&mut rx).await {
@@ -824,7 +825,7 @@ async fn RemoteState_SessionCreate_并发上限拒绝() {
     crate::remote_state::REMOTE_SPAWN_INFLIGHT.store(8, std::sync::atomic::Ordering::SeqCst);
     state.handle_client_message(
         conn,
-        &ClientMessage::SessionCreate { path: "/any".into(), session_id: None, skip_permissions: None, custom_args: None, session_name: None },
+        &ClientMessage::SessionCreate { path: "/any".into(), session_id: None, skip_permissions: None, custom_args: None, session_name: None, instance_id: None },
     );
     match recv_timeout(&mut rx).await {
         ServerMessage::SessionCreateFailed { error } => {
@@ -1647,4 +1648,39 @@ async fn RemoteState_TicketConnNoBroadcast_1() {
     }
     // 票据连接不应收到
     assert!(ticket_rx.try_recv().is_err(), "受限连接不应收到广播");
+}
+
+/// 成员上行投递非阻塞：可靠消息队列满 → 断开该手机；PtyOutput 可丢但保留连接
+#[tokio::test]
+async fn RemoteState_DeliverToConn_可靠满断开输出可丢_001() {
+    let state = RemoteState::new();
+
+    // 可靠消息：容量 1，先填满，再投递 → try_send 失败 → 连接被移除
+    let (tx, _rx) = mpsc::channel(1);
+    let conn = crate::remote_state::next_conn_id();
+    state.add_conn(conn, tx, false);
+    state.try_send(conn, ServerMessage::Pong);
+    state.deliver_to_conn(conn, ServerMessage::Pong);
+    assert!(
+        state.conn_via_relay(conn).is_none(),
+        "可靠消息入队失败应断开该手机"
+    );
+
+    // 输出消息：容量 1，填满后投递 → 丢弃但不移除连接
+    let (tx2, _rx2) = mpsc::channel(1);
+    let conn2 = crate::remote_state::next_conn_id();
+    state.add_conn(conn2, tx2, false);
+    state.try_send(conn2, ServerMessage::Pong);
+    state.deliver_to_conn(
+        conn2,
+        ServerMessage::PtyOutput {
+            id: "p".into(),
+            data: "x".into(),
+            seq: 1,
+        },
+    );
+    assert!(
+        state.conn_via_relay(conn2).is_some(),
+        "PtyOutput 拥塞不应断开手机（由 seq 缺口可见）"
+    );
 }

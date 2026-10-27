@@ -225,9 +225,10 @@ describe('XTermTerminal 触摸手势（xterm 6 原生 Gesture）', () => {
     wrapper.unmount()
   })
 
-  // tap 兜底聚焦：Gesture preventDefault touchstart 杀死合成 mousedown 后，
-  // tap 终端必须仍能聚焦裸 textarea（弹出软键盘；xterm 内部 focus 在 iOS 不弹键盘）
-  it('XtermGesture_TapFocus_003', async () => {
+  // tap 不再自动唤出软键盘（用户反馈：点击终端非输入区弹键盘打扰阅读；
+  // 唤出唯一入口 = 工具条「键盘」按钮）。tap 只保留 mouse reporting 合成链路，
+  // 不得聚焦 textarea
+  it('XtermGesture_TapNoAutoFocus_003', async () => {
     const wrapper = await mountAndStart()
     const ta = terminalMock.lastTextarea!
     document.body.appendChild(ta)
@@ -235,7 +236,46 @@ describe('XTermTerminal 触摸手势（xterm 6 原生 Gesture）', () => {
     const termEl = wrapper.find('.terminal-wrapper[data-tab="t1"]').element
     dispatchGesture(termEl, '-xterm-gesturetap', {})
 
+    expect(document.activeElement).not.toBe(ta)
+    wrapper.unmount()
+  })
+
+  // 回归（用户实测：点击终端仍弹键盘）：mouse reporting 激活时 tap 会合成
+  // mousedown 派发到 term.element，而 xterm 的 _handleMouseDown 无条件
+  // textarea.focus()——合成事件期间必须屏蔽 focus，否则鼠标合成链路又成了
+  // 隐藏的唤出路径。这里用监听器模拟 xterm 内部的聚焦行为。
+  it('XtermGesture_TapMouseReportNoFocus_006', async () => {
+    const wrapper = await mountAndStart()
+    const ta = terminalMock.lastTextarea!
+    document.body.appendChild(ta)
+    const termEl = wrapper.find('.terminal-wrapper[data-tab="t1"]').element as HTMLElement
+    termEl.classList.add('enable-mouse-events')
+    // 模拟 xterm _handleMouseDown 的 i.focus()
+    let downCount = 0
+    termEl.addEventListener('mousedown', () => { downCount += 1; ta.focus() })
+    const focusSpy = vi.spyOn(ta, 'focus')
+
+    dispatchGesture(termEl, '-xterm-gesturetap', { pageX: 10, pageY: 20, tapCount: 1 })
+
+    expect(downCount).toBe(1)
+    expect(focusSpy).not.toHaveBeenCalled()
+    expect(document.activeElement).not.toBe(ta)
+    wrapper.unmount()
+  })
+
+  // 键盘开关（工具条「键盘」按钮）：未聚焦时聚焦 textarea（唤出软键盘），
+  // 已聚焦时 blur 收起——toggle 语义闭环
+  it('XtermGesture_KeyboardToggle_005', async () => {
+    const wrapper = await mountAndStart()
+    const vm = wrapper.vm as unknown as { toggleSoftKeyboard: () => void }
+    const ta = terminalMock.lastTextarea!
+    document.body.appendChild(ta)
+
+    vm.toggleSoftKeyboard()
     expect(document.activeElement).toBe(ta)
+
+    vm.toggleSoftKeyboard()
+    expect(document.activeElement).not.toBe(ta)
     wrapper.unmount()
   })
 

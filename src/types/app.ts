@@ -45,9 +45,6 @@ export interface RemoteConfig {
 /** 远程连接状态（get_remote_status 返回） */
 export interface RemoteStatus {
   enabled: boolean
-  running: boolean
-  /** 宿主制：远程由本机另一实例提供（本实例未监听），url 仍为宿主可用地址 */
-  hostedElsewhere: boolean
   port: number
   token: string
   /** 手机直连 URL（含 token fragment）；token 未生成时为空 */
@@ -62,6 +59,16 @@ export interface RemoteStatus {
   relayPairCode: string
   /** 中继配对二维码内容（relayUrl + #pair=code）；无效则空 */
   relayPairUrl: string
+  /** 与后台 Broker 的 IPC 是否已注册 */
+  brokerConnected: boolean
+  /** 旧版 CC-Box 占用设备入口：设备级多实例控制暂不可用 */
+  legacyOwned: boolean
+  /** 局域网监听是否正常 */
+  lanRunning: boolean
+  /** 局域网不可用原因（第三方占口等） */
+  lanError?: string
+  /** 开机自启动（仅 Broker） */
+  autostart: boolean
 }
 
 export interface DefaultClaudeOptions {

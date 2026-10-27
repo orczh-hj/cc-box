@@ -21,7 +21,7 @@ tauri-plugin-process = "2"
 portable-pty = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["sync", "parking_lot", "rt-multi-thread", "time", "fs", "io-util"] }
+tokio = { version = "1", features = ["sync", "parking_lot", "rt-multi-thread", "time", "fs", "io-util", "net"] }
 tokio-util = { version = "0.7", features = ["io"] }
 reqwest = { version = "0.11", features = ["json", "blocking", "stream"] }
 anyhow = "1"
@@ -52,9 +52,28 @@ sqlite = ["rusqlite"]
 [dev-dependencies]
 tempfile = "3"
 
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+# 托盘只在 Windows/macOS 编译；Linux 保持纯 tokio 无头模式，避免
+# libayatana-appindicator 缺失导致 Broker 无法启动。
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+
 [target.'cfg(target_os = "windows")'.dependencies]
 webview2-com = "0.38"
 windows-core = "0.61"
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_System_Threading",
+    "Win32_System_Pipes",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_Registry",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [profile.release]
 strip = true

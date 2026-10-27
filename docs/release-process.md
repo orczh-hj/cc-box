@@ -194,6 +194,8 @@ CI 自动构建并上传：
 | macOS (ARM) | `.dmg` + `.app.tar.gz` + `.app.tar.gz.sig` |
 | Linux (x64) | `.AppImage` + `.AppImage.sig` |
 
+**本地 `npm run tauri:build` 只产出 NSIS exe、不生成签名产物**（`tauri.conf.json` 默认 `targets: "nsis"` 且未启用 `createUpdaterArtifacts`，本地无私钥也不会报错）。签名产物（自动更新必需的 `*.sig`）由 Release CI 通过 `--config '{"bundle":{"createUpdaterArtifacts":true}}'` 启用，并用 secret `TAURI_SIGNING_PRIVATE_KEY` 签名；macOS/Linux 的打包目标由 `tauri.macos.conf.json` / `tauri.linux.conf.json` 平台专属配置提供。MSI 已移除（CI 从未上传过）。
+
 ## CHANGELOG 格式
 
 `CHANGELOG.md` 用于记录版本变更：

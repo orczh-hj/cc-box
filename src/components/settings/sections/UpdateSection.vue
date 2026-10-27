@@ -250,7 +250,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { check, relaunch } from '@/api/tauri'
+import { check, relaunch, prepareForUpdate, resumeBrokerConnection } from '@/api/tauri'
 import { checkForUpdates, downloadClaudeVersion, cancelClaudeVersionDownload, installClaudeVersion, killClaudeProcesses, getInstalledClaudeVersion, onInstallProgress } from '@/api/tauri'
 import { openExternal } from '@/api/platform'
 import { useSidebarStore } from '@/stores/sidebar'
@@ -346,7 +346,9 @@ async function startDownload() {
     let downloaded = 0
     let contentLength = 0
 
-    await update.downloadAndInstall((event) => {
+    // 先下载：下载期间 Broker 继续提供远程。只有真正安装前才让它退出，
+    // 避免慢下载/下载失败导致远程长时间离线。
+    await update.download((event) => {
       switch (event.event) {
         case 'Started':
           contentLength = event.data.contentLength ?? 0
@@ -358,12 +360,27 @@ async function startDownload() {
           updateStore.setDownloadProgress({ downloaded, total: contentLength, percent })
           break
         case 'Finished':
-          updateStore.setDownloadState('installing')
           break
       }
     })
 
-    await relaunch()
+    updateStore.setDownloadState('installing')
+    // Broker 与本进程共用可执行文件：安装前让它退出并写 update_in_progress，
+    // 避免 Windows 上无法替换正在运行的 exe，也避免 GUI 立即把它重新拉起。
+    try {
+      await prepareForUpdate()
+    } catch {
+      // Broker 可能已退出（响应未及返回）——继续安装
+    }
+    try {
+      await update.install()
+      await relaunch()
+    } catch (err) {
+      // 安装/重启失败：清除 update_in_progress 与 SUPPRESSED，恢复 Broker，
+      // 否则本次进程会永久处于远程/托盘不可用状态。
+      await resumeBrokerConnection().catch(() => {})
+      throw err
+    }
   } catch (err) {
     updateStore.setDownloadError(t('updateFailed', { error: String(err) }))
     updateStore.setDownloadState('error')
@@ -523,6 +540,9 @@ async function openDownloadedFolder(version: string) {
 }
 
 onMounted(async () => {
+  // 自动检查 CC-Box 更新（未检查过时）：托盘「更新到新版本」跳转进来即可看到结果
+  if (!updateStore.updateInfo) void handleCheckUpdate()
+
   // 自动加载版本列表（带缓存）
   await updateStore.loadClaudeVersionList()
 

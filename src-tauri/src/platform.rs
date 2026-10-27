@@ -327,6 +327,89 @@ pub(crate) fn is_process_running(name: &str) -> Result<bool, String> {
     }
 }
 
+/// 指定 PID 是否仍存活。0 视为无效/已退出。
+pub(crate) fn is_pid_alive(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::Threading::{
+            GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
+        // STILL_ACTIVE 是 Win32 宏，windows-sys 未导出
+        const STILL_ACTIVE: u32 = 259;
+        let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+        if handle.is_null() {
+            return false;
+        }
+        let mut code = 0u32;
+        let ok = unsafe { GetExitCodeProcess(handle, &mut code) } != 0;
+        unsafe {
+            let _ = CloseHandle(handle);
+        }
+        ok && code == STILL_ACTIVE
+    }
+    #[cfg(unix)]
+    {
+        let rc = unsafe { libc::kill(pid as i32, 0) };
+        rc == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    }
+}
+
+/// 终止指定 PID。`force=true` 时 Unix 用 SIGKILL；Windows 始终是 TerminateProcess。
+/// 拒绝终止当前进程（防止误杀 Broker/GUI 自身）。
+pub(crate) fn terminate_pid(pid: u32, force: bool) -> Result<(), String> {
+    if pid == 0 {
+        return Err("invalid pid".to_string());
+    }
+    if pid == std::process::id() {
+        return Err("refuse to terminate current process".to_string());
+    }
+    #[cfg(target_os = "windows")]
+    {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, TerminateProcess, PROCESS_TERMINATE,
+        };
+        let _ = force;
+        let handle = unsafe { OpenProcess(PROCESS_TERMINATE, 0, pid) };
+        if handle.is_null() {
+            return Err(format!(
+                "OpenProcess failed: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        let ok = unsafe { TerminateProcess(handle, 1) } != 0;
+        unsafe {
+            let _ = CloseHandle(handle);
+        }
+        if ok {
+            Ok(())
+        } else {
+            Err(format!(
+                "TerminateProcess failed: {}",
+                std::io::Error::last_os_error()
+            ))
+        }
+    }
+    #[cfg(unix)]
+    {
+        let sig = if force { libc::SIGKILL } else { libc::SIGTERM };
+        let rc = unsafe { libc::kill(pid as i32, sig) };
+        if rc == 0 {
+            Ok(())
+        } else {
+            Err(format!(
+                "kill({}) failed: {}",
+                pid,
+                std::io::Error::last_os_error()
+            ))
+        }
+    }
+}
+
 // ---- 6. 架构检测 ----
 
 /// 获取当前平台标识字符串

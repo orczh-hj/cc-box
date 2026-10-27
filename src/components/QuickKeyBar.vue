@@ -12,26 +12,47 @@
   >
     <button
       v-for="k in keys"
-      :key="k.label"
+      :key="k.key"
       class="qk-btn"
-      :class="{ 'qk-action': !!k.action, pressing: pressedLabel === k.label }"
+      :class="{ 'qk-action': !!k.action, 'qk-open': k.action === 'keyboard' && keyboardOpen, pressing: pressedLabel === k.label }"
       :title="k.hint"
-      @click="k.action === 'select' ? $emit('select') : $emit('send', k.bytes!)"
-    >{{ k.label }}</button>
+      :aria-label="k.label"
+      @click="k.action === 'select' ? $emit('select') : k.action === 'keyboard' ? $emit('toggleKeyboard') : $emit('send', k.bytes!)"
+    >
+      <svg
+        v-if="k.icon === 'keyboard'"
+        class="qk-icon"
+        viewBox="0 0 24 24"
+        width="16"
+        height="16"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="1.8"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        aria-hidden="true"
+      >
+        <rect x="2.5" y="6" width="19" height="12" rx="2" />
+        <path d="M6 10h.5M9.5 10h.5M13 10h.5M16.5 10h.5M6 13h.5M9.5 13h.5M13 13h.5M16.5 13h.5M8 16h8" />
+      </svg>
+      <template v-else>{{ k.label }}</template>
+    </button>
   </div>
 </template>
 
 <script setup lang="ts">
 /**
  * 快捷键工具条（手机断点）：软键盘按不出的控制键，用按钮直发终端转义序列。
- * 软键盘由点击终端区域唤出；「选择复制」进入终端原生选择模式（拖选 + 复制走
- * xterm selection）；Enter 提交，Shift+Tab 模式切换，Ctrl+J 换行不提交，
+ * 「键盘」是软键盘唯一显式开关（tap 终端不自动唤出——点击阅读输出时误弹
+ * 键盘打扰）；「选择复制」进入终端原生选择模式（拖选 + 复制走 xterm
+ * selection）；Enter 提交，Shift+Tab 模式切换，Ctrl+J 换行不提交，
  * Ctrl+U 清行，Home/End 行首/行尾。action 按钮不发字节，经 TerminalView 转发。
  */
 import { computed, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 
-defineEmits<{ send: [bytes: string]; select: [] }>()
+const props = defineProps<{ keyboardOpen?: boolean }>()
+defineEmits<{ send: [bytes: string]; select: []; toggleKeyboard: [] }>()
 
 const { t } = useI18n()
 
@@ -40,29 +61,40 @@ const pressedLabel = ref('')
 
 function onPointerDown(e: PointerEvent) {
   const btn = (e.target as HTMLElement).closest('.qk-btn')
-  pressedLabel.value = btn?.textContent ?? ''
+  // 图标按钮无文本：aria-label 与 k.label 同源，统一用它做按压高亮标识
+  pressedLabel.value = btn?.getAttribute('aria-label') ?? btn?.textContent ?? ''
 }
 
 interface QuickKey {
+  key: string
   label: string
   bytes?: string
   hint?: string
-  action?: 'select'
+  action?: 'select' | 'keyboard'
+  /** 图标按钮：渲染 SVG 而非文字（label 仅作 aria-label/按压高亮标识） */
+  icon?: 'keyboard'
 }
 
 const keys = computed<QuickKey[]>(() => [
-  { label: t('quickKeySelectCopy'), action: 'select' },
-  { label: 'Esc', bytes: '\x1b', hint: t('quickKeyEsc') },
-  { label: 'Enter', bytes: '\r', hint: t('quickKeyEnter') },
-  { label: '⇧Tab', bytes: '\x1b[Z', hint: t('quickKeyMode') },
-  { label: 'Ctrl+J', bytes: '\x0a', hint: t('quickKeyNewline') },
-  { label: 'Ctrl+U', bytes: '\x15', hint: t('quickKeyClearLine') },
-  { label: '↑', bytes: '\x1b[A', hint: '' },
-  { label: '↓', bytes: '\x1b[B', hint: '' },
-  { label: '←', bytes: '\x1b[D', hint: '' },
-  { label: '→', bytes: '\x1b[C', hint: '' },
-  { label: 'Home', bytes: '\x1b[H', hint: '' },
-  { label: 'End', bytes: '\x1b[F', hint: '' },
+  {
+    key: 'keyboard',
+    label: props.keyboardOpen ? t('quickKeyKeyboardHide') : t('quickKeyKeyboard'),
+    action: 'keyboard',
+    icon: 'keyboard',
+    hint: t('quickKeyKeyboardHint'),
+  },
+  { key: 'select', label: t('quickKeySelectCopy'), action: 'select' },
+  { key: 'esc', label: 'Esc', bytes: '\x1b', hint: t('quickKeyEsc') },
+  { key: 'enter', label: 'Enter', bytes: '\r', hint: t('quickKeyEnter') },
+  { key: 'stab', label: '⇧Tab', bytes: '\x1b[Z', hint: t('quickKeyMode') },
+  { key: 'ctrlj', label: 'Ctrl+J', bytes: '\x0a', hint: t('quickKeyNewline') },
+  { key: 'ctrlu', label: 'Ctrl+U', bytes: '\x15', hint: t('quickKeyClearLine') },
+  { key: 'up', label: '↑', bytes: '\x1b[A', hint: '' },
+  { key: 'down', label: '↓', bytes: '\x1b[B', hint: '' },
+  { key: 'left', label: '←', bytes: '\x1b[D', hint: '' },
+  { key: 'right', label: '→', bytes: '\x1b[C', hint: '' },
+  { key: 'home', label: 'Home', bytes: '\x1b[H', hint: '' },
+  { key: 'end', label: 'End', bytes: '\x1b[F', hint: '' },
 ])
 </script>
 
@@ -89,6 +121,9 @@ const keys = computed<QuickKey[]>(() => [
   flex: 0 0 auto;
   min-width: 52px;
   padding: 6px 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   border: 1px solid var(--border-color);
   border-radius: var(--radius-md);
   background: var(--bg-primary);
@@ -115,5 +150,11 @@ const keys = computed<QuickKey[]>(() => [
 
 .qk-btn.qk-action:active {
   color: var(--accent-color);
+}
+
+/* 键盘开启态：常亮提示当前软键盘已唤出 */
+.qk-btn.qk-open {
+  background: var(--selected-bg);
+  color: var(--accent-gold);
 }
 </style>

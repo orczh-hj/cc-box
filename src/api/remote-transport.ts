@@ -17,6 +17,14 @@ import {
 } from '../../remote/protocol/protocol'
 import { transportEnv } from './env'
 import type { Transport, Unlisten, InvokeOpts } from './transport'
+import {
+  addDesktop,
+  getDesktop,
+  isRelayToken,
+  listDesktops,
+  migrateLegacyToken,
+  touchDesktop,
+} from './remote-desktops'
 
 const TOKEN_KEY = 'ccbox-remote-token'
 const PING_INTERVAL = 30_000
@@ -72,8 +80,20 @@ class RemoteTransportImpl implements Transport {
   /** claim 重 attach 的 ptyId：已有实时输出流，跳过 attached 的 tail 快照防重复写入 */
   private skipAttachedTailIds = new Set<string>()
 
+  /** 每会话最后应用的输出序号（检测丢帧；tailSeq 为快照基线） */
+  private lastSeq = new Map<string, number>()
+
   /** 认证/连接状态（TokenGate 与主 UI 的挂载时机依据） */
   onConnState: (state: RemoteConnState) => void = () => {}
+
+  /** 设备列表变化通知（add/touch 时触发，TokenGate 重读列表刷新） */
+  onDesktopsChanged: () => void = () => {}
+
+  /** 当前连接对应的设备条目 id（设备列表模型；null = 票据/未知来源） */
+  private _activeDesktopId: string | null = null
+  get activeDesktopId(): string | null {
+    return this._activeDesktopId
+  }
 
   /** 票据模式：URL 携带 dl= 时以票据为 token 建连（受限会话，不写 localStorage） */
   readonly downloadTicket: string | null = parseDownloadTicket()
@@ -165,7 +185,9 @@ class RemoteTransportImpl implements Transport {
       this._viaRelay = true
       const token = await this.pair(pairCode)
       if (token) {
-        this.storeAndConnect(token)
+        const d = addDesktop({ kind: 'relay', token, origin: location.origin })
+        this.onDesktopsChanged()
+        this.connectAs(token, d.id)
       } else {
         this.setConnState('denied')
       }
@@ -174,28 +196,65 @@ class RemoteTransportImpl implements Transport {
 
     if (hashToken) {
       history.replaceState(null, '', location.pathname)
-      this.storeAndConnect(hashToken)
+      const d = addDesktop({
+        kind: isRelayToken(hashToken) ? 'relay' : 'lan',
+        token: hashToken,
+        origin: location.origin,
+      })
+      this.onDesktopsChanged()
+      this.connectAs(hashToken, d.id)
       return
     }
 
-    const saved = localStorage.getItem(TOKEN_KEY) ?? ''
-    if (saved) {
-      this.storeAndConnect(saved)
+    // 无 URL 参数：旧单值迁移（一次性）+ 同 origin 的最近设备自动连接。
+    // 必须按 origin 过滤——当前页面属于设备 A（端口/relay 域），拿设备 B 的
+    // token 来连会 hello.error 且把 B 误标「令牌无效」
+    migrateLegacyToken(location.origin)
+    const latest = listDesktops().find(d => d.origin.replace(/\/+$/, '') === location.origin.replace(/\/+$/, ''))
+    if (latest) {
+      this.connectAs(latest.token, latest.id)
     } else {
       this.setConnState('closed')
     }
   }
 
-  /** 手动输入 token 连接（TokenGate 输入框） */
+  /** 手动输入 token 连接（TokenGate 输入框；同样入列表便于下次使用） */
   connectWithToken(token: string): void {
     if (!token.trim()) return
-    this.storeAndConnect(token.trim())
+    const t = token.trim()
+    const d = addDesktop({
+      kind: isRelayToken(t) ? 'relay' : 'lan',
+      token: t,
+      origin: location.origin,
+    })
+    this.onDesktopsChanged()
+    this.connectAs(t, d.id)
   }
 
-  private storeAndConnect(token: string) {
+  /** 切换设备：与当前页面同 origin（relay 页/同端口 LAN）时免重载换 token
+   * 重连；不同 origin（另一端口/另一 relay 域）时跳转加载（WS 同源语义） */
+  activateDesktop(id: string): void {
+    const d = getDesktop(id)
+    if (!d) return
+    if (d.origin.replace(/\/+$/, '') !== location.origin.replace(/\/+$/, '')) {
+      location.href = `${d.origin.replace(/\/+$/, '')}/#token=${encodeURIComponent(d.token)}`
+      return
+    }
+    this.connectAs(d.token, d.id)
+  }
+
+  private connectAs(token: string, desktopId: string) {
+    // 切换设备前彻底关闭旧连接：旧 socket 的 onclose 会按**新 token** 再开
+    // 一条（双连接互踢），在途帧也可能串到新设备
+    this.closeSocket()
+    this.retry = 0
+    // 旧单值 key 持续写最新值（旧版前端回滚后仍可直接连最近设备）
     localStorage.setItem(TOKEN_KEY, token)
+    this._activeDesktopId = desktopId
     this.token = token
     this.closedByUser = false
+    touchDesktop(desktopId)
+    this.onDesktopsChanged()
     this.open()
   }
 
@@ -222,6 +281,20 @@ class RemoteTransportImpl implements Transport {
     this.onConnState(s)
   }
 
+  /** 主动关闭当前连接（切换设备）：清定时器 + 摘除回调，避免旧连接
+   * 触发重连或在途帧投递 */
+  private closeSocket(): void {
+    this.cleanupTimers()
+    const ws = this.ws
+    this.ws = null
+    if (!ws) return
+    ws.onopen = null
+    ws.onmessage = null
+    ws.onclose = null
+    ws.onerror = null
+    try { ws.close() } catch { /* 已关闭 */ }
+  }
+
   private open(): void {
     this.cleanupTimers()
     this.setConnState(this.retry === 0 ? 'connecting' : 'reconnecting')
@@ -231,6 +304,7 @@ class RemoteTransportImpl implements Transport {
     this.ws = ws
 
     ws.onopen = () => {
+      if (this.ws !== ws) return
       this.setConnState('authenticating')
       ws.send(
         JSON.stringify({
@@ -243,6 +317,7 @@ class RemoteTransportImpl implements Transport {
     }
 
     ws.onmessage = (ev) => {
+      if (this.ws !== ws) return
       let raw: unknown
       try {
         raw = JSON.parse(ev.data as string)
@@ -254,7 +329,16 @@ class RemoteTransportImpl implements Transport {
       if (rawObj?.type === 'device.status') {
         // 仅中继链路下发此帧——收到即为经中继的运行时证据
         this._viaRelay = true
-        this.dispatchEvent('device-status', { online: rawObj.online === true })
+        const online = rawObj.online === true
+        this.dispatchEvent('device-status', { online })
+        if (!online) {
+          // 设备侧已断开：relay 会移除本连接的路由但保持 WS——继续持有只会
+          // 让 rpc/attach 全部黑洞（消息被 relay 丢弃，直到心跳超时才重连）。
+          // 主动断开立即进入重连；retry 归零让退避从最小值起步（设备通常
+          // 数秒内回来，重连一次即恢复）
+          this.retry = 0
+          ws.close()
+        }
         return
       }
       const msg = parseServerMessage(raw)
@@ -265,10 +349,17 @@ class RemoteTransportImpl implements Transport {
         this.setConnState('connected')
         this.startPing()
         this._connId = msg.connId
+        // 设备名回填列表条目（TokenGate 展示），并清除历史失效标记
+        if (this._activeDesktopId) {
+          touchDesktop(this._activeDesktopId, { name: msg.deviceName, invalid: false })
+          this.onDesktopsChanged()
+        }
         // controller 语义：null=无人持有；0=桌面持有；>0=远程连接 id
         this._controllerLabel =
           msg.controller == null ? '' : msg.controller === 0 ? 'desktop' : String(msg.controller)
         this.appliedRevision = msg.revision
+        // 重连：订阅集按连接划分，旧 attach 失效；序号基线等待新的 attached
+        this.lastSeq.clear()
         if (msg.downloadScope) {
           this._downloadScope = msg.downloadScope
           this.onDownloadScope(msg.downloadScope)
@@ -283,6 +374,11 @@ class RemoteTransportImpl implements Transport {
       if (msg.type === 'hello.error') {
         this.setConnState('denied')
         this.closedByUser = true // token 无效不再重连
+        // 条目标记失效（列表显示「令牌无效」角标；不删除，密钥轮换后可重扫覆盖）
+        if (this._activeDesktopId) {
+          touchDesktop(this._activeDesktopId, { invalid: true })
+          this.onDesktopsChanged()
+        }
         ws.close()
         return
       }
@@ -320,18 +416,62 @@ class RemoteTransportImpl implements Transport {
       // 远程协议消息 → 映射为与桌面 Tauri 事件同构的 pty-output / pty-exit
       // （XTermTerminal 等组件经 transport.listen 订阅，零感知运行环境）
       if (msg.type === 'pty.output') {
+        const seq = msg.seq ?? 0
+        if (seq > 0) {
+          const prev = this.lastSeq.get(msg.id) ?? 0
+          // 快照与实时流重叠：旧序号丢弃
+          if (prev > 0 && seq <= prev) return
+          if (prev > 0 && seq > prev + 1) {
+            this.dispatchEvent('pty-output', {
+              id: msg.id,
+              data: `\r\n\x1b[33m[输出中断：跳过 ${seq - prev - 1} 段，正在重新同步]\x1b[0m\r\n`,
+            })
+          }
+          this.lastSeq.set(msg.id, seq)
+        }
         this.dispatchEvent('pty-output', { id: msg.id, data: msg.data })
         return
       }
       if (msg.type === 'session.exit') {
+        this.lastSeq.delete(msg.id)
         this.dispatchEvent('pty-exit', { id: msg.id, exitCode: 0 })
         return
       }
       if (msg.type === 'session.attached') {
+        // 快照基线：后续 PtyOutput.seq <= tailSeq 属于重叠，直接丢弃。
+        // claim 重 attach 时实时流可能已超过 tailSeq，只能抬高基线，不能降低。
+        if (msg.tailSeq !== undefined) {
+          const prev = this.lastSeq.get(msg.id) ?? 0
+          this.lastSeq.set(msg.id, Math.max(prev, msg.tailSeq))
+        } else {
+          this.lastSeq.delete(msg.id)
+        }
         // attach 快照（tail）作为首段输出写入终端；claim 重 attach 时已订阅
         // 实时流，写入 tail 会重复——跳过
         if (this.skipAttachedTailIds.delete(msg.id)) return
         this.dispatchEvent('pty-output', { id: msg.id, data: msg.tail })
+        return
+      }
+      if (msg.type === 'session.subscribed') {
+        // 只读订阅：记录序号基线，不把 tail 写入终端（避免未 attach 的重复内容）；
+        // 同样只抬高，不降低已有实时流基线。
+        if (msg.tailSeq !== undefined) {
+          const prev = this.lastSeq.get(msg.id) ?? 0
+          this.lastSeq.set(msg.id, Math.max(prev, msg.tailSeq))
+        }
+        return
+      }
+      if (msg.type === 'session.attach.denied') {
+        // attach 被全局控制权拒绝（其他端持有）：分发事件，会话层置 Tab 级
+        // 遮罩 + 接管入口——不处理的话 attach 悬挂、终端白屏
+        this.dispatchEvent('session-attach-denied', { id: msg.id, reason: msg.reason })
+        return
+      }
+      if (msg.type === 'session.detached') {
+        // 会话被剥离（宿主窗口断开等）：分发事件（会话层置 stopped）并清
+        // 输出序号基线——不处理的话 Tab 永远 running、终端冻结
+        this.lastSeq.delete(msg.id)
+        this.dispatchEvent('session-detached', { id: msg.id, reason: msg.reason })
         return
       }
       if (msg.type === 'session.create.failed') {
@@ -350,6 +490,8 @@ class RemoteTransportImpl implements Transport {
     }
 
     ws.onclose = () => {
+      // 已被替换/主动关闭的旧连接不再驱动重连
+      if (this.ws !== ws) return
       this.cleanupTimers()
       this.rejectAllPending('connection closed')
       if (this.closedByUser) {
@@ -494,6 +636,7 @@ class RemoteTransportImpl implements Transport {
           ...(opts.resumeName ? { sessionName: opts.resumeName } : {}),
           ...(opts.skipPermissions ? { skipPermissions: true } : {}),
           ...(opts.customArgs?.trim() ? { customArgs: opts.customArgs.trim() } : {}),
+          ...(opts.instanceId ? { instanceId: opts.instanceId } : {}),
         })
       },
     )

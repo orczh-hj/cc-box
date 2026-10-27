@@ -13,6 +13,24 @@ use axum::http::{header, Request, StatusCode, Uri};
 use axum::response::Response;
 use rust_embed::RustEmbed;
 use tower::ServiceExt;
+
+/// 静态资源缓存策略（原缺失导致手机浏览器启发式缓存旧 index.html，
+/// 一直引用旧 hash bundle——实测表现为按钮/白屏等旧行为复发）：
+/// - `assets/` 下为 Vite 内容哈希文件名 → 一年 immutable，省流量且安全
+/// - 其余（index.html / icon 等非哈希）→ no-cache：每次协商，部署后立即生效
+pub(crate) fn cache_control_for(path: &str) -> &'static str {
+    if path.starts_with("assets/") {
+        "public, max-age=31536000, immutable"
+    } else {
+        "no-cache"
+    }
+}
+
+fn apply_cache_headers(resp: &mut Response, path: &str) {
+    if let Ok(v) = header::HeaderValue::from_str(cache_control_for(path)) {
+        resp.headers_mut().insert(header::CACHE_CONTROL, v);
+    }
+}
 use tower_http::services::ServeDir;
 
 /// 内嵌 Web UI（folder 相对本 crate：../../dist = 仓库根构建产物；
@@ -46,8 +64,11 @@ async fn serve_from_disk(env_var: &str, uri: &Uri) -> Option<Response> {
     let response = ServeDir::new(dir).oneshot(request).await.ok()?;
     // 磁盘 miss（404）不直接透出——内嵌兜底（部分更新场景：新文件未 scp 到）。
     // map 换 body 类型：ServeDir 的 ServeFileSystemResponseBody → axum Body
-    (response.status() != StatusCode::NOT_FOUND)
-        .then(|| response.map(Body::new))
+    (response.status() != StatusCode::NOT_FOUND).then(|| {
+        let mut resp = response.map(Body::new);
+        apply_cache_headers(&mut resp, uri.path().trim_start_matches('/'));
+        resp
+    })
 }
 
 /// 内嵌资产响应（路径为空 → index.html；mime 按扩展名）
@@ -55,10 +76,14 @@ fn embedded_response(uri: &Uri) -> Response {
     let path = uri.path().trim_start_matches('/');
     let path = if path.is_empty() { "index.html" } else { path };
     match EmbeddedAssets::get(path) {
-        Some(file) => Response::builder()
-            .header(header::CONTENT_TYPE, mime_for(path))
-            .body(Body::from(file.data))
-            .unwrap(),
+        Some(file) => {
+            let mut resp = Response::builder()
+                .header(header::CONTENT_TYPE, mime_for(path))
+                .body(Body::from(file.data))
+                .unwrap();
+            apply_cache_headers(&mut resp, path);
+            resp
+        }
         None => Response::builder()
             .status(StatusCode::NOT_FOUND)
             .body(Body::from("not found"))
@@ -146,5 +171,46 @@ mod tests {
         let uri: Uri = "/no-such-file.xyz".parse().unwrap();
         let resp = serve_static("CC_TEST_WEB_DIR_UNSET", uri).await;
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// 缓存策略：哈希资源一年 immutable，其余 no-cache（部署即生效）
+    #[test]
+    fn cache_control_策略_001() {
+        assert_eq!(
+            cache_control_for("assets/index-abc123.js"),
+            "public, max-age=31536000, immutable"
+        );
+        assert_eq!(cache_control_for(""), "no-cache");
+        assert_eq!(cache_control_for("index.html"), "no-cache");
+        assert_eq!(cache_control_for("icon.png"), "no-cache");
+    }
+
+    /// 端到端：磁盘通道的响应必须带 Cache-Control（原缺失 → 手机缓存旧
+    /// index.html 引用旧 bundle，表现为已修复的问题复发）
+    #[tokio::test]
+    async fn serve_static_缓存头_002() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("index.html"), "<html></html>").unwrap();
+        std::fs::create_dir_all(dir.path().join("assets")).unwrap();
+        std::fs::write(dir.path().join("assets/app-abc123.js"), "console.log(1)").unwrap();
+
+        let env = "CC_BOX_TEST_WEB_DIR_CACHE";
+        std::env::set_var(env, dir.path());
+
+        let cc = |resp: &Response| {
+            resp.headers()
+                .get(header::CACHE_CONTROL)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("")
+                .to_string()
+        };
+
+        let index = serve_static(env, "/".parse().unwrap()).await;
+        assert_eq!(cc(&index), "no-cache");
+
+        let asset = serve_static(env, "/assets/app-abc123.js".parse().unwrap()).await;
+        assert_eq!(cc(&asset), "public, max-age=31536000, immutable");
+
+        std::env::remove_var(env);
     }
 }

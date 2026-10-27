@@ -285,6 +285,8 @@ pub fn disconnect() {
     let mut st = RELAY.lock();
     st.enabled = false;
     st.connected = false;
+    drop(st);
+    crate::gateway::sync_relay_status();
     log::info!("[remote] relay disconnected (remote access stopped)");
 }
 
@@ -301,16 +303,14 @@ pub async fn set_relay(url: Option<String>) -> Result<(), String> {
             st.connected = false;
             st.url.clear();
         }
+        crate::gateway::sync_relay_status();
         crate::remote_server::save_relay_config(None, None).map_err(|e| e.to_string())?;
         log::info!("[remote] relay disabled");
         return Ok(());
     };
 
     let url = normalize_relay_url(url.trim());
-    // 宿主制：非宿主实例不注册中继（同 device_id 互踢），见 init() 注释
-    if crate::remote_server::hosted_elsewhere().await {
-        return Err("remote hosted by another instance; relay not started".into());
-    }
+    // 仅 Broker 调用本模块；GUI 进程不再持有 relay 身份
     let (device_id, device_key) = ensure_device_identity()?;
 
     crate::remote_server::save_relay_config(Some(&url), None).map_err(|e| e.to_string())?;
@@ -326,21 +326,6 @@ pub async fn set_relay(url: Option<String>) -> Result<(), String> {
     Ok(())
 }
 
-/// 应用启动时调用：远程总开关开启则连中继。
-/// 地址优先级：环境变量 `CC_BOX_RELAY_URL`（本地调试覆盖，仅本次运行生效、
-/// 不落盘）> 内置默认 `orczh.top:8800`（生产部署，中继即默认远程方式）
-pub async fn init() {
-    let enabled = crate::store::get_app_config()
-        .ok()
-        .and_then(|c| c.remote)
-        .and_then(|r| r.enabled)
-        .unwrap_or(false);
-    if !enabled {
-        return;
-    }
-    connect().await;
-}
-
 /// 连接中继（幂等：已连接则跳过）。远程开启（set_remote_enabled）与启动恢复调用
 pub async fn connect() {
     if RELAY.lock().connected {
@@ -348,12 +333,6 @@ pub async fn connect() {
     }
     // 防重入：若上一轮 loop 尚在连接中，整体替换（并发双 loop 会同 device_id 互踢）
     bump_generation();
-    // 宿主制：本机已有其他实例提供远程服务时跳过中继连接——
-    // 多实例共享 config 中的 device_id，同时注册同一中继会互相顶替（互踢）
-    if crate::remote_server::hosted_elsewhere().await {
-        log::info!("[remote] relay skipped: remote hosted by another instance");
-        return;
-    }
     let url = resolve_relay_url();
     let (device_id, device_key) = match ensure_device_identity() {
         Ok(id) => id,
@@ -463,6 +442,7 @@ async fn run_loop(url: String, device_id: String, device_key: String) {
             REMOTE_STATE.remove_conn(local_id);
         }
         RELAY.lock().connected = false;
+        crate::gateway::sync_relay_status();
 
         match end {
             RoundEnd::Cancelled => {
@@ -565,6 +545,7 @@ async fn run_once(
         let mut st = RELAY.lock();
         st.connected = true;
     }
+    crate::gateway::sync_relay_status();
     // 申请配对码（带预生成 secret；DEVICE_TX 尚未挂载，经 out_tx 直发）
     let _ = out_tx.try_send(
         serde_json::json!({
@@ -615,6 +596,8 @@ async fn run_once(
                         let mut st = RELAY.lock();
                         st.pair_code = code;
                         st.pair_code_at = Some(Instant::now());
+                        drop(st);
+                        crate::gateway::sync_relay_status();
                     }
                     Some("pair.granted") => {
                         // relay fallback（配对时 pair.create 未带 secret，即旧版桌面）
@@ -663,10 +646,11 @@ async fn run_once(
                             log::info!("[remote] relay client {} bridged (local {})", from, local_id);
                         }
                         // 应用层消息：与局域网直连同一条处理路径
+                        //（经 gateway::dispatch——多实例时按路由表转发成员实例）
                         if let Ok(client_msg) =
                             serde_json::from_value::<ClientMessage>(v["payload"].clone())
                         {
-                            REMOTE_STATE.handle_client_message(local_id, &client_msg);
+                            crate::gateway::dispatch(local_id, &client_msg).await;
                         }
                     }
                     Some("client.disconnected") => {

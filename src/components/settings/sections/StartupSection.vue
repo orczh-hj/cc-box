@@ -29,6 +29,27 @@
       </div>
     </div>
 
+    <!-- 后台服务开机自启动（Broker 级；与远程面板解耦） -->
+    <div v-if="isTauriEnv" class="setting-group" style="margin-top: 16px">
+      <label class="setting-card broker-autostart-card">
+        <div class="card-left">
+          <input
+            type="checkbox"
+            :checked="autostart"
+            :disabled="autostartBusy || !autostartReady"
+            @change="handleAutostartChange"
+          />
+          <div class="card-info">
+            <span class="setting-label">{{ t('startupBrokerAutostart') }}</span>
+            <span class="setting-hint">
+              {{ autostartReady ? t('startupBrokerAutostartHint') : t('startupBrokerAutostartUnavailable') }}
+            </span>
+          </div>
+        </div>
+      </label>
+      <p v-if="autostartError" class="autostart-error">{{ autostartError }}</p>
+    </div>
+
     <!-- 启动环境变量 -->
     <div class="env-section">
       <div class="env-header">
@@ -91,9 +112,11 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, watch } from 'vue'
+import { ref, reactive, watch, onMounted, onUnmounted } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useAppStore, DEFAULT_CLAUDE_ENV_VARS } from '@/stores/app'
+import { isTauriEnv } from '@/api/platform'
+import { getRemoteStatus, setBrokerAutostart } from '@/api/tauri'
 
 const { t } = useI18n()
 const appStore = useAppStore()
@@ -102,6 +125,58 @@ const customArgs = ref(appStore.defaultClaudeOptions.customArgs)
 const envVars = reactive<Record<string, string>>({ ...appStore.claudeEnvVars })
 const newKey = ref('')
 const newValue = ref('')
+
+/** 后台服务开机自启动（设备级，经 Broker admin IPC） */
+const autostart = ref(false)
+const autostartBusy = ref(false)
+const autostartReady = ref(false)
+const autostartError = ref('')
+
+let autostartPollTimer: number | null = null
+
+async function loadAutostartStatus() {
+  if (autostartBusy.value) return
+  try {
+    const status = await getRemoteStatus()
+    autostart.value = status.autostart
+    autostartReady.value = status.brokerConnected
+  } catch (err) {
+    autostartError.value = String(err)
+  }
+}
+
+onMounted(() => {
+  if (!isTauriEnv) return
+  void loadAutostartStatus()
+  // Broker 可能尚在启动，或托盘侧改了勾选：面板打开期间周期校准
+  autostartPollTimer = window.setInterval(() => {
+    void loadAutostartStatus()
+  }, 5000)
+})
+
+onUnmounted(() => {
+  if (autostartPollTimer !== null) {
+    clearInterval(autostartPollTimer)
+    autostartPollTimer = null
+  }
+})
+
+async function handleAutostartChange(e: Event) {
+  const input = e.target as HTMLInputElement
+  const enabled = input.checked
+  autostartBusy.value = true
+  autostartError.value = ''
+  try {
+    const status = await setBrokerAutostart(enabled)
+    autostart.value = status.autostart
+    autostartReady.value = status.brokerConnected
+  } catch (err) {
+    input.checked = autostart.value
+    autostartError.value = String(err)
+  } finally {
+    autostartBusy.value = false
+  }
+}
 
 watch([skipPermissions, customArgs], () => {
   appStore.setDefaultClaudeOptions({
@@ -172,6 +247,11 @@ function handleReset() {
   display: flex;
   flex-direction: column;
   gap: 12px;
+}
+
+.autostart-error {
+  font-size: 12px;
+  color: var(--status-error, #d9534f);
 }
 
 .setting-card {

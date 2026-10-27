@@ -119,8 +119,12 @@
     @select="handleDirPicked"
   />
 
+  <!-- 多实例远程：新建/恢复会话前的实例选择（Teleport 到 body） -->
+  <InstancePickerDialog />
   <!-- 全局控制权遮罩（设备互斥：桌面与远程设备对等，其他设备操作中时显示） -->
   <ControllerMask />
+  <!-- 全局远程连接面板（IconBar 与托盘“远程连接”共用） -->
+  <RemoteModal :visible="remotePanelVisible" @close="remotePanelVisible = false" />
   <!-- 全局通知宿主（useToast 的唯一渲染点） -->
   <ToastHost />
 </div>
@@ -150,18 +154,27 @@ import {
   updateAppConfig,
   onInstallProgress,
   onOpenDirectory,
+  onOpenRemotePanel,
+  takePendingOpenRemote,
+  onOpenUpdate,
+  takePendingOpenUpdate,
+  updateMemberWindowTitle,
   onStateChanged
 } from '@/api/tauri'
 import { useAppShortcuts } from '@/composables/useAppShortcuts'
 import TokenGate from '@/components/TokenGate.vue'
 import DownloadTicketPage from '@/components/remote/DownloadTicketPage.vue'
 import { remoteTransport } from '@/api/remote-transport'
+import { getCurrentWindow } from '@tauri-apps/api/window'
 import DirectoryPicker from '@/components/DirectoryPicker.vue'
 import WelcomeView from '@/components/WelcomeView.vue'
 import ProjectSelectView from '@/components/ProjectSelectView.vue'
 import TitleBar from '@/components/TitleBar.vue'
 import ControllerMask from '@/components/ControllerMask.vue'
+import InstancePickerDialog from '@/components/InstancePickerDialog.vue'
 import ToastHost from '@/components/ToastHost.vue'
+import RemoteModal from '@/components/RemoteModal.vue'
+import { useRemotePanel } from '@/composables/useRemotePanel'
 
 const TerminalView = defineAsyncComponent(() => import('@/components/TerminalView.vue'))
 const SettingsOverlay = defineAsyncComponent(() => import('@/components/settings/SettingsOverlay.vue'))
@@ -174,6 +187,7 @@ const sidebarStore = useSidebarStore()
 const updateStore = useUpdateStore()
 const { t } = useI18n()
 const { setupShortcutListeners } = useAppShortcuts()
+const { visible: remotePanelVisible, open: openRemotePanel } = useRemotePanel()
 const currentView = ref<ViewType>('welcome')
 /** 浏览器模式：添加项目的电脑目录选择器 */
 const showDirPicker = ref(false)
@@ -282,6 +296,9 @@ async function cancelInstall() {
 
 let unlistenInstallProgress: (() => void) | null = null
 let unlistenOpenDir: (() => void) | null = null
+let unlistenOpenRemote: (() => void) | null = null
+let unlistenOpenUpdate: (() => void) | null = null
+let unlistenLaunchMode: (() => void) | null = null
 
 // Unlisten functions for cleanup
 let unlistenSettings: (() => void) | null = null
@@ -291,6 +308,31 @@ let unlistenRestart: (() => void) | null = null
 const shortcutUnlisteners: (() => void)[] = []
 
 onMounted(async () => {
+  // 桌面：托盘“远程连接”/新建窗口模式事件尽早订阅（500ms 后 Rust 才 emit）
+  if (isTauriEnv) {
+    try {
+      // 必须先注册监听，再领取 pending：事件可能恰好落在两步之间
+      unlistenOpenRemote = await onOpenRemotePanel(() => openRemotePanel())
+      if (await takePendingOpenRemote()) openRemotePanel()
+      // 托盘「更新到新版本」：显示窗口并跳到设置 → 更新（后续自动检查）
+      unlistenOpenUpdate = await onOpenUpdate(() => sidebarStore.openSettings('update'))
+      if (await takePendingOpenUpdate()) sidebarStore.openSettings('update')
+    } catch {
+      // 监听不可用不影响应用启动
+    }
+    try {
+      unlistenLaunchMode = await transport.listen<{ newWindow?: boolean }>('launch-mode', (payload) => {
+        if (payload?.newWindow) {
+          // 新建窗口停留在项目页，不自动进入终端
+          currentView.value = 'projects'
+          appStore.setClaudeOptions({ resume: '' })
+          resetWindowTitle()
+        }
+      })
+    } catch {
+      // 启动模式事件不可用不影响应用启动
+    }
+  }
   // 浏览器模式：等 TokenGate 完成 WS 认证（remoteReady watch 触发启动链）
   if (!isTauriEnv && !remoteReady.value) return
   await startApp()
@@ -302,17 +344,35 @@ watch(remoteReady, async (v) => {
 })
 
 // 浏览器模式：运行中会话恢复入口（常驻订阅——TerminalView 未挂载的项目页也要能
-// 恢复 Tabs）。remote-sessions = 服务端应答；remote-connected = 重连后重拉
+// 恢复 Tabs）。remote-sessions = 服务端应答；remote-connected = 重连后重拉；
+// instances-changed = 多实例远程的实例上/下线（Gateway 广播，重拉聚合列表）
 let unlistenRemoteSessions: (() => void) | null = null
 let unlistenRemoteConn: (() => void) | null = null
 function setupRemoteSessionSync() {
-  void transport.listen<Array<{ id: string; type: string; cwd: string; working: boolean; pending: boolean; sessionId?: string }>>('remote-sessions', (list) => {
+  void transport.listen<Array<{ id: string; type: string; cwd: string; working: boolean; pending: boolean; sessionId?: string; instanceId?: string; instanceName?: string }>>('remote-sessions', (list) => {
     sessionStore.adoptRemoteSessions(list)
     // 历史已加载的场景立即回填会话名（未加载时由 TerminalView 加载完成后回填）
     sessionStore.backfillTabNamesFromHistory()
   })
   void transport.listen('remote-connected', () => {
+    // 新连接/切换设备：先清旧实例名单（新设备可能是旧桌面，不会再下发
+    // 名单；不清会让选择器残留上一台设备的实例）
+    sessionStore.resetRemoteInstances()
     transport.sendClient({ type: 'sessions.list' })
+  })
+  // 实例名单随每次 sessions.list 应答补发。旧 Broker 无 solicited 字段，按
+  // “应答”处理（只有名单变化才重拉，避免无限回环）；新 Broker 的主动通知
+  // （会话增删/实例上下线）为 solicited=false，必须重拉以刷新会话列表。
+  void transport.listen<{
+    instances?: Array<{ id: string; name: string }>
+    solicited?: boolean
+  }>('instances-changed', (payload) => {
+    // 空名单同样有效：零窗口时手机要能看到“启动窗口”入口
+    const list = payload?.instances ?? []
+    const changed = JSON.stringify(list) !== JSON.stringify(sessionStore.remoteInstances)
+    sessionStore.setRemoteInstances(list)
+    const solicited = payload?.solicited !== false
+    if (changed || !solicited) transport.sendClient({ type: 'sessions.list' })
   })
   transport.sendClient({ type: 'sessions.list' })
 }
@@ -367,6 +427,9 @@ onUnmounted(() => {
   unlistenRestart?.()
   unlistenInstallProgress?.()
   unlistenOpenDir?.()
+  unlistenOpenRemote?.()
+  unlistenOpenUpdate?.()
+  unlistenLaunchMode?.()
   shortcutUnlisteners.forEach(fn => fn())
   window.removeEventListener('app:toggleHome', handleToggleHome)
 })
@@ -444,13 +507,22 @@ async function handleResumeSession(projectPath: string, sessionId: string, sessi
   }
 }
 
+/** 回到项目页时窗口标题恢复 CC-Box（托盘/手机分组不残留上一个项目名） */
+function resetWindowTitle() {
+  if (!isTauriEnv) return
+  getCurrentWindow().setTitle('CC-Box').catch(() => {})
+  void updateMemberWindowTitle('CC-Box').catch(() => {})
+}
+
 function handleBack() {
   currentView.value = 'projects'
+  resetWindowTitle()
 }
 
 function handleToggleHome() {
   if (currentView.value === 'terminal') {
     currentView.value = 'projects'
+    resetWindowTitle()
   } else if (currentView.value === 'projects' && appStore.cwd) {
     currentView.value = 'terminal'
   }

@@ -494,168 +494,179 @@ pub async fn update_app_config(updates: serde_json::Value) -> Result<(), String>
 
 // ==================== Remote Commands ====================
 
-/// 远程连接状态（弹窗展示：直连 + 中继）
+/// 远程连接状态（弹窗展示：局域直连 + 中继；所有 GUI 实例内容一致）
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RemoteStatus {
     pub enabled: bool,
-    pub running: bool,
-    /// 宿主制：远程由本机另一实例提供（本实例未监听）；url 仍为宿主可用地址
-    pub hosted_elsewhere: bool,
     pub port: u16,
     pub token: String,
-    /// 手机直连 URL（含 token fragment）；token 未生成时为空
+    /// 手机直连 URL（含 token fragment）；未开启/旧版占用时为空
     pub url: String,
-    /// 中继已启用
     pub relay_enabled: bool,
-    /// 中继已连接
     pub relay_connected: bool,
-    /// 中继地址（如 https://cc.orczh.top）
     pub relay_url: String,
-    /// 当前有效配对码（5 分钟内）；无则空
     pub relay_pair_code: String,
-    /// 中继配对二维码内容（relayUrl + #pair=code）；无效则空
     pub relay_pair_url: String,
+    /// 与 Broker 的 IPC 是否已注册
+    pub broker_connected: bool,
+    /// 旧版 CC-Box 占用设备入口：设备级多实例控制暂不可用
+    pub legacy_owned: bool,
+    pub lan_running: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lan_error: Option<String>,
+    /// 开机自启动（仅 Broker）
+    pub autostart: bool,
 }
 
-#[tauri::command]
-pub async fn get_remote_status() -> Result<RemoteStatus, String> {
-    let config = crate::store::get_app_config().map_err(|e| e.to_string())?;
-    let enabled = config.remote.as_ref().and_then(|r| r.enabled).unwrap_or(false);
-    let port = config
-        .remote
+/// 当前可用的 Broker 状态：GUI 用镜像，Broker 内用本地快照
+fn broker_status_now() -> Option<crate::gateway_proto::BrokerStatus> {
+    crate::broker_client::status_mirror().or_else(crate::broker::status_snapshot)
+}
+
+fn build_remote_status(
+    config: &crate::store::AppConfig,
+    status: Option<crate::gateway_proto::BrokerStatus>,
+) -> RemoteStatus {
+    // 设备级字段一律以 Broker 为准；Broker 离线时才回退本地配置。
+    let enabled = status
         .as_ref()
-        .and_then(|r| r.port)
-        .unwrap_or(crate::remote_server::DEFAULT_PORT);
-    // token 持久于 config（宿主与本实例共享），未开启过的实例读到的与宿主一致
+        .map(|s| s.enabled)
+        .unwrap_or_else(|| {
+            config
+                .remote
+                .as_ref()
+                .and_then(|r| r.enabled)
+                .unwrap_or(false)
+        });
+    let port = status
+        .as_ref()
+        .map(|s| s.port)
+        .unwrap_or_else(|| {
+            config
+                .remote
+                .as_ref()
+                .and_then(|r| r.port)
+                .unwrap_or(crate::remote_server::DEFAULT_PORT)
+        });
     let token = crate::remote_server::current_token();
-    let hosted_elsewhere = crate::remote_server::hosted_elsewhere().await;
-    let url = if token.is_empty() {
+    let legacy = status.as_ref().map(|s| s.legacy_owned).unwrap_or(false);
+    let lan_running = status.as_ref().map(|s| s.lan_running).unwrap_or(false);
+    let url = if token.is_empty() || legacy || !lan_running {
         String::new()
     } else {
         crate::remote_server::lan_url(&token, port)
     };
-    let (relay_enabled, relay_connected, relay_url, pair_code) = crate::remote_client::status_snapshot();
-    // 中继 URL 显示为 https/http 形式
-    let relay_display = relay_url
+    let relay_url_raw = status
+        .as_ref()
+        .map(|s| s.relay_url.clone())
+        .unwrap_or_default();
+    let relay_display = relay_url_raw
         .replacen("wss://", "https://", 1)
         .replacen("ws://", "http://", 1);
+    let pair_code = status
+        .as_ref()
+        .map(|s| s.relay_pair_code.clone())
+        .unwrap_or_default();
     let relay_pair_url = if pair_code.is_empty() {
         String::new()
     } else {
         format!("{}/#pair={}", relay_display, pair_code)
     };
-    // 配对码缺失/过期且中继在线：按需重申（一次性码 5 分钟 TTL，仅在面板
-    // 查询时触发——结果经 pair.created 异步写入，面板 2s 轮询下一轮拿到）
-    if relay_connected && pair_code.is_empty() {
-        crate::remote_client::request_pair_code();
-    }
-    Ok(RemoteStatus {
+    RemoteStatus {
         enabled,
-        running: crate::remote_server::is_running(),
-        hosted_elsewhere,
         port,
         token,
         url,
-        relay_enabled,
-        relay_connected,
+        relay_enabled: status.as_ref().map(|s| s.relay_enabled).unwrap_or(false),
+        relay_connected: status
+            .as_ref()
+            .map(|s| s.relay_connected)
+            .unwrap_or(false),
         relay_url: relay_display,
         relay_pair_code: pair_code,
         relay_pair_url,
-    })
+        broker_connected: status.is_some(),
+        legacy_owned: legacy,
+        lan_running,
+        lan_error: status.as_ref().and_then(|s| s.lan_error.clone()),
+        autostart: status
+            .as_ref()
+            .map(|s| s.autostart)
+            .unwrap_or_else(|| crate::broker::autostart::is_enabled()),
+    }
 }
 
-/// 远程开关操作互斥锁本体在 remote_server.rs（REMOTE_OP_LOCK）：watchdog
-/// 跟随停服也必须与 enable/disable/rotate 互斥，锁须两处共用
+#[tauri::command]
+pub async fn get_remote_status() -> Result<RemoteStatus, String> {
+    let config = crate::store::get_app_config().map_err(|e| e.to_string())?;
+    // GUI 只读 Broker 镜像；不做跨 IPC 的阻塞刷新（面板 2s 轮询保持轻量）。
+    // 配对码的按需重申由 Broker 的 GetStatus/状态同步任务负责。
+    let status = broker_status_now();
+    Ok(build_remote_status(&config, status))
+}
 
-/// 开/关远程访问（动态启停服务器），返回最新状态。
-/// 写但不广播 state-changed（开关结果由返回值/连接状态自身体现），registry! 登记 write(None)
+/// 开/关远程访问（设备级；由 Broker 执行）。所有 GUI 实例语义一致，
+/// 面板三个按钮（更新连接码/刷新密钥/停止远程）都可操作。
+/// 写但不广播 state-changed；registry! 登记 write(None)
 #[cc_command(write)]
 #[tauri::command]
 pub async fn set_remote_enabled(enabled: bool) -> Result<RemoteStatus, String> {
-    let _op_guard = crate::remote_server::REMOTE_OP_LOCK.lock().await;
-    if enabled {
-        // 访问凭证（LAN token / relay 设备身份）持久稳定：停止/开启不再轮换，
-        // 已配对设备跨停止持续可用；轮换只由用户显式点「刷新密钥」触发
-        // （rotate_remote_secret），避免每次开关都要全部设备重新扫码
-        let prev_enabled = crate::store::get_app_config()
-            .ok()
-            .and_then(|c| c.remote)
-            .and_then(|r| r.enabled)
-            .unwrap_or(false);
-        crate::remote_server::save_remote_config(Some(true), None, None).map_err(|e| e.to_string())?;
-        // 启动失败（端口被占等）显式报错给 UI，并**恢复原值**（不是一律写
-        // false）：另一实例可能正在服务，失败回滚 false 会让它的 config
-        // watchdog 把正常服务也停掉
-        if let Err(e) = crate::remote_server::start().await {
-            let _ = crate::remote_server::save_remote_config(Some(prev_enabled), None, None);
-            return Err(e);
-        }
-        // 中继即默认远程方式：开启时联动连接（内置 orczh.top:8800，
-        // 环境变量 CC_BOX_RELAY_URL 可覆盖；幂等）
-        crate::remote_client::connect().await;
-    } else {
-        crate::remote_server::save_remote_config(Some(false), None, None).map_err(|e| e.to_string())?;
-        crate::remote_server::stop().await;
-        // 安全闭环：停止必须同时断开中继连接，否则手机仍可经公网中继控制
-        crate::remote_client::disconnect();
-    }
-    get_remote_status().await
+    let status =
+        crate::broker_client::control(crate::gateway_proto::BrokerOp::SetEnabled { enabled })
+            .await?;
+    let config = crate::store::get_app_config().map_err(|e| e.to_string())?;
+    Ok(build_remote_status(&config, status.or_else(broker_status_now)))
 }
 
 /// 配置/停用中继（url 为空 = 停用），返回最新状态
 #[tauri::command]
 pub async fn set_relay_url(url: Option<String>) -> Result<RemoteStatus, String> {
-    crate::remote_client::set_relay(url).await?;
-    get_remote_status().await
+    let status = crate::broker_client::control(crate::gateway_proto::BrokerOp::SetRelayUrl {
+        url,
+    })
+    .await?;
+    let config = crate::store::get_app_config().map_err(|e| e.to_string())?;
+    Ok(build_remote_status(&config, status.or_else(broker_status_now)))
 }
 
 /// 手动更新中继配对码（一次性码被设备消费后，为下一台设备重申新码），
-/// 等新码到达才返回（面板即时刷新二维码）。桌面专属（新码仅经桌面面板
-/// 展示，远程调用无意义）→ rpc_dispatch EXCLUDED
+/// 等新码到达才返回（面板即时刷新二维码）。桌面专属 → rpc_dispatch EXCLUDED
 #[tauri::command]
 pub async fn refresh_relay_pair_code() -> Result<RemoteStatus, String> {
-    crate::remote_client::refresh_pair_code().await?;
-    get_remote_status().await
+    let status =
+        crate::broker_client::control(crate::gateway_proto::BrokerOp::RefreshPairCode).await?;
+    let config = crate::store::get_app_config().map_err(|e| e.to_string())?;
+    Ok(build_remote_status(&config, status.or_else(broker_status_now)))
 }
 
-/// 刷新访问密钥（显式轮换全部凭证 + 踢掉一切已连接设备）：
-/// 轮换 LAN token（旧局域二维码失效）与 relay 设备身份（已配对手机的
-/// token 前缀路由永久 miss + 桌面清空 paired_secrets，全部失效，须重新扫码）；
-/// 重启 LAN 服务器（SHUTDOWN 广播断开全部已连接 WS，旧 token 连接立即中断）
-/// 并以新身份重连中继。运行态面板「刷新密钥」按钮调用。桌面专属
-/// （裸 #[tauri::command] 不带宏出口——密钥轮换只应由桌面发起，远程不可达，
-/// rpc_dispatch EXCLUDED）
+/// 刷新访问密钥（显式轮换全部凭证 + 踢掉一切已连接设备）。
+/// 桌面专属 → rpc_dispatch EXCLUDED
 #[tauri::command]
 pub async fn rotate_remote_secret() -> Result<RemoteStatus, String> {
-    let _op_guard = crate::remote_server::REMOTE_OP_LOCK.lock().await;
-    // 宿主制：远程由本机另一实例提供时，凭证属宿主，非宿主实例无权轮换
-    if crate::remote_server::hosted_elsewhere().await {
-        return Err("remote hosted by another instance".to_string());
-    }
-    // 轮换失败必须报错（不重启服务）：半轮换状态（token 新身份旧）会让
-    // 用户误以为已全部失效
-    crate::remote_server::rotate_token().map_err(|e| e.to_string())?;
-    crate::remote_client::rotate_identity();
-    // LAN：重启服务器踢掉全部已连接客户端（token 只在 hello 验证，
-    // 不重启则已连接设备可凭旧 token 持续使用）
-    if crate::remote_server::is_running() {
-        crate::remote_server::stop().await;
-        crate::remote_server::start().await.map_err(|e| e.to_string())?;
-    }
-    // 中继：断开旧身份连接并以新身份重连（旧 device_id 永不再上线，
-    // relay 侧断开其全部桥接——已配对手机的 WS 随之中断，重连被拒）。
-    // 仅远程开启时执行：停止态轮换不得把中继重新拉起
-    let enabled = crate::store::get_app_config()
-        .ok()
-        .and_then(|c| c.remote)
-        .and_then(|r| r.enabled)
-        .unwrap_or(false);
-    if enabled {
-        crate::remote_client::disconnect();
-        crate::remote_client::connect().await;
-    }
-    get_remote_status().await
+    let status =
+        crate::broker_client::control(crate::gateway_proto::BrokerOp::RotateSecret).await?;
+    let config = crate::store::get_app_config().map_err(|e| e.to_string())?;
+    Ok(build_remote_status(&config, status.or_else(broker_status_now)))
+}
+
+/// 开/关开机自启动（设备级；桌面专属 → rpc_dispatch EXCLUDED）。
+/// Linux 无托盘时由此面板开关替代托盘菜单项。
+#[tauri::command]
+pub async fn set_broker_autostart(enabled: bool) -> Result<RemoteStatus, String> {
+    let status = crate::broker_client::control(
+        crate::gateway_proto::BrokerOp::SetAutostart { enabled },
+    )
+    .await?;
+    let config = crate::store::get_app_config().map_err(|e| e.to_string())?;
+    Ok(build_remote_status(&config, status.or_else(broker_status_now)))
+}
+
+/// 更新安装前调用：让 Broker 写 update_in_progress 并退出，释放 exe 锁。
+/// 桌面专属 → rpc_dispatch EXCLUDED
+#[tauri::command]
+pub async fn prepare_for_update() -> Result<(), String> {
+    crate::broker_client::prepare_for_update().await
 }
 
 /// 获取系统 locale（BCP-47 标签，如 "zh-CN"、"en-US"）
@@ -849,13 +860,35 @@ pub fn get_app_path() -> String {
         .to_string()
 }
 
-/// 启动新的应用实例
+/// GUI 窗口标题变化上报 Broker（仅桌面窗口；Broker 托盘展示用）
 #[tauri::command]
-pub fn spawn_new_instance() -> Result<(), String> {
-    let app_path = std::env::current_exe().map_err(|e| e.to_string())?;
-    let mut cmd = crate::platform::new_command(&app_path.to_string_lossy());
-    cmd.spawn().map_err(|e| e.to_string())?;
-    Ok(())
+pub fn update_window_title(title: String) {
+    crate::broker_client::set_window_title(title);
+}
+
+/// 启动时领取“远程连接”请求（防止 openRemote 事件早于前端监听）
+#[tauri::command]
+pub fn take_pending_open_remote() -> bool {
+    crate::take_pending_open_remote()
+}
+
+/// 启动时领取“更新到新版本”请求（防止 openUpdate 事件早于前端监听）
+#[tauri::command]
+pub fn take_pending_open_update() -> bool {
+    crate::take_pending_open_update()
+}
+
+/// 更新安装失败：清除 update 抑制并恢复 Broker 连接（桌面专属）
+#[tauri::command]
+pub fn resume_broker_connection() {
+    crate::broker_client::resume_connection();
+}
+
+/// 启动新的应用实例（桌面直接调用；远程经 Broker 的 RPC 白名单调用）
+#[cc_command(write)]
+#[tauri::command]
+pub async fn spawn_new_instance() -> Result<(), String> {
+    crate::broker::windows::spawn_window()
 }
 
 // ==================== Provider Commands ====================

@@ -153,7 +153,8 @@ npm run release -- --bump patch --notes "### Features\n- Add feature"
 | [remote/README.md](remote/README.md)                         | **远程连接设计文档**：双模式架构、统一管理、消息协议、独占接管、中继部署、实施阶段 |
 | [remote/docs/deploy.md](remote/docs/deploy.md)               | **中继部署指南**：构建、systemd、nginx 反代、桌面接入、本地测试、日常更新部署 |
 | [remote/docs/protocol.md](remote/docs/protocol.md)           | **协议与行为规则正本**：消息定义、全局控制权、文件传输                       |
-| [remote/docs/manual-test-cases.md](remote/docs/manual-test-cases.md) | **远程手动测试条目**：真机访问、状态圆点、断线重连、token 安全、快捷键工具条、多实例宿主制 |
+| [remote/docs/multi-instance-gateway.md](remote/docs/multi-instance-gateway.md) | **多实例远程实施与操作说明**：设备级 Broker 架构、窗口管理与生命周期、路由与控制权、桌面/手机用户操作逻辑、兼容矩阵、已知限制 |
+| [remote/docs/manual-test-cases.md](remote/docs/manual-test-cases.md) | **远程手动测试条目**：真机访问、状态圆点、断线重连、token 安全、快捷键工具条、窗口管理/托盘 |
 
 外部参考：[Claude Code 线上文档](https://code.claude.com/docs/llms.txt)、[Tauri 2.x JS API 线上文档](https://v2.tauri.org.cn/reference/javascript/api/)
 
@@ -190,11 +191,30 @@ UI 已浏览器化（一套 UI 走桌面 Tauri / 宽屏浏览器 / 手机浏览�
 
 行为规则正本 → [remote/docs/protocol.md](remote/docs/protocol.md)「全局控制权」；机制摘要 → [docs/development.md](docs/development.md)「全局控制权与状态同步」
 
+### 多实例设备级 Broker（速查）
+
+一台电脑 = 一个常驻后台 **Broker**（一个设备身份/LAN 入口/relay 连接/全局控制权，存共享 config 不迁移）；多个 GUI 窗口 = Broker 成员。**GUI 不再参与 Gateway 选举**，PTY 始终留在 GUI。手机协议不感知窗口拓扑（会话条目带 instanceId/instanceName 分组字段，路由按 `pty_id → instance` 反查转发）。要点：
+
+- **进程模型**：`cc-box --broker` 无 GUI 窗口；Windows/macOS 带托盘（标题 `CC-Box`），Linux 纯 tokio 无头。每个 GUI 启动确保 Broker 在线；`broker.lock`（OS 排他锁）保证单实例；**所有窗口关闭后 Broker 不退出**（托盘/远程入口保留）。
+- **窗口管理**：Broker 记录成员 pid 与真实窗口标题；托盘顶部只有 `CC-Box`，**每个窗口直接是一级菜单项，单击即显示/聚焦**（不再有「窗口」父级，也不提供单窗口关闭/重启）；`window.command{close|show|openRemote}` 仍用于整体退出/更新/远程连接。新建窗口带 `--new-window`，停在项目页不自动进终端，Windows 用 `CreateProcessW(bInheritHandles=FALSE, CREATE_NO_WINDOW)` 避免控制台与句柄泄漏。零窗口时手机/桌面可 `rpc.call "spawn_new_instance"` 拉起空窗口；手机终端页有 stopped Tab 时也显示「启动窗口」覆盖层。
+- **窗口名**：托盘与手机分组/实例选择器统一使用真实窗口标题（打开项目=项目名，项目页/未打开=`CC-Box`；`window.title` 更新时同步 `MemberEntry.name` 与已有会话 `instanceName`，同名去重）。
+- **远程快捷动作**：托盘「远程连接」显示第一个可控制窗口并打开面板（无窗口先新建）；菜单顺序为 远程连接 → 刷新远程密钥 → 关闭/开启远程连接。**有更新时**：Broker 每 2h 检查（启动等 30s），菜单标题下出现「更新到 vX.Y.Z」且托盘图标叠红点；点击＝显示窗口并跳转 设置→更新（下载/安装/失败恢复仍在 GUI 更新页）。**破坏性操作统一用原生确认对话框**：关闭远程连接、刷新远程密钥、退出 CC-Box；窗口单击显示/新建/开启远程/自启动/更新不确认。
+- **开机自启动**：仅 Broker（不开窗口）；入口在**设置 → 启动**与托盘勾选项，不在远程面板；Windows Run / macOS LaunchAgent / Linux XDG autostart，命令带 `--broker --autostart`；无托盘环境用 `cc-box --quit-broker`。
+- **IPC**（`gateway_proto.rs` / `broker/ipc.rs`）：Windows Named Pipe（显式 DACL）/ Unix UDS（0700+0600+peer UID）；v2 首帧 `member.hello`（含 pid/windowTitle）+ `broker.secret`；成员上行 `window.title`/`state.changed`；管理操作独立 `admin` 首帧。旧版 GUI 仍走 `/internal/gw-ws` + `gateway.secret`（v1），无 pid/窗口指令。
+- **状态同步**：成员本地写命令的 `state-changed` 经 `state.changed` 上行，Broker 重分配设备级 revision 后扇出所有 v2 成员与手机（窗口 A 修改刷新 B/C）；`PtyInput/PtyResize` 只校验控制权不主动 acquire（必须已有 attach）；PTY 退出由成员上行 `session.remove`，Broker 只广播一次 `session.exit`。
+- **退出/更新**：Quit/PrepareForUpdate 先写回 `admin.result` 再退出；更新安装失败调用 `resume_broker_connection` 清除 update 标记/抑制并恢复；gateway.lock 心跳校验 owner + 原子写，解析失败按 mtime 判 stale；IPC server 创建失败直接退出释放 broker.lock。
+- **客户端细节**：`tailSeq` 基线 claim/重 attach 时只抬高不降低；Linux AppImage 拉起 Broker 优先 `$APPIMAGE`；设置页开机自启动每 5s 校准。
+- **单一有序队列**：每成员/连接一条队列；控制面与 `PtyInput` 可靠投递（`send().await`，5s 超时断开重同步），**绝不 try_send 静默丢输入**；`PtyOutput` 可丢但带 `seq`，客户端检测缺口并提示。
+- **路由**：`gateway::dispatch` 分类 DeviceGlobal / SessionScoped / Create；`SessionCreated` **先登记路由再投递手机**；未知 pty_id 拒绝 + 推 `sessions` 快照，绝不回退 Broker 本地；成员断连清理路由/缓存/粘连/待处理 RPC/创建；重连全量快照 + `reset_remote_views`。
+- **生命周期**：`broker.state.json` 区分 `user_quit`（退出 CC-Box，持久抑制；手动 GUI/`--autostart` 清除）、`update_in_progress`（安装前退出，版本变化后解除）；`remote.enabled=false` 不是生命周期状态（Broker 继续运行，仅停 LAN/relay）。旧 `idle_exit` 标记仅兼容读取。
+- **所有窗口内容一致**：远程面板一律读 Broker 镜像，不区分宿主角色、不显示在线窗口数量；三个操作（更新连接码/刷新密钥/停止远程）与开机自启动都经 Broker 执行。
+- 正本 → [remote/docs/protocol.md](remote/docs/protocol.md)「设备级 Broker IPC」；实施细节 → [remote/docs/multi-instance-gateway.md](remote/docs/multi-instance-gateway.md)
+
 ### 响应式适配（速查，手机 = 视口 ≤768px 且触屏）
 
 - **手机判定 = `(max-width: 768px) and (hover: none)`**：只按宽度会把桌面分屏右半屏误判为手机（底部 IconBar、快捷键工具条、设置顶部 tab 全冒出来）
 - **纯样式分支**写 `@media (max-width: 768px) and (hover: none)`；**结构分支**用 `useIsMobile()`（`MOBILE_MEDIA_QUERY`，与 CSS 一致）；纯内容宽度自适应（按钮换行等）仍可用纯宽度断点
-- **快捷键工具条（QuickKeyBar）只在 `isMobile` 渲染**——桌面端（鼠标设备）无论窗口多窄都不出现，「选择复制」同属工具条
+- **快捷键工具条（QuickKeyBar）只在 `isMobile` 渲染**——桌面端（鼠标设备）无论窗口多窄都不出现；「键盘」图标开关 + 「选择复制」同属工具条；**软键盘只由该图标开关唤出**（点击终端不弹键盘，滚动仍自动收起）
 - 触屏设备所有 "hover 才显示" 的操作按钮必须包 `@media (hover: hover)`
 - 终端字号手机 = 桌面设置 × 0.9；底部栏用 `--safe-area-bottom`；软键盘经 `visualViewport.height` 驱动终端 fit
 - 触摸手势、复制阅读器、符号兜底、构建产物供给、会话身份链等细节 → [docs/development.md](docs/development.md)「响应式与触屏适配」「会话管理约定」

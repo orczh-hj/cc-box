@@ -35,6 +35,9 @@ export interface TerminalTab {
   pending: boolean           // 需要用户关注
   isResume: boolean          // 是否为恢复历史会话（创建时已有 sessionId）
   takenOver?: boolean        // 终端已被远程（手机）接管，显示遮罩
+  /** 多实例远程：会话所属 CC-Box 实例（浏览器远程模式，桌面模式缺失） */
+  instanceId?: string
+  instanceName?: string
 }
 
 /**
@@ -60,6 +63,15 @@ export const useSessionStore = defineStore('session', () => {
   /** 正在加载的项目路径（去重用） */
   const inflightLoadProject = ref<string | null>(null)
   const searchQuery = ref<string>('')
+  /** 多实例远程：下一次 createTab 的实例归属（新建/恢复前的选择结果；
+   *  createTab 消费后清空——桌面模式恒 null 无影响） */
+  const pendingInstanceId = ref<string | null>(null)
+  /** 多实例远程：Gateway 下发的全量实例名单（含零运行会话的实例；
+   *  单实例/桌面为空——knownInstances 回退按 Tab 推导） */
+  const remoteInstances = ref<Array<{ id: string; name: string }>>([])
+  /** 是否已收到过 Gateway 的实例名单（含空名单）：用于零窗口 UI 判定，
+   *  避免首帧前把“尚未加载”误判为“没有窗口” */
+  const remoteInstancesKnown = ref<boolean>(false)
   const isLoading = ref<boolean>(false)
   const isLoadingMore = ref<boolean>(false)
   const messageSearchResults = ref<SessionSearchResult[]>([])
@@ -77,6 +89,39 @@ export const useSessionStore = defineStore('session', () => {
     // 不在这里过滤，因为 projectPath 需要外部传入
     return [...tabs.values()]
   })
+
+  /** 已知实例集合（新建/恢复时供实例选择）：Gateway 全量名单优先
+   *  （含零运行会话实例），再补 Tab 上出现但名单未覆盖的实例（旧桌面/
+   *  单实例场景名单为空，完全回退 Tab 推导） */
+  const knownInstances = computed<Array<{ id: string; name: string }>>(() => {
+    const out = new Map<string, string>()
+    for (const i of remoteInstances.value) {
+      if (i.id) out.set(i.id, i.name)
+    }
+    // 已知名单为空 = 宿主没有任何窗口：不能再用残留 Tab 推导实例，
+    // 否则选择器会把已下线窗口当成可路由目标。
+    const rosterEmpty = remoteInstancesKnown.value && remoteInstances.value.length === 0
+    if (!rosterEmpty) {
+      for (const t of tabs.values()) {
+        if (t.instanceId && !out.has(t.instanceId)) {
+          out.set(t.instanceId, t.instanceName || `窗口 ${out.size + 1}`)
+        }
+      }
+    }
+    return [...out].map(([id, name]) => ({ id, name }))
+  })
+
+  /** 应用 Gateway 下发的实例名单（instances-changed 事件载荷） */
+  function setRemoteInstances(list: Array<{ id: string; name: string }>) {
+    remoteInstances.value = list
+    remoteInstancesKnown.value = true
+  }
+
+  /** 新连接/切换设备：清空名单并回到“尚未加载” */
+  function resetRemoteInstances() {
+    remoteInstances.value = []
+    remoteInstancesKnown.value = false
+  }
 
   /** 运行中的 Tab ID 列表 */
   const runningTabIds = computed<string[]>(() => {
@@ -108,6 +153,12 @@ export const useSessionStore = defineStore('session', () => {
 
   // ---- Tab 生命周期 ----
 
+  /** 实例展示名：Gateway 名单优先，其次从已有 Tab 推导 */
+  function instanceNameOf(instanceId: string): string | undefined {
+    return remoteInstances.value.find(i => i.id === instanceId)?.name
+      ?? [...tabs.values()].find(t => t.instanceId === instanceId)?.instanceName
+  }
+
   /**
    * 创建新 Tab
    * @returns tabId
@@ -115,9 +166,14 @@ export const useSessionStore = defineStore('session', () => {
   function createTab(projectPath: string, opts?: {
     sessionId?: string
     name?: string
+    /** 显式归属（采纳远端会话）；缺省消费 pendingInstanceId（用户选择） */
+    instanceId?: string
+    instanceName?: string
   }): string {
     const tabId = uuid()
     const now = Date.now()
+    const explicitInst = opts?.instanceId
+    const instId = explicitInst ?? pendingInstanceId.value ?? undefined
 
     tabs.set(tabId, {
       tabId,
@@ -132,7 +188,13 @@ export const useSessionStore = defineStore('session', () => {
       working: false,
       pending: false,
       isResume: !!opts?.sessionId,
+      // 多实例：显式归属优先，否则消费入口处的实例选择（spawn 时随 session.create 路由）
+      instanceId: instId,
+      instanceName: opts?.instanceName
+        ?? (instId ? instanceNameOf(instId) : undefined),
     })
+    // 显式归属（采纳远端会话）不消费用户选择；其余路径建 Tab 即用掉选择
+    if (explicitInst === undefined) pendingInstanceId.value = null
 
     return tabId
   }
@@ -156,7 +218,7 @@ export const useSessionStore = defineStore('session', () => {
    * Tab 名优先取历史会话名（sessionId 匹配）；历史未加载时回退项目名，
    * 加载完成后经 backfillTabNamesFromHistory 修正
    */
-  function adoptRemoteSessions(list: Array<{ id: string; type: string; cwd: string; working: boolean; pending: boolean; sessionId?: string }>) {
+  function adoptRemoteSessions(list: Array<{ id: string; type: string; cwd: string; working: boolean; pending: boolean; sessionId?: string; instanceId?: string; instanceName?: string }>) {
     for (const s of list) {
       const existing = getTabByPtyId(s.id)
       if (existing) {
@@ -166,6 +228,8 @@ export const useSessionStore = defineStore('session', () => {
         if (s.sessionId && existing.sessionId !== s.sessionId) {
           setTabSessionId(existing.tabId, s.sessionId)
         }
+        existing.instanceId = s.instanceId
+        existing.instanceName = s.instanceName
         continue
       }
       const histName = s.sessionId
@@ -173,7 +237,13 @@ export const useSessionStore = defineStore('session', () => {
         : ''
       const parts = s.cwd.replace(/\\/g, '/').split('/')
       const name = histName || parts[parts.length - 1] || s.cwd
-      const tabId = createTab(s.cwd, { name, sessionId: s.sessionId })
+      // 显式归属：不消费 pendingInstanceId（用户选择只属于其下一步新建/恢复）
+      const tabId = createTab(s.cwd, {
+        name,
+        sessionId: s.sessionId,
+        instanceId: s.instanceId,
+        instanceName: s.instanceName,
+      })
       setTabPty(tabId, s.id)
       const tab = tabs.get(tabId)
       if (tab) {
@@ -181,6 +251,31 @@ export const useSessionStore = defineStore('session', () => {
         tab.pending = s.pending
       }
     }
+  }
+
+  /**
+   * 远程 attach 被拒的单一处理（按 reason 分支）：
+   * - 控制权被其他端持有 → takenOver 遮罩 + 接管入口（显式接管后重新 attach）
+   * - 会话不存在（宿主窗口已关/路由丢失）→ 按退出处理置 stopped——
+   *   若误显示「被接管」，用户点接管后会永久循环被拒
+   */
+  function handleAttachDenied(ptyId: string, reason: string) {
+    const tab = getTabByPtyId(ptyId)
+    if (!tab) return
+    if (/session not found/i.test(reason)) {
+      if (tab.status === 'running') tab.status = 'stopped'
+      return
+    }
+    tab.takenOver = true
+  }
+
+  /**
+   * 远程会话被剥离（宿主窗口断开等，服务端 session.detached）：
+   * Tab 置 stopped——不处理的话 Tab 永远 running、终端冻结无输出
+   */
+  function handleRemoteDetached(ptyId: string) {
+    const tab = getTabByPtyId(ptyId)
+    if (tab && tab.status === 'running') tab.status = 'stopped'
   }
 
   /**
@@ -575,6 +670,8 @@ export const useSessionStore = defineStore('session', () => {
     createTab,
     setTabPty,
     adoptRemoteSessions,
+    handleAttachDenied,
+    handleRemoteDetached,
     backfillTabNamesFromHistory,
     handlePtyExit,
     closeTab,
@@ -585,6 +682,12 @@ export const useSessionStore = defineStore('session', () => {
     applyRemoteRename,
     setTabSessionId,
     resumeSessionTab,
+    pendingInstanceId,
+    remoteInstances,
+    remoteInstancesKnown,
+    setRemoteInstances,
+    resetRemoteInstances,
+    knownInstances,
 
     // Active tab
     setActiveTab,

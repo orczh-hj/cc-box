@@ -62,6 +62,13 @@ fn DecodeOutput_Gbk_AnyPlatform_001() {
     assert_eq!(result, "你好");
 }
 
+#[test]
+fn Platform_PidAliveAndSelfTerminate_001() {
+    assert!(is_pid_alive(std::process::id()));
+    assert!(!is_pid_alive(0));
+    assert!(terminate_pid(std::process::id(), true).is_err());
+}
+
 // 孤立非法字节（0x80）被 U+FFFD 替换，前后 ASCII 不被 GBK 污染
 #[test]
 fn DecodeOutput_IsolatedInvalid_001() {

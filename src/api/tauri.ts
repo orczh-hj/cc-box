@@ -1,7 +1,7 @@
 // 传输层统一入口（统一管理：桌面 Tauri 与浏览器远程共用同一套封装）。
 // invoke/listen 签名与 @tauri-apps/api 完全一致，下方函数体零感知运行环境。
 // （箭头包装而非方法解构——remoteTransport.invoke 内部依赖 this）
-import { transport, type Unlisten, type InvokeOpts } from './transport';
+import { transport, type Unlisten, type InvokeOpts, type SpawnSessionOptions } from './transport';
 
 const invoke = <T,>(cmd: string, args?: Record<string, unknown>, opts?: InvokeOpts): Promise<T> =>
   transport.invoke<T>(cmd, args, opts);
@@ -75,17 +75,8 @@ export type {
 // PTY Operations
 // ============================================
 
-interface PtySpawnOptions {
-  cwd: string
-  cols: number
-  rows: number
-  type: 'claude' | 'shell'
-  args?: string[]
-  /** 浏览器远程模式：结构化启动选项（桌面模式忽略，走 args） */
-  resume?: string
-  skipPermissions?: boolean
-  customArgs?: string
-}
+/** 与 transport.spawnSession 入参同一类型（单一正本，避免字段漂移） */
+type PtySpawnOptions = SpawnSessionOptions
 
 export const ptySpawn = async (options: PtySpawnOptions): Promise<PtySpawnResult> => {
   // 统一会话创建入口：桌面 pty_spawn / 浏览器 session.create+attach（transport 分发）
@@ -292,6 +283,14 @@ export const refreshRelayPairCode = (): Promise<RemoteStatus> =>
 export const rotateRemoteSecret = (): Promise<RemoteStatus> =>
   invoke<RemoteStatus>('rotate_remote_secret');
 
+/** 开/关开机自启动（仅 Broker；桌面专属命令） */
+export const setBrokerAutostart = (enabled: boolean): Promise<RemoteStatus> =>
+  invoke<RemoteStatus>('set_broker_autostart', { enabled });
+
+/** 更新安装前退出后台 Broker，释放可执行文件锁 */
+export const prepareForUpdate = (): Promise<void> =>
+  invoke<void>('prepare_for_update');
+
 export const getDefaultClaudeOptions = (): Promise<DefaultClaudeOptions> =>
   invoke<DefaultClaudeOptions>('get_default_claude_options');
 
@@ -446,6 +445,30 @@ export const getAppPath = (): Promise<string> =>
 
 export const spawnNewInstance = (): Promise<void> =>
   invoke<void>('spawn_new_instance');
+
+/** GUI 窗口标题变化上报 Broker（托盘窗口列表展示） */
+export const updateMemberWindowTitle = (title: string): Promise<void> =>
+  invoke<void>('update_window_title', { title });
+
+/** 托盘“远程连接”：Broker 要求本窗口打开远程面板 */
+export const onOpenRemotePanel = (callback: () => void): Promise<Unlisten> =>
+  listen<unknown>('open-remote-panel', () => callback());
+
+/** 前端启动时领取早于监听到达的“远程连接”请求 */
+export const takePendingOpenRemote = (): Promise<boolean> =>
+  invoke<boolean>('take_pending_open_remote');
+
+/** 托盘「更新到新版本」：Broker 要求本窗口打开设置 → 更新 */
+export const onOpenUpdate = (callback: () => void): Promise<Unlisten> =>
+  listen<unknown>('open-update', () => callback());
+
+/** 前端启动时领取早于监听到达的“更新”请求 */
+export const takePendingOpenUpdate = (): Promise<boolean> =>
+  invoke<boolean>('take_pending_open_update');
+
+/** 更新安装失败：清除 update 抑制并恢复 Broker 连接（桌面专属） */
+export const resumeBrokerConnection = (): Promise<void> =>
+  invoke<void>('resume_broker_connection');
 
 // ============================================
 // Logging

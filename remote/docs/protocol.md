@@ -18,7 +18,7 @@
 | `hello` | `ver, client, token` | 认证握手。token 三种：局域直连 = 桌面静态 token（连接层等值校验）；中继 = token v2 `<device_id>.<secret>`（relay 按前缀路由，**secret 由桌面 Hello 分支校验**——命中配对 pending 时固化为持久设备，LRU 上限 16）；**下载票据** = `<device_id>.<ticket>`（同格式复用 relay 路由，桌面命中票据表即建立受限会话，只允许 `file_download_ticket_chunk` 与 `ping`） |
 | `sessions.list` | `{}` | 拉取运行中会话列表 |
 | `projects.list` | `{}` | 可操作项目白名单 |
-| `session.create` | `path, sessionId?, skipPermissions?, customArgs?` | 新建（无 sessionId）或恢复（--resume sessionId）会话 |
+| `session.create` | `path, sessionId?, skipPermissions?, customArgs?, instanceId?` | 新建（无 sessionId）或恢复（--resume sessionId）会话。`instanceId`（可选）为窗口路由：Broker 按此转发到对应 GUI 成员；不带 = 路由到最近注册的默认成员，无成员时返回 `session.create.failed` |
 | `session.kill` | `id, quiet?` | 关闭会话（ptyId）。显式关闭：先广播 `remote-session-closed` 再 kill（各端联动删 Tab），与桌面 `pty_kill` 双路径同语义；`quiet=true` 为重启场景内部清理——不广播 closed（各端保留 Tab 等 respawn，pty-exit 只置 stopped） |
 | `sessions.history` | `path` | 项目历史会话（恢复入口） |
 | `session.subscribe` | `id` | 只读订阅输出（附回放快照） |
@@ -37,7 +37,7 @@
 |---|---|---|
 | `hello.ok` | `ver, deviceName, connId, controller?, revision, downloadScope?` | 认证通过（桌面设备名）。`connId` = 本连接唯一标识；`controller` = 当前全局控制者（null=无人持有；**0=桌面持有**（conn_id 从 1 起，0 保留）；>0=远程连接 id。前端显示"被其他设备控制中"遮罩的判定依据）；`revision` = 状态版本基线（旧桌面端缺省 0）；`downloadScope` = 票据连接的下载范围 `{fileName, size}`（普通连接缺省） |
 | `hello.error` | `error` | 认证失败 |
-| `sessions` | `list: RemoteSession[], revision` | 运行中会话列表 + 状态版本快照（全量刷新基线） |
+| `sessions` | `list: RemoteSession[], revision` | 运行中会话列表 + 状态版本快照（全量刷新基线）。多实例时为设备级聚合（按 `instanceId/instanceName` 分组，见 RemoteSession）；旧桌面/单实例缺实例字段，手机端降级平铺 |
 | `projects` | `list: RemoteProject[]` | 项目列表 |
 | `session.created` | `id, path` | 新建成功（id = ptyId；发起者自动持有控制权） |
 | `session.create.failed` | `error` | 新建失败（含控制权被他人持有时拒绝） |
@@ -116,11 +116,12 @@
 ### RemoteSession
 
 ```json
-{ "id": "<ptyId>", "type": "claude|shell", "cwd": "<path>", "working": false, "pending": false, "sessionId": "<可选>" }
+{ "id": "<ptyId>", "type": "claude|shell", "cwd": "<path>", "working": false, "pending": false, "sessionId": "<可选>", "instanceId": "<可选>", "instanceName": "<可选>" }
 ```
 
-- `id` 是 ptyId（Rust 注册表键，与 Claude sessionId 不同）
+- `id` 是 ptyId（Rust 注册表键，与 Claude sessionId 不同；UUID v4 跨实例全局唯一）
 - `sessionId`（可选）：Claude 会话 id，hook `SessionStart` 等事件建立映射后由桌面端填充；shell 会话与旧版桌面端缺失。手机端用它把重连恢复的 Tab 与历史会话关联，**防止从历史恢复同一对话时二次 spawn**
+- `instanceId` / `instanceName`（可选）：多实例远程架构下会话所属 CC-Box 实例（设备级 Gateway 聚合所有实例的会话；`instanceName` 如「实例 2」）。缺失（单实例/旧桌面）时手机端降级为不分组平铺
 
 ### 回放快照（tail）
 
@@ -128,9 +129,100 @@
 
 - 预算 `TAIL_BUDGET = 256KB`（remote_state.rs），分块 ring buffer，超预算淘汰最旧块（小于 64B 的小块并入尾块，防逐键回显积累海量小块）
 - 淘汰后头部对齐 ANSI 转义边界（丢弃首个 ESC 前的残缺片段），避免半截转义序列把 xterm 已写内容抹掉
-- 快照在锁内先于订阅插入入队（同锁 + mpsc FIFO 保证 `SessionAttached` 先于后续 `PtyOutput` 增量）。`push_output` 的 tail 写入与订阅者广播是两个锁窗口，attach 恰插入其间时新订阅者可能重复收到一帧（快照已含该帧且增量再发一次）；窗口极窄且终端 TUI 全屏重绘场景无感
+- 快照在锁内先于订阅插入入队（同锁 + 单一有序队列保证 `SessionAttached` 先于后续 `PtyOutput` 增量）
+- `SessionAttached` / `SessionSubscribed` 携带 `tailSeq`（快照末尾序号）；每条 `PtyOutput` 携带 `seq`。客户端丢弃 `seq <= tailSeq` 的重叠帧；检测到序号跳变时显示「输出中断」并可在下次 attach 时重新校准。旧桌面端不下发这两个字段（serde default / TS 可选），客户端按无序号模式工作
 - 快照入队失败（慢消费者）时桌面主动断开该连接，客户端重连重拉
 
 ## 样例
 
 每个消息在 `remote/protocol/samples/` 有一个固定 JSON 样例（`client-*.json` / `server-*.json`），两端契约测试按目录共跑：改动消息结构时同步更新样例，两端测试强制失败直至一致。
+
+## 设备级 Broker IPC（多实例）
+
+一台电脑 = 一个后台 Broker = 一个远程设备入口（一个 LAN 端口/一条 relay 连接/一套凭证）；多个 CC-Box GUI 窗口 = Broker 的成员。**手机协议按窗口分组但不感知进程拓扑**——`sessions.list` 条目带 `instanceId/instanceName`（分组展示；旧端忽略降级平铺）；`session.create` 可带 `instanceId` 指定窗口，其余会话消息按 `pty_id → instance_id` 路由表反查转发。GUI 不再参与 Gateway 选举。
+
+### 传输与认证
+
+| 平台 | 传输 | 权限 |
+|---|---|---|
+| Windows | Named Pipe `\\.\pipe\cc-box-broker-<user-hash>` | 显式 DACL（当前用户 + SYSTEM + Administrators）+ `reject_remote_clients` |
+| Unix | `~/.cc-box/run/broker.sock` | 目录 `0700`、socket `0600`、`peer_cred` UID 校验 |
+
+- 帧：4 字节大端长度 + UTF-8 JSON（上限 16 MiB）。
+- 首帧 `member.hello`（v2）：`{ver:2, instanceId, secret, label?, pid, windowTitle?, sessions[]}`；`secret` 来自 `~/.cc-box/broker.secret`（与旧版 `gateway.secret` 分离）。`pid` 用于托盘关闭/重启窗口的强杀兜底；`windowTitle` 是托盘窗口列表展示名。v1 两者缺省。
+- 首帧 `{"type":"admin", "id", "secret", "op": {...}}`：一次管理操作（`getStatus` / `setEnabled` / `restartRemote` / `refreshPairCode` / `rotateSecret` / `setRelayUrl` / `setAutostart` / `quit` / `prepareForUpdate{keepInstanceId?}`），执行后关闭。
+- 认证/版本/重复 instanceId 失败 → `reject` + 断开；首帧 10s 超时。
+- 旧版 GUI 仍可用 `/internal/gw-ws` v1（`gateway.secret`）注册；Broker 对 v1 只发 v1 消息。
+
+### Broker → 成员（GwDown）
+
+- `register.ok { instanceName, gatewayId }`
+- `reject { reason }`
+- `client.msg { connId, viaRelay, msg, holder? }`：`holder` 字段缺失=旧帧；`null`=无人持有；数字=持有 conn。v2 成员在 handle 前应用控制权影子。
+- `controller.set { holder }` / `controller.strip { connId }` / `conn.drop { connId }`
+- `relay.status { enabled, connected, url, pairCode }`：v1 兼容
+- v2-only：`broker.status { status: BrokerStatus }`、`desktop.event { name, payload }`、`broker.exit { reason: quit|update|idle|shutdown }`、`heartbeat.ack { ts }`、`window.command { action }`
+  - `window.command.action = close | show | openRemote`：close 结束本窗口全部 PTY 后退出（5s 未退出按 `member.hello.pid` 强杀）；show 还原/置顶/聚焦；openRemote 显示并打开远程面板。
+  - `broker.exit.idle` 仅为旧 Broker 兼容保留；新版 Broker 常驻，不再发送。
+
+### 成员 → Broker（GwUp）
+
+- `member.hello { ver, instanceId, secret, label?, pid, windowTitle?, sessions[] }`
+- `window.title { title }`：GUI 窗口标题变化（项目切换）；Broker 同步更新托盘展示与手机分组展示名（同名去重），并刷新该成员已有会话的 `instanceName`。
+- `state.changed { section }`：成员本地写命令成功后的状态广播；Broker 重新分配设备级 revision，经 `desktop.event` 扇出给所有 v2 成员，并广播给手机。避免窗口 A 改 provider/config 后窗口 B/C 不刷新。
+- `session.upsert { session }` / `session.remove { id }`
+- `to.conn { connId, msg }`：定向手机消息（attach 应答/RPC 结果/输出等）
+- `desktop.takeover`：成员桌面夺回控制权
+- `heartbeat { ts }` / `bye` / `done`
+
+### BrokerStatus
+
+```json
+{
+  "enabled": true, "lanRunning": true, "lanError": null, "legacyOwned": false,
+  "instanceCount": 2, "port": 8747,
+  "relayEnabled": true, "relayConnected": true, "relayUrl": "wss://...", "relayPairCode": "...",
+  "controller": 12, "revision": 3, "appVersion": "0.16.10", "brokerPid": 1234,
+  "autostart": false
+}
+```
+
+### 队列与可靠性
+
+- 每个方向每个成员/连接**只有一条有序队列**；同一队列保证 `controller.set` 先于 `client.msg`、`session.attached.tail` 先于后续 `pty.output`。
+- 控制面/输入（控制权、路由变更、ConnDrop、Shutdown、SessionCreated/Attached、PtyInput/Resize、RPC）**不静默丢弃**：异步路径 `send().await`，5s 超时断开成员；同步广播满则断开成员（触发重注册 + 全量快照）。
+- `PtyOutput` 可丢：发送端保留 25% headroom；超限丢弃，但每条带 `seq`，客户端检测缺口并显示「输出中断」。
+- `session.attached` / `session.subscribed` 增加 `tailSeq`（快照末尾序号）；客户端丢弃 `seq <= tailSeq` 的重叠帧。重 attach/claim 时基线只允许抬高（`max(prev, tailSeq)`），不能把已收到的实时流序号降回去。
+- 成员 PTY 退出只上行 `session.remove`，由 Broker 统一广播一次 `session.exit`；成员本地不再重复广播给桥接手机。
+
+### 路由与恢复
+
+- `session.created { id }` 到达时**先登记路由再投递手机**，随后 `session.upsert` 覆盖最小条目。
+- 未知 `pty_id` 拒绝（`session.exit` / `attach.denied` / `rpc.result error`）并推送 `sessions` 快照，绝不回退 Broker 本地执行。
+- `session.create` 不带 `instanceId` → 默认成员；无成员 → `session.create.failed`。
+- 成员断连：清理路由/缓存/上传粘连/待处理 RPC 与创建，发 `session.detached{instance disconnected}`，待处理请求明确回失败。
+- 成员重连：全量 `sessions` 快照重建路由；Broker 补发当前 `controller.set`；成员重置旧的远端 active 视图。
+
+### 生命周期
+
+`~/.cc-box/broker.state.json` 记录 `running | user_quit | update_in_progress`（旧版可能残留 `idle_exit`，仅按允许拉起读取）：
+
+- `running`：Broker 常驻；所有窗口关闭也不退出。
+- `user_quit`：「退出 CC-Box」写入，持久抑制自动拉起；手动打开 GUI 或 `--broker --autostart` 清除。
+- `update_in_progress`：安装前退出，释放可执行文件；版本变化或 5 分钟后解除。
+- `remote.enabled=false` 不是生命周期状态：Broker 继续运行，仅停止 LAN/relay。
+
+### 窗口管理
+
+- Broker 维护窗口名单（成员 id / 窗口标题 / pid / proto / 会话数），托盘动态生成「窗口 → 显示/重启/关闭」子菜单。
+- 关闭：`window.command{action:"close"}` → GUI 杀 PTY 并退出 → 5s 超时按 pid 强杀；窗口已不存在视为成功（幂等）。用于「退出 CC-Box」和更新前关闭其他窗口。
+- 显示：`window.command{action:"show"}` → GUI 还原/置顶/聚焦；托盘的一级窗口项单击即触发。
+- 托盘不再提供单窗口关闭/重启（重启语义保留在内部能力中，不暴露菜单项）。
+- 退出 CC-Box：写 `user_quit` → 关闭所有可控制窗口 → 广播 `BrokerExit{Quit}` → 停止 LAN/relay → 退出；旧版窗口无法被关闭，确认框会明确提示。
+- 管理请求（Quit/PrepareForUpdate）先写回 `admin.result`，再触发 Broker 退出，避免 CLI/更新调用误判失败。
+- `PtyInput/PtyResize` 只校验控制权、不主动获取控制权：输入必须建立在已有 attach（attach 时已取得控制权）之上。
+- 新建窗口：Broker 以 `--new-window` 拉起 GUI，窗口停留在项目列表，不自动进入终端。
+- 远程零窗口：`rpc.call "spawn_new_instance"` 由 Broker 本地执行（无需成员在线），上限 12 窗口 + 2s 冷却；成功后新 GUI 注册并广播 `instances-changed`。
+- 远程连接：托盘选择第一个可控制窗口发送 `openRemote`；无窗口时先新建一个再发送。
+- 远程面板：所有窗口展示同一份 Broker 设备级状态（`get_remote_status` 优先 Broker 镜像），不展示宿主/在线数量；开机自启动位于设置页，不在远程面板。
+
