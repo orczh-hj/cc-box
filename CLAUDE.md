@@ -124,7 +124,7 @@ npm run release -- --bump patch --notes "### Features\n- Add feature"
 ```
 
 - 脚本自动完成：版本号 → CHANGELOG → 提交推送 → 标签 → CI → Release → OSS；失败后**重跑同一完整命令自动续跑**（不会二次 bump）
-- **`--bump major/minor` 只在用户明确指定时使用**；`--notes` 必填且必须用英文
+- **`--bump major/minor` 只在用户明确指定时使用**；`--notes` 必填且必须用中文
 - **生产 relay 已启用磁盘分离**（`CC_BOX_RELAY_WEB_DIR=/opt/cc-box/web`）：前端（src/）改动只需 `npm run build` + `scp -r dist/* root@orczh.top:/opt/cc-box/web/`，免重编、免重启；只有 relay 二进制（remote/relay/、web-assets）改动才跑 `npm run deploy:relay`（先桌面后 relay）。未配置磁盘目录的部署仍编译期内嵌，须重编 relay
 - 详细参数、断点续跑与远程组件发布清单 → [docs/release-process.md](docs/release-process.md)
 

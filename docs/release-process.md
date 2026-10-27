@@ -96,16 +96,16 @@ node scripts/release.js --bump minor --notes "### Features\n- Add sidebar panel\
 ### Release Notes 格式
 
 ```bash
-# 多行格式示例（用 \n 表示换行）
---notes "### Bug Fixes\n- Fix issue A\n- Fix issue B\n\n### Features\n- Add feature X"
+# 多行格式示例（用 \n 表示换行；内容用中文）
+--notes "### Bug Fixes\n- 修复问题 A\n- 修复问题 B\n\n### Features\n- 新增功能 X"
 ```
 
 ### 常用示例
 
 ```bash
 # 新版本发布
-npm run release -- --bump patch --notes "### Fixed\n- Fix copy issue"
-npm run release -- --bump minor --notes "### Features\n- Add sidebar panel"
+npm run release -- --bump patch --notes "### Fixed\n- 修复复制问题"
+npm run release -- --bump minor --notes "### Features\n- 新增侧边栏面板"
 
 # 重新发布当前版本（CI 已构建）
 npm run release -- --exact --notes "### Fixed\n- Fix issue" --skip-ci
@@ -204,16 +204,16 @@ CI 自动构建并上传：
 ## [v0.2.5] - 2026-05-05
 
 ### Bug Fixes
-- Fix terminal copy (Ctrl+C)
+- 修复终端复制（Ctrl+C）
 
 ### Features
-- Add Alt+N/Alt+R shortcuts
+- 新增 Alt+N/Alt+R 快捷键
 ```
 
 ## 重要提醒
 
 1. **每次发布必须编写 release notes**，说明变更内容
-2. **CHANGELOG.md 用英文编写**，便于国际用户阅读
+2. **release notes 与 CHANGELOG.md 用中文编写**（2026-10 起）
 3. **GitHub 操作需要代理**（国内环境），OSS 操作无需代理
 4. **OSS 配置文件包含敏感信息**，已在 `.gitignore` 中排除
 5. **新增 Rust crate 时必须把它的 `target/` 加入 `.gitignore`**——release 脚本 `git add -A` 会把构建产物（.o/.pdb/.dll，数百文件）提交进 Release commit

@@ -45,10 +45,10 @@ npm run release -- --bump <level> --notes "<notes>"
 - Fix <具体问题>
 
 ### Features
-- Add <具体功能>
+- 新增<具体功能>
 ```
 
-英文，`\n` 换行，动词开头。**含远程改动时**末尾加用户提示行（如 `Note: phone clients need to re-pair after relay update; refresh browser to get the new bundle.`）。
+**中文**，`\n` 换行，动词开头（修复/新增/调整/移除）。**含远程改动时**末尾加用户提示行（如 `提示：relay 更新后手机需重新扫码配对；刷新浏览器获取新前端。`）。
 
 ## 远程组件发布（relay 部署）
 
