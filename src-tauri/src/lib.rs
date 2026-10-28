@@ -176,6 +176,15 @@ pub fn quit_broker_blocking() -> Result<(), String> {
     .map(|_| ())
 }
 
+/// 统一构造 Tauri Context（Broker 托盘 / GUI 共用）。
+///
+/// macOS 上 `generate_context!()` 会经 embed_plist 生成
+/// `#[no_mangle] static _EMBED_INFO_PLIST`，同一二进制重复展开即重复符号。
+/// 因此宏只能在单一位置展开，两种启动模式复用同一构造函数。
+fn app_context() -> tauri::Context<tauri::Wry> {
+    tauri::generate_context!()
+}
+
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 fn run_broker_with_tray(autostart: bool) {
     tauri::Builder::default()
@@ -208,7 +217,7 @@ fn run_broker_with_tray(autostart: bool) {
             });
             Ok(())
         })
-        .build(tauri::generate_context!())
+        .build(app_context())
         .expect("error while building broker application")
         .run(|_app, event| {
             // 只有外部事件导致的 ExitRequested（code=None）才阻止；
@@ -466,6 +475,6 @@ pub fn run(initial_dir: Option<String>, new_window: bool) {
             commands::file_download_ticket,
             commands::file_download_ticket_chunk,
         ])
-        .run(tauri::generate_context!())
+        .run(app_context())
         .expect("error while running tauri application");
 }
