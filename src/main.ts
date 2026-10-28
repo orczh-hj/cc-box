@@ -24,7 +24,16 @@ app.use(pinia)
 app.use(i18n)
 app.mount('#app')
 
-// 生产环境下禁用右键菜单
+// 生产环境下禁用右键菜单；普通可编辑元素放行，保留系统右键的复制/粘贴入口。
+// xterm 的隐藏 textarea（xterm-helper-textarea）排除，终端右键行为保持不变
 if (import.meta.env.PROD) {
-  window.addEventListener('contextmenu', (e) => e.preventDefault())
+  window.addEventListener('contextmenu', (e) => {
+    const target = e.target as HTMLElement | null
+    if (!target || target.classList.contains('xterm-helper-textarea')) {
+      e.preventDefault()
+      return
+    }
+    if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable) return
+    e.preventDefault()
+  })
 }

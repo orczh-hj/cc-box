@@ -847,6 +847,26 @@ pub fn update_window_title(title: String) {
     crate::broker_client::set_window_title(title);
 }
 
+/// macOS：焦点进入输入框时挂原生 Edit 菜单（Cmd+C/V/X/A/Z 原生响应），
+/// 终端持焦时切空菜单（菜单 key equivalent 会拦截按键，xterm 处理须让路）
+#[cfg(target_os = "macos")]
+#[tauri::command]
+pub fn set_native_edit_menu(window: tauri::WebviewWindow, active: bool) -> Result<(), String> {
+    let Some((edit, plain)) = crate::NATIVE_EDIT_MENUS.get() else {
+        return Err("native edit menus not initialized".into());
+    };
+    window
+        .set_menu(Some(if active { edit } else { plain }.clone()))
+        .map_err(|e| e.to_string())
+}
+
+/// 非 macOS：无原生菜单机制，no-op
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+pub fn set_native_edit_menu(active: bool) {
+    let _ = active;
+}
+
 /// 启动时领取“远程连接”请求（防止 openRemote 事件早于前端监听）
 #[tauri::command]
 pub fn take_pending_open_remote() -> bool {

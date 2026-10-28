@@ -45,6 +45,8 @@ pub const EXCLUDED: &[&str] = &[
     "open_in_file_manager",
     "open_claude_user_settings",
     "get_app_path",
+    // 桌面专属：macOS 原生 Edit 菜单随焦点切换（远程模式无本地菜单）
+    "set_native_edit_menu",
     // 窗口标题回传 / 待处理远程面板请求（仅桌面窗口）
     "update_window_title",
     "take_pending_open_remote",

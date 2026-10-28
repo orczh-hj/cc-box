@@ -457,6 +457,10 @@ export const takePendingOpenUpdate = (): Promise<boolean> =>
 export const resumeBrokerConnection = (): Promise<void> =>
   invoke<void>('resume_broker_connection');
 
+/** macOS：按焦点挂/撤原生 Edit 菜单（终端持焦时让路给 xterm 按键处理） */
+export const setNativeEditMenu = (active: boolean): Promise<void> =>
+  invoke<void>('set_native_edit_menu', { active });
+
 // ============================================
 // Logging
 // ============================================

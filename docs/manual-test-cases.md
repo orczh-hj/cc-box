@@ -1470,6 +1470,78 @@
 - 运行中会话不受影响：已打开的 Tab、终端交互一切照旧
 - 重新添加（含右键菜单打开、目录选择器打开）后项目恢复主动展示
 
+## macOS 原生编辑快捷键（焦点驱动 Edit 菜单）
+
+> 背景：WKWebView 中粘贴没有 keydown 默认行为（复制/全选有），无原生 Edit 菜单时输入框 Cmd+V 失效；而 NSMenu 菜单项的 key equivalent 会在按键到达 WebView 前被系统拦截，曾导致终端 Cmd+C 复制失效。方案：app 默认挂原生 Edit 菜单（undo/redo/cut/copy/paste/select_all），焦点进入 xterm-helper-textarea（终端持焦）时切空菜单让路，`lib.rs` 构建 + `commands.rs` `set_native_edit_menu` + `useAppShortcuts` focusin 联动。判定逻辑单测见 `tests/utils/mac-edit-keys.test.ts`。
+
+### MacEdit_InputPaste_001 — 输入框 Cmd+V 原生粘贴
+
+**目标**：验证 mac 输入框 Cmd+V 经系统 paste: selector 原生粘贴（如 provider 编辑面板粘贴 API key）
+
+**前置条件**：macOS 桌面构建启动
+
+**操作步骤**：
+1. 复制任意 API key 文本
+2. 打开 设置 → 接口，新建/编辑 Provider，聚焦 API Key 输入框
+3. 按 `Cmd+V`
+
+**预期结果**：
+- 剪贴板文本完整粘贴进输入框，v-model 正常更新（保存后值正确）
+- 连续粘贴多次正常，无重复/丢失
+
+### MacEdit_InputEditKeys_002 — 输入框 Cmd+C/X/A/Z 原生生效
+
+**目标**：验证输入框其余编辑快捷键原生响应
+
+**前置条件**：同上
+
+**操作步骤**：
+1. 聚焦 Provider 名称输入框，输入文本
+2. `Cmd+A` → `Cmd+C` → 点另一输入框 `Cmd+V`
+3. 回原输入框 `Cmd+A` → `Cmd+X` → `Cmd+Z`
+
+**预期结果**：
+- `Cmd+A` 全选输入框内容
+- `Cmd+C` 复制、另一输入框 `Cmd+V` 粘贴成功
+- `Cmd+X` 剪切（内容清空且已进剪贴板）
+- `Cmd+Z` 撤销剪切，内容恢复
+
+### MacEdit_TerminalUntouched_003 — 终端按键零回归
+
+**目标**：验证终端持焦时菜单已切走，xterm 按键处理不受任何影响
+
+**前置条件**：macOS 桌面，已打开项目并启动 Claude CLI 会话，焦点在终端
+
+**操作步骤**：
+1. 终端选中一段输出 → `Cmd+C` → 输入框粘贴验证
+2. `Cmd+V` 粘贴文本进终端
+3. 输入若干字符 → `Cmd+Z`（readline undo）
+4. 无选中按 `Ctrl+C`（SIGINT）
+5. 切到设置输入框再点回终端，重复步骤 2
+
+**预期结果**：
+- `Cmd+C` 复制终端选区成功（修复点：此前被菜单拦截无法复制）
+- `Cmd+V` 粘贴进终端正常
+- `Cmd+Z` 触发 readline undo（逐字回退），Claude 进程不暂停
+- `Ctrl+C` 正常中断
+- 输入框 ↔ 终端往返切换后菜单状态正确（终端粘贴/复制始终正常）
+
+### MacEdit_RightClick_004 — 右键菜单：输入框可用、终端禁用
+
+**目标**：验证生产构建右键菜单按目标区分
+
+**前置条件**：macOS/Windows 桌面生产构建（`npm run tauri:build` 产物）
+
+**操作步骤**：
+1. Provider 输入框上右键
+2. 终端区域右键
+3. 首页/设置空白区域右键
+
+**预期结果**：
+- 输入框弹出系统右键菜单（复制/粘贴可用，保留备用粘贴入口）
+- 终端区域无右键菜单（xterm-helper-textarea 排除）
+- 非可编辑区域无右键菜单
+
 ## Mac 终端启动（Unix 直接 exec）
 
 ### MacSpawn_ResumeSession_001 — 打开历史会话不再白屏

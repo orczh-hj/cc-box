@@ -3,8 +3,9 @@ import { LogicalSize, LogicalPosition } from '@tauri-apps/api/dpi'
 import { useAppStore } from '@/stores/app'
 import { useSessionStore } from '@/stores/session'
 import { useSidebarStore } from '@/stores/sidebar'
-import { ptyKillAll, spawnNewInstance } from '@/api/tauri'
+import { ptyKillAll, spawnNewInstance, setNativeEditMenu } from '@/api/tauri'
 import { isTauriEnv } from '@/api/platform'
+import { nativeEditMenuSupported, suppressNativeEditMenu } from '@/utils/mac-edit-keys'
 
 export async function snapWindow(side: 'left' | 'right') {
   // 窗口贴靠与新建实例为桌面专属（浏览器无窗口控制能力）
@@ -239,7 +240,23 @@ export function useAppShortcuts() {
 
   function setupShortcutListeners(): (() => void)[] {
     window.addEventListener('keydown', handleGlobalKeydown, true)
-    return [() => window.removeEventListener('keydown', handleGlobalKeydown, true)]
+    const cleanups = [() => window.removeEventListener('keydown', handleGlobalKeydown, true)]
+
+    // macOS：焦点驱动的原生 Edit 菜单切换——终端持焦（xterm-helper-textarea
+    // 获焦）时切空菜单让 xterm 收到全部按键，其余焦点一律挂回 Edit 菜单
+    if (nativeEditMenuSupported) {
+      let lastActive: boolean | null = null
+      const handleFocusIn = (e: FocusEvent) => {
+        const active = !suppressNativeEditMenu(e.target)
+        if (active === lastActive) return
+        lastActive = active
+        setNativeEditMenu(active).catch((err) => console.error('setNativeEditMenu failed:', err))
+      }
+      window.addEventListener('focusin', handleFocusIn, true)
+      cleanups.push(() => window.removeEventListener('focusin', handleFocusIn, true))
+    }
+
+    return cleanups
   }
 
   return { setupShortcutListeners }
