@@ -134,6 +134,7 @@ export default {
   checking: 'Checking...',
   checkForUpdates: 'Check for Updates',
   checkFailed: 'Check failed: {error}',
+  updateNoPlatformAsset: 'No update package is available for the current architecture. macOS updates are currently Apple Silicon (arm64) only.',
   upToDate: "You're up to date!",
   versionAvailable: 'v{version} is available',
   yourVersion: 'Your version:',

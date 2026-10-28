@@ -134,6 +134,7 @@ export default {
   checking: '检查中...',
   checkForUpdates: '检查更新',
   checkFailed: '检查失败：{error}',
+  updateNoPlatformAsset: '当前系统架构没有可用的更新包；macOS 更新目前仅提供 Apple Silicon（arm64）版本。',
   upToDate: '已是最新版本！',
   versionAvailable: 'v{version} 可用',
   yourVersion: '当前版本：',

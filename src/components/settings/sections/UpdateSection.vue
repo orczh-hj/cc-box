@@ -257,6 +257,7 @@ import { useSidebarStore } from '@/stores/sidebar'
 import { useSessionStore } from '@/stores/session'
 import { useUpdateStore } from '@/stores/update'
 import { getClaudePlatformKey } from '@/utils/platform'
+import { isMissingUpdatePlatform } from '@/utils/update-error'
 import type { ClaudeVersionEntry } from '@/types'
 
 const { t } = useI18n()
@@ -303,7 +304,10 @@ async function handleCheckUpdate() {
     }
   } catch (err) {
     error.value = true
-    errorMessage.value = String(err)
+    const raw = String(err)
+    // 平台键缺失通常是架构不匹配（如 x86_64 构建 vs 仅发布 darwin-aarch64），
+    // 原始报错对用户不可读，改用明确提示
+    errorMessage.value = isMissingUpdatePlatform(raw) ? t('updateNoPlatformAsset') : raw
   } finally {
     checking.value = false
   }

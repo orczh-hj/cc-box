@@ -137,7 +137,7 @@ npm run tauri:build   # Build for current platform
 
 # Or platform-specific:
 npm run build:win     # Windows (x86_64-pc-windows-gnu)
-npm run build:mac     # macOS (universal)
+npm run build:mac     # macOS (native arch; updater publishes Apple Silicon/arm64)
 npm run build:linux   # Linux (x86_64)
 ```
 

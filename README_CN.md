@@ -137,7 +137,7 @@ npm run tauri:build   # 构建当前平台
 
 # 或指定平台：
 npm run build:win     # Windows (x86_64-pc-windows-gnu)
-npm run build:mac     # macOS (通用)
+npm run build:mac     # macOS (当前架构；线上更新目前仅发布 Apple Silicon/arm64)
 npm run build:linux   # Linux (x86_64)
 ```
 
