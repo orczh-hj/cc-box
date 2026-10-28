@@ -2,7 +2,7 @@
 
 协议正本双端定义：Rust crate `remote/protocol/src/lib.rs`（桌面/relay 用）与 TypeScript `remote/protocol/protocol.ts`（浏览器 UI 用）。固定 JSON 样例在 `remote/protocol/samples/`，由 Rust 测试与 Vitest 契约测试（`tests/remote/protocol.test.ts`）共同执行，保证两端序列化不漂移。
 
-> **行为规则唯一权威**：设备互斥/控制权（谁能操作、如何接管）、revision 过滤等**行为规则以本文档为正本**；README（设计背景）、CLAUDE.md（索引）、manual-test-cases（测试步骤）中的相关描述均为摘要引用，如有不一致以本文档为准，且不应在别处复述完整规则（防多处维护漂移）。
+> **行为规则唯一权威**：会话控制权（谁能操作哪个会话、如何抢占）、revision 过滤等**行为规则以本文档为正本**；README（设计背景）、CLAUDE.md（索引）、manual-test-cases（测试步骤）中的相关描述均为摘要引用，如有不一致以本文档为准，且不应在别处复述完整规则（防多处维护漂移）。
 
 **协议变更检查清单**（改任何消息时逐项核对）：共享 crate 定义 → protocol.ts → JSON 样例与契约测试 → 本文档。
 
@@ -23,48 +23,48 @@
 | `sessions.history` | `path` | 项目历史会话（恢复入口） |
 | `session.subscribe` | `id` | 只读订阅输出（附回放快照） |
 | `session.unsubscribe` | `id` | 取消订阅 |
-| `session.attach` | `id, cols, rows` | 接管会话（附回放快照 + resize）。**仅无人持有全局控制权时自动获得控制权，不能抢占**——他人持有时被拒（`session.attach.denied`），须先 `controller.takeover` |
-| `session.detach` | `id` | 归还终端给桌面 |
-| `pty.input` | `id, data` | 输入注入（仅 active 端 + 控制者生效） |
-| `pty.resize` | `id, cols, rows` | 终端尺寸（仅 active 端 + 控制者生效） |
+| `session.attach` | `id, cols, rows` | 接管会话（附回放快照 + resize）。**attach 即抢占**（后到优先）：旧持有者（桌面或其他远程）收到 `session-taken-over` 遮罩广播并保留订阅继续收输出；不同连接可同时 attach 不同会话互不干扰。**同一连接同一时刻只保留一个焦点会话**：浏览器切 Tab 时先对旧会话 detach（随后 subscribe 保留输出）再 attach 新会话 |
+| `session.detach` | `id` | 归还终端给桌面（active → Desktop + 移除订阅）。切 Tab 场景由客户端紧跟 `session.subscribe` 保留后台输出；本端主动释放时不得按「断开」处理 Tab |
+| `pty.input` | `id, data` | 输入注入（仅该会话 active 持有连接生效） |
+| `pty.resize` | `id, cols, rows` | 终端尺寸（仅该会话 active 持有连接生效） |
 | `ping` | `{}` | 30s 心跳 |
-| `rpc.call` | `id, cmd, args` | RPC 桥：调白名单 Tauri command（rpc_dispatch 宏表；**写命令受全局控制权拦截**） |
-| `controller.takeover` | `{}` | 抢占全局控制权（设备互斥唯一转移方式；成功以 `controller-changed` 广播确认，旧持有者终端被剥离归还桌面） |
+| `rpc.call` | `id, cmd, args` | RPC 桥：调白名单 Tauri command（rpc_dispatch 宏表；写命令不做控制权互斥，靠白名单 + revision 排序 + state-changed 广播收敛） |
+| `controller.takeover` | `{}` | **deprecated**：全局控制权已 per-session 化（attach/claim 即会话级抢占）。服务端对旧版缓存 UI 的本消息 no-op 忽略 |
 
 ### 桌面 → 手机（ServerMessage）
 
 | type | 字段 | 说明 |
 |---|---|---|
-| `hello.ok` | `ver, deviceName, connId, controller?, revision, downloadScope?` | 认证通过（桌面设备名）。`connId` = 本连接唯一标识；`controller` = 当前全局控制者（null=无人持有；**0=桌面持有**（conn_id 从 1 起，0 保留）；>0=远程连接 id。前端显示"被其他设备控制中"遮罩的判定依据）；`revision` = 状态版本基线（旧桌面端缺省 0）；`downloadScope` = 票据连接的下载范围 `{fileName, size}`（普通连接缺省） |
+| `hello.ok` | `ver, deviceName, connId, controller?, revision, downloadScope?` | 认证通过（桌面设备名）。`connId` = 本连接唯一标识；`controller` = **deprecated**（全局控制权已 per-session 化，服务端恒不发/缺省，旧端缓存 UI 解析为 null=无人持有即不遮罩，勿再消费）；`revision` = 状态版本基线（旧桌面端缺省 0）；`downloadScope` = 票据连接的下载范围 `{fileName, size}`（普通连接缺省） |
 | `hello.error` | `error` | 认证失败 |
 | `sessions` | `list: RemoteSession[], revision` | 运行中会话列表 + 状态版本快照（全量刷新基线）。多实例时为设备级聚合（按 `instanceId/instanceName` 分组，见 RemoteSession）；旧桌面/单实例缺实例字段，手机端降级平铺 |
 | `projects` | `list: RemoteProject[]` | 项目列表 |
-| `session.created` | `id, path` | 新建成功（id = ptyId；发起者自动持有控制权） |
-| `session.create.failed` | `error` | 新建失败（含控制权被他人持有时拒绝） |
+| `session.created` | `id, path` | 新建成功（id = ptyId） |
+| `session.create.failed` | `error` | 新建失败 |
 | `history.sessions` | `list: RemoteHistorySession[]` | 历史会话 |
 | `session.subscribed` | `id, tail` | 订阅成功，`tail` = 回放快照 |
 | `session.unsubscribed` | `id` | 退订确认 |
-| `session.attached` | `id, cols, rows, tail` | 接管成功，`tail` = 回放快照；发起者自动持有控制权 |
-| `session.attach.denied` | `id, reason` | attach 被拒：全局控制权被其他设备持有（先 `controller.takeover`） |
-| `session.detached` | `id, reason` | 归还确认 |
+| `session.attached` | `id, cols, rows, tail` | 接管成功，`tail` = 回放快照（attach 即抢占该会话 active） |
+| `session.attach.denied` | `id, reason` | attach 被拒（现仅 `session not found`：会话已退出） |
+| `session.detached` | `id, reason` | 归还确认（`self` = 本端主动 detach；`instance disconnected` = 宿主窗口/成员断开）。桌面 claim 不再发本消息，改发 taken-over |
 | `session.status` | `id, working, pending` | hook 状态机变化 |
 | `session.exit` | `id` | 会话退出 |
 | `pty.output` | `id, data` | 增量输出流 |
 | `pong` | `{}` | 心跳回复 |
-| `rpc.result` | `id, ok, data?, error?` | RPC 应答（写命令被控制权拦截时 `ok=false` 提示接管） |
-| `rpc.event` | `name, payload` | 控制面事件隧道（与 Tauri 事件同构）：`state-changed`（写命令状态广播）、`controller-changed`（全局控制权）、`remote-session-created/closed`（会话建立/显式关闭联动）、`session-renamed`、`session-viewed`（attach 打开即已读，服务端清 pending 并双端广播）、`hook-status` 等 |
+| `rpc.result` | `id, ok, data?, error?` | RPC 应答 |
+| `rpc.event` | `name, payload` | 控制面事件隧道（与 Tauri 事件同构）：`state-changed`（写命令状态广播）、`session-taken-over`（会话被抢占或桌面 claim 收回，payload `{id}`；广播排除接管者）、`session-reclaimed`（会话归还桌面，桌面端清遮罩；桌面 claim 仅单发桌面，避免清掉远程刚收到的 taken-over）、`remote-session-created/closed`（会话建立/显式关闭联动）、`session-renamed`、`session-viewed`（attach 打开即已读，服务端清 pending 并双端广播）、`hook-status` 等 |
 
-## 全局控制权（设备互斥）与 revision
+## 会话控制权（per-session active）与 revision
 
-同一时间只有一个设备可操作——**桌面与所有远程设备对等参与互斥**。控制权由 Rust 后端裁决（`remote_state.rs` `StateInner.controller: Option<ControllerHolder>`，`Desktop | Remote(connId)`），前端只做展示（`ControllerMask.vue` 全局遮罩 + 接管按钮，桌面/浏览器同构）：
+**冲突单位是单个会话的输入流，不是整台设备**——每个 PTY 会话独立归属（`remote_state.rs` `SessionEntry.active: ActiveView`，`Desktop | Remote(connId)`），不同设备可同时操作不同会话。离散写命令（rpc write）不做控制权互斥（靠白名单 + revision 排序 + state-changed 广播收敛）：
 
-- **远程自动持有**：远程写操作（rpc 写命令、`session.create/kill`、`session.attach`）在无人持有时自动使发起者持有；**桌面普通操作不抢占**（无自动持有路径）
-- **不能抢占**：他人（含桌面）持有时远程写操作被服务端拒绝（`rpc.result` 错误 / `session.attach.denied` / `session.create.failed`）；桌面被遮罩时 UI 挡住操作入口
-- **显式接管（唯一转移方式）**：远程 `controller.takeover` 消息 / 桌面 `controller_takeover` command（ControllerMask 接管按钮）/ 桌面 `pty_claim`（终端「接管回来」顺带获得）——转移控制权 + 剥离旧持有者全部终端归属（归还桌面并恢复桌面尺寸）+ 广播
-- **广播**：`rpc.event("controller-changed", {id, data: revision})`，`id` = `"desktop"` | 连接 id 数字串 | 空串（无人）；桌面端同时经 Tauri emit 同名事件下发（桌面遮罩判定）；接管者收到广播确认后按"重连"语义全量重同步（`sessions.list` 重拉 + 终端重 attach）
-- **初始快照**：远程端 `hello.ok` 自带 `controller`/`revision`；桌面 UI 启动/重载（如切 Tab reload）会错过历史广播，ControllerMask 挂载时经 `controller_status` command（rpc 白名单已登记，只读）主动查询补快照
-- **断连释放**：远程持有者连接断开自动释放并广播空 id
-- **revision**：每次状态变化（写命令广播、控制权变更）+1，附在 `controller-changed` / `state-changed`（写命令统一状态广播，payload `{id: section, data: revision}`）与 `hello.ok` / `sessions` 下发；前端单调过滤（不大于已应用版本的事件丢弃），防止旧事件乱序覆盖新状态。**版本跳变**（到达 revision > 已应用+1，中间事件可能丢失——如全量应答基线先于在途事件入队）时不丢弃该事件，并触发一次**权威重同步**（前端全 section 重拉，transport 广播 `state-resync-needed`），兜底乱序漏刷。**服务端保序**：`emit_state_changed` / `broadcast_controller_changed` 的 revision 取号与入队在同一锁窗口完成（跨线程并发时到达序 = 取号序，回归测试 `Controller_并发广播到达序revision严格递增` 守卫）——否则低版本事件后到被前端过滤丢弃，状态永久丢失
+- **attach 即抢占**（后到优先，单用户多设备无协商）：`session.attach` 无条件把该会话 active 置为发起连接；旧持有者收到 `session-taken-over` 遮罩广播（payload `{id: ptyId}`，排除接管者自己）并**保留订阅**继续收输出（被接管=暂时不显示，不是断流），随时可重 attach 抢回
+- **同一连接单一焦点**：一个浏览器连接同一时刻只持有一个 active 会话（手机一次只看一个终端）。切 Tab 由前端先 `session.detach` 旧会话并立刻 `session.subscribe` 保留输出，再 attach 新会话；旧会话 active 归还桌面并清遮罩。不同连接之间仍可各自持有不同会话
+- **输入独占**：`pty.input` / `pty.resize` 仅该会话 active 持有连接生效（被抢占/断连归还后 active 不再匹配，旧持有者输入静默丢弃）
+- **桌面收回**：桌面 `pty_claim` command 无条件收回单个终端（向旧持有者发 `rpc.event session-taken-over` 遮罩 + **仅桌面端** `session-reclaimed` 清遮罩 + 恢复桌面尺寸）；订阅保留、输出继续同步，旧持有者可随时重新 attach 抢回。旧实现发 `session.detached` 会让对方把 Tab 置 stopped（断开但仍见内容），已废弃
+- **断连归还**：连接断开自动归还其接管的全部会话（active → Desktop + `session-reclaimed` + 恢复桌面尺寸），其他设备可立即重新 attach
+- **旧版兼容**：旧版缓存 UI 发 `controller.takeover` → 服务端 no-op；等 `controller-changed` 永远等不到 → `hello.ok` controller 缺省解析为 null=无人持有，不遮罩，行为正确
+- **revision**：每次状态变化（写命令广播、会话建关）+1，附在 `state-changed`（写命令统一状态广播，payload `{id: section, data: revision}`）与 `hello.ok` / `sessions` 下发；前端单调过滤（不大于已应用版本的事件丢弃），防止旧事件乱序覆盖新状态。**版本跳变**（到达 revision > 已应用+1，中间事件可能丢失——如全量应答基线先于在途事件入队）时不丢弃该事件，并触发一次**权威重同步**（前端全 section 重拉，transport 广播 `state-resync-needed`），兜底乱序漏刷。**服务端保序**：`emit_state_changed` 的 revision 取号与入队在同一锁窗口完成（跨线程并发时到达序 = 取号序，回归测试 `Controller_并发广播到达序revision严格递增` 守卫）——否则低版本事件后到被前端过滤丢弃，状态永久丢失
 
 ## 写命令统一状态广播（state-changed）
 
@@ -95,7 +95,7 @@
 | `file_download_chunk` | write(None) | `downloadId, offset` | `{dataB64, bytes, eof}` |
 
 - **服务端注入**：`handle_rpc` 对 `file_` 前缀命令权威注入 `connId`/`viaRelay`（覆盖客户端任何伪造值；未知连接按中继从严）。会话（uploadId/downloadId）绑定发起连接，他人使用返回同一错误文案（不泄露存在性）；桌面 invoke 路径（conn_id=None）上传/下载直接拒绝
-- **权限**：读写范围锁定授权项目内（~/.claude/projects 已知项目，canonicalize 锚点校验防 `.cc-box-files` 符号链接/junction 逃逸）；上传路径服务端拼接（客户端只传裸文件名 + sanitize：拒 `..`/分隔符/Windows 保留名等），落盘 `<会话项目>/.cc-box-files/`；上传与下载均受全局控制权拦截（他人持有被拒）
+- **权限**：读写范围锁定授权项目内（~/.claude/projects 已知项目，canonicalize 锚点校验防 `.cc-box-files` 符号链接/junction 逃逸）；上传路径服务端拼接（客户端只传裸文件名 + sanitize：拒 `..`/分隔符/Windows 保留名等），落盘 `<会话项目>/.cc-box-files/`；上传与下载不做控制权互斥（写命令直通）
 - **可靠性**：chunk 幂等（`offset+len == written` 的重发不重写，ACK 丢失后前端重试安全）；finish 用 `hard_link` 原子 no-replace 提交，绝不覆盖已有文件；下载会话固化 size/mtime，源文件变化即返回 `source file changed during download`；eof 不清会话（最后一块重发幂等），TTL 10 分钟回收
 - **双限额（流量成本）**：`config.json` `remote.fileTransferMaxDirect`（默认 200MB）/`remote.fileTransferMaxRelay`（默认 20MB——中继流量 ≈2.7× 文件大小：双程 + base64 膨胀；`0` = 禁用）。判定依据是「经由中继」（连接表 `via_relay`：relay 桥接 true / LAN 直连 false），非「公网」——局域网自建 relay 可调高
 - **清理三层**：begin/list 入口惰性 TTL sweep（chunk/finish 不触发）+ lib.rs setup 定时（600s）+ 启动扫描已知项目 `.cc-box-files/*.upload-*.part`（崩溃遗留，仅 mtime >10 分钟且目录 canonicalize 后仍在项目内才删）；连接断开时即时回收该连接的传输会话
@@ -158,8 +158,8 @@
 
 - `register.ok { instanceName, gatewayId }`
 - `reject { reason }`
-- `client.msg { connId, viaRelay, msg, holder? }`：`holder` 字段缺失=旧帧；`null`=无人持有；数字=持有 conn。v2 成员在 handle 前应用控制权影子。
-- `controller.set { holder }` / `controller.strip { connId }` / `conn.drop { connId }`
+- `client.msg { connId, viaRelay, msg }`：手机消息原样转发（per-session 化后不再携带 `holder`；旧 Broker 帧的该字段被成员忽略）
+- `conn.drop { connId }`：成员侧 remove_conn（归还该连接 active + 恢复桌面尺寸）。（`controller.set` / `controller.strip` 已随全局控制权退役）
 - `relay.status { enabled, connected, url, pairCode }`：v1 兼容
 - v2-only：`broker.status { status: BrokerStatus }`、`desktop.event { name, payload }`、`broker.exit { reason: quit|update|idle|shutdown }`、`heartbeat.ack { ts }`、`window.command { action }`
   - `window.command.action = close | show | openRemote`：close 结束本窗口全部 PTY 后退出（5s 未退出按 `member.hello.pid` 强杀）；show 还原/置顶/聚焦；openRemote 显示并打开远程面板。
@@ -172,8 +172,7 @@
 - `state.changed { section }`：成员本地写命令成功后的状态广播；Broker 重新分配设备级 revision，经 `desktop.event` 扇出给所有 v2 成员，并广播给手机。避免窗口 A 改 provider/config 后窗口 B/C 不刷新。
 - `session.upsert { session }` / `session.remove { id }`
 - `to.conn { connId, msg }`：定向手机消息（attach 应答/RPC 结果/输出等）
-- `desktop.takeover`：成员桌面夺回控制权
-- `heartbeat { ts }` / `bye` / `done`
+- `heartbeat { ts }` / `bye` / `done`（`desktop.takeover` 已随全局控制权退役，旧成员上行该帧被忽略）
 
 ### BrokerStatus
 
@@ -182,15 +181,15 @@
   "enabled": true, "lanRunning": true, "lanError": null, "legacyOwned": false,
   "instanceCount": 2, "port": 8747,
   "relayEnabled": true, "relayConnected": true, "relayUrl": "wss://...", "relayPairCode": "...",
-  "controller": 12, "revision": 3, "appVersion": "0.16.10", "brokerPid": 1234,
+  "revision": 3, "appVersion": "0.16.10", "brokerPid": 1234,
   "autostart": false
 }
 ```
 
 ### 队列与可靠性
 
-- 每个方向每个成员/连接**只有一条有序队列**；同一队列保证 `controller.set` 先于 `client.msg`、`session.attached.tail` 先于后续 `pty.output`。
-- 控制面/输入（控制权、路由变更、ConnDrop、Shutdown、SessionCreated/Attached、PtyInput/Resize、RPC）**不静默丢弃**：异步路径 `send().await`，5s 超时断开成员；同步广播满则断开成员（触发重注册 + 全量快照）。
+- 每个方向每个成员/连接**只有一条有序队列**；同一队列保证 `session.attached.tail` 先于后续 `pty.output`。
+- 控制面/输入（路由变更、ConnDrop、Shutdown、SessionCreated/Attached、PtyInput/Resize、RPC）**不静默丢弃**：异步路径 `send().await`，5s 超时断开成员；同步广播满则断开成员（触发重注册 + 全量快照）。
 - `PtyOutput` 可丢：发送端保留 25% headroom；超限丢弃，但每条带 `seq`，客户端检测缺口并显示「输出中断」。
 - `session.attached` / `session.subscribed` 增加 `tailSeq`（快照末尾序号）；客户端丢弃 `seq <= tailSeq` 的重叠帧。重 attach/claim 时基线只允许抬高（`max(prev, tailSeq)`），不能把已收到的实时流序号降回去。
 - 成员 PTY 退出只上行 `session.remove`，由 Broker 统一广播一次 `session.exit`；成员本地不再重复广播给桥接手机。
@@ -201,7 +200,7 @@
 - 未知 `pty_id` 拒绝（`session.exit` / `attach.denied` / `rpc.result error`）并推送 `sessions` 快照，绝不回退 Broker 本地执行。
 - `session.create` 不带 `instanceId` → 默认成员；无成员 → `session.create.failed`。
 - 成员断连：清理路由/缓存/上传粘连/待处理 RPC 与创建，发 `session.detached{instance disconnected}`，待处理请求明确回失败。
-- 成员重连：全量 `sessions` 快照重建路由；Broker 补发当前 `controller.set`；成员重置旧的远端 active 视图。
+- 成员重连：全量 `sessions` 快照重建路由；成员重置旧的远端 active 视图。
 
 ### 生命周期
 
@@ -220,7 +219,7 @@
 - 托盘不再提供单窗口关闭/重启（重启语义保留在内部能力中，不暴露菜单项）。
 - 退出 CC-Box：写 `user_quit` → 关闭所有可控制窗口 → 广播 `BrokerExit{Quit}` → 停止 LAN/relay → 退出；旧版窗口无法被关闭，确认框会明确提示。
 - 管理请求（Quit/PrepareForUpdate）先写回 `admin.result`，再触发 Broker 退出，避免 CLI/更新调用误判失败。
-- `PtyInput/PtyResize` 只校验控制权、不主动获取控制权：输入必须建立在已有 attach（attach 时已取得控制权）之上。
+- `PtyInput/PtyResize` 只校验该会话 active 归属、不产生任何控制面副作用：输入必须建立在已有 attach 之上。
 - 新建窗口：Broker 以 `--new-window` 拉起 GUI，窗口停留在项目列表，不自动进入终端。
 - 远程零窗口：`rpc.call "spawn_new_instance"` 由 Broker 本地执行（无需成员在线），上限 12 窗口 + 2s 冷却；成功后新 GUI 注册并广播 `instances-changed`。
 - 远程连接：托盘选择第一个可控制窗口发送 `openRemote`；无窗口时先新建一个再发送。

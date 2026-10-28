@@ -62,10 +62,8 @@ class RemoteTransportImpl implements Transport {
   private nextRpcId = 1
   private pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>()
 
-  /** 本连接标识与当前控制者标签（hello.ok 下发；设备互斥遮罩判定依据） */
+  /** 本连接标识（hello.ok 下发；会话遮罩归属判定依据） */
   private _connId: number | null = null
-  /** 控制者标签：''=无人持有、'desktop'=桌面、数字串=远程连接 id */
-  private _controllerLabel = ''
   /** 已应用的状态版本（事件单调过滤：旧事件不覆盖新状态） */
   private appliedRevision = 0
 
@@ -94,6 +92,9 @@ class RemoteTransportImpl implements Transport {
   get activeDesktopId(): string | null {
     return this._activeDesktopId
   }
+  /** 下一次 hello.ok 是否代表切换设备（同 origin 换 token 重连）；
+   *  true 时上层需丢弃上一台设备的 Tabs */
+  private _pendingDeviceSwitch = false
 
   /** 票据模式：URL 携带 dl= 时以票据为 token 建连（受限会话，不写 localStorage） */
   readonly downloadTicket: string | null = parseDownloadTicket()
@@ -121,11 +122,6 @@ class RemoteTransportImpl implements Transport {
     return this._connId
   }
 
-  /** 当前控制者标签（''=无人持有、'desktop'=桌面、数字串=远程连接 id） */
-  get controllerLabel(): string {
-    return this._controllerLabel
-  }
-
   /** 是否经中继连接（文件传输限额选档：中继流量按量计费从严；直连走局域网宽松）。
    * 判定依据是运行时事实（配对入口走 relay 服页面 / 收到 relay 层 device.status），
    * 非 URL 猜测；直连永不收到 device.status → 保持 false */
@@ -134,12 +130,12 @@ class RemoteTransportImpl implements Transport {
     return this._viaRelay
   }
 
-  /** 状态版本过滤：state-changed/controller-changed 携带 revision，
+  /** 状态版本过滤：state-changed 携带 revision，
    * 不大于已应用版本的事件（旧事件/回环重复）直接丢弃，防止覆盖新状态。
    * 版本跳变（> 已应用+1，中间事件可能丢失——如全量应答基线先于在途事件
    * 入队）时不丢弃，并广播 state-resync-needed 让上层权威重拉全量兜底 */
   private filterStaleEvent(name: string, payload: unknown): boolean {
-    if (name !== 'state-changed' && name !== 'controller-changed') return true
+    if (name !== 'state-changed') return true
     const rev = Number((payload as { data?: string })?.data ?? 0)
     if (!Number.isFinite(rev) || rev === 0) return true // 旧桌面端无版本：不过滤
     if (rev <= this.appliedRevision) return false
@@ -149,18 +145,6 @@ class RemoteTransportImpl implements Transport {
       this.dispatchEvent('state-resync-needed', {})
     }
     return true
-  }
-
-  /** 应用控制者变更：更新内部状态并分发；接管确认（变为自己）时按
-   * "重连"语义触发全量重同步（App 重拉 sessions.list、终端重 attach） */
-  private applyControllerChanged(payload: unknown): void {
-    const id = String((payload as { id?: string })?.id ?? '')
-    this._controllerLabel = id
-    this.dispatchEvent('controller-changed', { id })
-    if (this._connId != null && id === String(this._connId)) {
-      // 接管确认 = 以服务端状态为准的全量刷新（与重连完全同构）
-      this.dispatchEvent('remote-connected', {})
-    }
   }
 
   /** 入口：解析 URL（?dl= / #token= / #pair=）或 localStorage，发起连接 */
@@ -246,6 +230,8 @@ class RemoteTransportImpl implements Transport {
   private connectAs(token: string, desktopId: string) {
     // 切换设备前彻底关闭旧连接：旧 socket 的 onclose 会按**新 token** 再开
     // 一条（双连接互踢），在途帧也可能串到新设备
+    const previousId = this._activeDesktopId
+    this._pendingDeviceSwitch = previousId !== null && previousId !== desktopId
     this.closeSocket()
     this.retry = 0
     // 旧单值 key 持续写最新值（旧版前端回滚后仍可直接连最近设备）
@@ -354,9 +340,6 @@ class RemoteTransportImpl implements Transport {
           touchDesktop(this._activeDesktopId, { name: msg.deviceName, invalid: false })
           this.onDesktopsChanged()
         }
-        // controller 语义：null=无人持有；0=桌面持有；>0=远程连接 id
-        this._controllerLabel =
-          msg.controller == null ? '' : msg.controller === 0 ? 'desktop' : String(msg.controller)
         this.appliedRevision = msg.revision
         // 重连：订阅集按连接划分，旧 attach 失效；序号基线等待新的 attached
         this.lastSeq.clear()
@@ -365,15 +348,17 @@ class RemoteTransportImpl implements Transport {
           this.onDownloadScope(msg.downloadScope)
         }
         // 连接/重连成功：服务端订阅集按连接划分，重连 = 全部 attach 失效，
-        // 广播本地事件让会话层重拉列表并重新 attach 当前 Tab
-        this.dispatchEvent('remote-connected', {})
-        // 控制权初始快照（其他设备持有时本端直接进入全局遮罩）
-        this.dispatchEvent('controller-changed', { id: this._controllerLabel })
+        // 广播本地事件让会话层重拉列表并重新 attach 当前 Tab。
+        // deviceChanged：同 origin 切换设备 → 上层必须先丢弃旧设备的 Tabs
+        const deviceChanged = this._pendingDeviceSwitch
+        this._pendingDeviceSwitch = false
+        this.dispatchEvent('remote-connected', { deviceChanged })
         return
       }
       if (msg.type === 'hello.error') {
         this.setConnState('denied')
         this.closedByUser = true // token 无效不再重连
+        this._pendingDeviceSwitch = false
         // 条目标记失效（列表显示「令牌无效」角标；不删除，密钥轮换后可重扫覆盖）
         if (this._activeDesktopId) {
           touchDesktop(this._activeDesktopId, { invalid: true })
@@ -396,12 +381,6 @@ class RemoteTransportImpl implements Transport {
         return
       }
       if (msg.type === 'rpc.event') {
-        if (msg.name === 'controller-changed') {
-          if (this.filterStaleEvent(msg.name, msg.payload)) {
-            this.applyControllerChanged(msg.payload)
-          }
-          return
-        }
         if (this.filterStaleEvent(msg.name, msg.payload)) {
           this.dispatchEvent(msg.name, msg.payload)
         }

@@ -65,12 +65,11 @@ async fn recv_timeout(rx: &mut mpsc::Receiver<ServerMessage>) -> ServerMessage {
     }
 }
 
-/// 读取下一条 controller-changed 广播（跳过途中其他帧，如 taken-over），
-/// 返回 payload.id（空串 = 无人持有）。attach/takeover/断连都会触发该广播
-async fn recv_controller_changed(rx: &mut mpsc::Receiver<ServerMessage>) -> String {
+/// 读取下一条指定名称的 rpc.event 广播（跳过途中其他帧），返回 payload.id
+async fn recv_rpc_event(rx: &mut mpsc::Receiver<ServerMessage>, want: &str) -> String {
     loop {
         match recv_timeout(rx).await {
-            ServerMessage::RpcEvent { name, payload } if name == "controller-changed" => {
+            ServerMessage::RpcEvent { name, payload } if name == want => {
                 return payload["id"].as_str().unwrap_or("").to_string()
             }
             _ => continue,
@@ -266,6 +265,9 @@ async fn RemoteState_Conn_连接断开清理全部订阅() {
 
 #[tokio::test]
 async fn RemoteState_SessionsList_按注册顺序返回() {
+    // SessionsList 经 merged_session_list 合并全局 GW_STATE 成员会话：
+    // 与 gateway 测试（注册/注销 mock 成员）互斥，否则并行时列表多出成员条目
+    let _lock = super::REMOTE_SERVER_TEST_LOCK.lock();
     let state = RemoteState::new();
     state.register_pty("s1", "claude", "/a");
     state.register_pty("s2", "shell", "/b");
@@ -285,6 +287,8 @@ async fn RemoteState_SessionsList_按注册顺序返回() {
 
 #[tokio::test]
 async fn RemoteState_SessionList_下发sessionId() {
+    // 同上：列表断言与 gateway 测试的成员注册互斥
+    let _lock = super::REMOTE_SERVER_TEST_LOCK.lock();
     let state = RemoteState::new();
     state.register_pty("s10", "claude", "/a");
     state.register_pty("s11", "shell", "/b");
@@ -504,8 +508,6 @@ async fn RemoteState_Attach_接管成功附快照并成为输出订阅者() {
         }
         other => panic!("expected SessionAttached, got {:?}", other),
     }
-    // attach 自动持有控制权 → controller-changed 广播
-    let _ = recv_controller_changed(&mut rx).await;
 
     // attach 后收到输出流
     state.push_output("a1", "live output");
@@ -532,29 +534,16 @@ async fn RemoteState_Attach_抢占其他远程连接时旧连接收到遮罩广�
         ServerMessage::RpcEvent { name, .. } => assert_eq!(name, "session-taken-over"),
         other => panic!("conn2 should observe taken-over broadcast, got {:?}", other),
     }
-    // conn1 自动持有控制权的广播
-    assert_eq!(recv_controller_changed(&mut rx1).await, conn1.to_string());
-    let _ = recv_controller_changed(&mut rx2).await;
 
-    // 设备互斥：conn2 直接 attach 不能抢占（被拒，须先 takeover）
+    // per-session 语义：conn2 直接 attach 即抢占（无需 takeover 前置）
     state.handle_client_message(
         conn2,
         &ClientMessage::SessionAttach { id: "a2".into(), cols: 100, rows: 30 },
     );
     match recv_timeout(&mut rx2).await {
-        ServerMessage::SessionAttachDenied { .. } => {}
-        other => panic!("expected SessionAttachDenied, got {:?}", other),
+        ServerMessage::SessionAttached { .. } => {}
+        other => panic!("expected SessionAttached, got {:?}", other),
     }
-
-    // conn2 显式接管后再 attach：conn1 的终端被剥离（takeover），attach 抢占桌面
-    state.handle_client_message(conn2, &ClientMessage::ControllerTakeover);
-    assert_eq!(recv_controller_changed(&mut rx1).await, conn2.to_string());
-    let _ = recv_controller_changed(&mut rx2).await; // 接管确认
-
-    state.handle_client_message(
-        conn2,
-        &ClientMessage::SessionAttach { id: "a2".into(), cols: 100, rows: 30 },
-    );
     // 旧持有者收到 taken-over 广播（遮罩 + 接管回来按钮），不再是 detached
     match recv_timeout(&mut rx1).await {
         ServerMessage::RpcEvent { name, payload } => {
@@ -562,10 +551,6 @@ async fn RemoteState_Attach_抢占其他远程连接时旧连接收到遮罩广�
             assert_eq!(payload["id"], "a2");
         }
         other => panic!("expected RpcEvent(session-taken-over), got {:?}", other),
-    }
-    match recv_timeout(&mut rx2).await {
-        ServerMessage::SessionAttached { .. } => {}
-        other => panic!("expected SessionAttached, got {:?}", other),
     }
 
     // 旧持有者保留订阅：数据层继续同步（被接管 = 暂时不显示，不是断流）
@@ -616,7 +601,6 @@ async fn RemoteState_Attach_主动detach归还会话() {
         &ClientMessage::SessionAttach { id: "a4".into(), cols: 80, rows: 24 },
     );
     let _ = recv_timeout(&mut rx).await; // attached
-    let _ = recv_controller_changed(&mut rx).await; // attach 自动持有
 
     state.handle_client_message(conn, &ClientMessage::SessionDetach { id: "a4".into() });
     match recv_timeout(&mut rx).await {
@@ -641,7 +625,6 @@ async fn RemoteState_Attach_连接断开自动归还会话() {
         &ClientMessage::SessionAttach { id: "a5".into(), cols: 80, rows: 24 },
     );
     let _ = recv_timeout(&mut rx).await; // attached
-    let _ = recv_controller_changed(&mut rx).await; // attach 自动持有
 
     // 断连 → 自动归还
     state.remove_conn(conn);
@@ -669,13 +652,15 @@ async fn RemoteState_Attach_桌面claim收回并通知手机() {
         &ClientMessage::SessionAttach { id: "a6".into(), cols: 80, rows: 24 },
     );
     let _ = recv_timeout(&mut rx).await; // attached
-    let _ = recv_controller_changed(&mut rx).await; // attach 自动持有
 
-    // 桌面接管
+    // 桌面接管：手机收到 taken-over 遮罩（不是 detached，Tab 不置 stopped）
     state.claim("a6");
     match recv_timeout(&mut rx).await {
-        ServerMessage::SessionDetached { reason, .. } => assert_eq!(reason, "desktop"),
-        other => panic!("expected SessionDetached, got {:?}", other),
+        ServerMessage::RpcEvent { name, payload } => {
+            assert_eq!(name, "session-taken-over");
+            assert_eq!(payload["id"], "a6");
+        }
+        other => panic!("expected RpcEvent(session-taken-over), got {:?}", other),
     }
 
     // 手机输入不再有效（无消息回报、不 panic 即可）
@@ -683,6 +668,16 @@ async fn RemoteState_Attach_桌面claim收回并通知手机() {
         conn,
         &ClientMessage::PtyInput { id: "a6".into(), data: "x".into() },
     );
+
+    // 遮罩上「接管回来」= 重新 attach，可立即抢回
+    state.handle_client_message(
+        conn,
+        &ClientMessage::SessionAttach { id: "a6".into(), cols: 90, rows: 25 },
+    );
+    match recv_timeout(&mut rx).await {
+        ServerMessage::SessionAttached { id, .. } => assert_eq!(id, "a6"),
+        other => panic!("expected SessionAttached after claim back, got {:?}", other),
+    }
 }
 
 #[tokio::test]
@@ -696,7 +691,6 @@ async fn RemoteState_Attach_会话退出时清理() {
         &ClientMessage::SessionAttach { id: "a7".into(), cols: 80, rows: 24 },
     );
     let _ = recv_timeout(&mut rx).await; // attached
-    let _ = recv_controller_changed(&mut rx).await; // attach 自动持有
 
     state.remove_pty("a7");
     match recv_timeout(&mut rx).await {
@@ -809,6 +803,8 @@ async fn RemoteState_SessionKillQuiet_不广播closed() {
                 );
                 // 其他测试的串扰广播，跳过
             }
+            // 全局实例上并行 gateway 测试的成员注销会广播 Detached（串扰，跳过）
+            Ok(Some(ServerMessage::SessionDetached { .. })) => continue,
             Ok(other) => panic!("unexpected message: {:?}", other),
         }
     }
@@ -992,146 +988,149 @@ async fn Rpc_RenameSession_桌面事件半链emitViaHook() {
     crate::remote_state::clear_event_hook();
 }
 
-// ==================== 全局控制权（设备互斥）规则矩阵 ====================
+// ==================== 会话控制权（per-session active）规则矩阵 ====================
 
-/// attach 在无人持有时自动获得控制权并广播 controller-changed
+/// attach 即抢占式接管：后 attach 优先，旧持有者收 taken-over 并保留订阅
 #[tokio::test]
-async fn Controller_Attach无人时自动持有并广播() {
-    let state = RemoteState::new();
-    state.register_pty("pc1", "claude", "/tmp");
-    let (conn_a, mut rx_a) = setup_conn(&state);
-
-    assert_eq!(state.controller(), None);
-    state.handle_client_message(
-        conn_a,
-        &ClientMessage::SessionAttach { id: "pc1".into(), cols: 80, rows: 24 },
-    );
-    assert_eq!(state.controller(), Some(crate::remote_state::ControllerHolder::Remote(conn_a)));
-    let _ = recv_timeout(&mut rx_a).await; // SessionAttached 先入队
-    assert_eq!(recv_controller_changed(&mut rx_a).await, conn_a.to_string());
-}
-
-/// attach 不能抢占：他人持有时被拒（SessionAttachDenied），不转移控制权
-#[tokio::test]
-async fn Controller_Attach他人持有被拒() {
+async fn Controller_Attach即抢占_旧持有者收takenOver() {
     let state = RemoteState::new();
     state.register_pty("pc2", "claude", "/tmp");
     let (conn_a, mut rx_a) = setup_conn(&state);
     let (conn_b, mut rx_b) = setup_conn(&state);
 
-    // A 先持有（B 旁观：收到 taken-over + controller-changed）
+    // A 先 attach（old=Desktop → 旁观者 B 收到 taken-over 广播，先消化）
     state.handle_client_message(
         conn_a,
         &ClientMessage::SessionAttach { id: "pc2".into(), cols: 80, rows: 24 },
     );
     let _ = recv_timeout(&mut rx_a).await; // SessionAttached
-    let _ = recv_controller_changed(&mut rx_a).await;
-    let _ = recv_controller_changed(&mut rx_b).await; // B 消化 A 持有的广播
+    let _ = recv_rpc_event(&mut rx_b, "session-taken-over").await; // B 旁观帧
+    assert!(state.is_remote_active("pc2"));
 
-    // B attach 被拒
+    // B attach 同一会话：成功（抢占），A 收 taken-over（广播排除接管者 B）
     state.handle_client_message(
         conn_b,
         &ClientMessage::SessionAttach { id: "pc2".into(), cols: 80, rows: 24 },
     );
     match recv_timeout(&mut rx_b).await {
-        ServerMessage::SessionAttachDenied { id, reason } => {
-            assert_eq!(id, "pc2");
-            assert!(reason.contains("controller"));
-        }
-        other => panic!("expected SessionAttachDenied, got {:?}", other),
+        ServerMessage::SessionAttached { id, .. } => assert_eq!(id, "pc2"),
+        other => panic!("expected SessionAttached, got {:?}", other),
     }
-    assert_eq!(state.controller(), Some(crate::remote_state::ControllerHolder::Remote(conn_a)), "控制权不应被 attach 抢走");
+    assert_eq!(recv_rpc_event(&mut rx_a, "session-taken-over").await, "pc2");
+    assert!(state.is_remote_active("pc2"), "active 仍在远程（现为 B）");
+
+    // active 归属精确断言：claim 只通知当前持有者（B）taken-over，A 不再收到任何帧
+    state.claim("pc2");
+    assert_eq!(recv_rpc_event(&mut rx_b, "session-taken-over").await, "pc2");
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(150), rx_a.recv())
+            .await
+            .is_err(),
+        "A（旧持有者）不应再收到该会话的通知"
+    );
 }
 
-/// takeover：转移控制权 + 剥离旧持有者终端归属（active 归还桌面）+ 广播
+/// 核心收益场景：两个连接各 attach 不同会话，互不干扰（全局控制权已退役）
 #[tokio::test]
-async fn Controller_Takeover转移并剥离终端归属() {
+async fn Controller_双连接各attach不同会话互不干扰() {
     let state = RemoteState::new();
-    state.register_pty("pc3", "claude", "/tmp");
+    state.register_pty("ps1", "claude", "/tmp");
+    state.register_pty("ps2", "claude", "/tmp");
     let (conn_a, mut rx_a) = setup_conn(&state);
     let (conn_b, mut rx_b) = setup_conn(&state);
 
-    // A attach 持有终端与控制权（B 旁观收 taken-over + controller-changed）
+    state.handle_client_message(
+        conn_a,
+        &ClientMessage::SessionAttach { id: "ps1".into(), cols: 80, rows: 24 },
+    );
+    let _ = recv_timeout(&mut rx_a).await; // SessionAttached(ps1)
+    let _ = recv_rpc_event(&mut rx_b, "session-taken-over").await; // B 旁观 ps1 被抢
+    state.handle_client_message(
+        conn_b,
+        &ClientMessage::SessionAttach { id: "ps2".into(), cols: 80, rows: 24 },
+    );
+    match recv_timeout(&mut rx_b).await {
+        ServerMessage::SessionAttached { id, .. } => assert_eq!(id, "ps2"),
+        other => panic!("expected SessionAttached(ps2), got {:?}", other),
+    }
+    // old=Desktop 的 attach 广播 taken-over 给除接管者外的全体（A 也会收到 ps2 的，
+    // 前端按 ptyId 定位 Tab，A 未打开 ps2 → no-op），消化掉防串扰后续断言
+    let _ = recv_rpc_event(&mut rx_a, "session-taken-over").await;
+
+    assert!(state.is_remote_active("ps1"), "B attach ps2 不应影响 A 对 ps1 的持有");
+    assert!(state.is_remote_active("ps2"));
+
+    // active 归属精确断言：claim(ps2) 只通知 B（ps2 持有者），A 只在 claim(ps1) 时收到
+    state.claim("ps2");
+    assert_eq!(recv_rpc_event(&mut rx_b, "session-taken-over").await, "ps2");
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(150), rx_a.recv())
+            .await
+            .is_err(),
+        "claim(ps2) 不应通知 A"
+    );
+    state.claim("ps1");
+    assert_eq!(recv_rpc_event(&mut rx_a, "session-taken-over").await, "ps1");
+}
+
+/// 旧版手机缓存 UI 仍会发 controller.takeover：no-op 静默忽略，不改变任何状态
+#[tokio::test]
+async fn Controller_TakeoverNoOp_不改变任何状态() {
+    let state = RemoteState::new();
+    state.register_pty("pc3", "claude", "/tmp");
+    let (conn_a, mut rx_a) = setup_conn(&state);
+    let (conn_b, _rx_b) = setup_conn(&state);
+
     state.handle_client_message(
         conn_a,
         &ClientMessage::SessionAttach { id: "pc3".into(), cols: 80, rows: 24 },
     );
     let _ = recv_timeout(&mut rx_a).await; // SessionAttached
-    let _ = recv_controller_changed(&mut rx_a).await;
-    let _ = recv_controller_changed(&mut rx_b).await;
-    assert_eq!(state.controller(), Some(crate::remote_state::ControllerHolder::Remote(conn_a)));
-    assert!(state.is_remote_active("pc3"));
 
-    // B takeover：控制权转移 + 终端归还桌面
+    // B 发旧 takeover：A 的 active 不被剥离、无任何广播
     state.handle_client_message(conn_b, &ClientMessage::ControllerTakeover);
-    assert_eq!(state.controller(), Some(crate::remote_state::ControllerHolder::Remote(conn_b)));
-    assert!(!state.is_remote_active("pc3"), "旧持有者终端应被剥离归还桌面");
-
-    // A 收到 controller-changed（不再是自己 → 显示全局遮罩）
-    assert_eq!(recv_controller_changed(&mut rx_a).await, conn_b.to_string());
-    // B 也收到（接管确认 → 解锁 + 全量刷新）
-    assert_eq!(recv_controller_changed(&mut rx_b).await, conn_b.to_string());
+    assert!(state.is_remote_active("pc3"), "takeover no-op 不应剥离 A 的终端");
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(150), rx_a.recv())
+            .await
+            .is_err(),
+        "takeover no-op 不应产生任何广播"
+    );
 }
 
-/// 持有者断连：控制权释放（广播空 id），终端归还桌面
+/// 持有者断连：该连接接管的会话自动归还桌面（active → Desktop）
 #[tokio::test]
-async fn Controller_持有者断连释放() {
+async fn Controller_持有者断连归还终端() {
     let state = RemoteState::new();
     state.register_pty("pc4", "claude", "/tmp");
     let (conn_a, mut rx_a) = setup_conn(&state);
-    let (conn_b, mut rx_b) = setup_conn(&state);
 
     state.handle_client_message(
         conn_a,
         &ClientMessage::SessionAttach { id: "pc4".into(), cols: 80, rows: 24 },
     );
     let _ = recv_timeout(&mut rx_a).await; // SessionAttached
-    let _ = recv_controller_changed(&mut rx_a).await;
-    let _ = recv_controller_changed(&mut rx_b).await; // B 消化 A 持有的广播
+    assert!(state.is_remote_active("pc4"));
 
     state.remove_conn(conn_a);
-    assert_eq!(state.controller(), None, "断连后控制权应释放");
-    assert!(!state.is_remote_active("pc4"));
+    assert!(!state.is_remote_active("pc4"), "断连后终端应归还桌面");
 
-    // B 收到释放广播（空 id）
+    // 断连后另一端可立即重新 attach 抢回
+    let (conn_b, mut rx_b) = setup_conn(&state);
+    state.handle_client_message(
+        conn_b,
+        &ClientMessage::SessionAttach { id: "pc4".into(), cols: 80, rows: 24 },
+    );
     match recv_timeout(&mut rx_b).await {
-        ServerMessage::RpcEvent { name, payload } => {
-            assert_eq!(name, "controller-changed");
-            assert_eq!(payload["id"], "");
-        }
-        other => panic!("expected controller-changed release, got {:?}", other),
+        ServerMessage::SessionAttached { id, .. } => assert_eq!(id, "pc4"),
+        other => panic!("expected SessionAttached after reclaim, got {:?}", other),
     }
+    assert!(state.is_remote_active("pc4"));
 }
 
-/// takeover 后旧持有者的终端输入被拒（controller 不匹配，服务端兜底）
+/// hello.ok 的 controller 字段恒 null（per-session 化后仅兼容保留，前端弃用）
 #[tokio::test]
-async fn Controller_旧持有者输入被拒() {
-    let state = RemoteState::new();
-    state.register_pty("pc5", "claude", "/tmp");
-    let (conn_a, mut rx_a) = setup_conn(&state);
-    let (conn_b, _rx_b) = setup_conn(&state);
-
-    // A attach（终端 + 控制权都是 A）
-    state.handle_client_message(
-        conn_a,
-        &ClientMessage::SessionAttach { id: "pc5".into(), cols: 80, rows: 24 },
-    );
-    let _ = recv_timeout(&mut rx_a).await;
-    let _ = recv_timeout(&mut rx_a).await;
-
-    // B takeover（A 终端被剥离）；此后 A 的输入应被拒（无 panic 即可——
-    // manager 未初始化时不写入，条件判断不通过走 debug log 分支）
-    state.handle_client_message(conn_b, &ClientMessage::ControllerTakeover);
-    state.handle_client_message(
-        conn_a,
-        &ClientMessage::PtyInput { id: "pc5".into(), data: "echo hi".into() },
-    );
-    assert_eq!(state.controller(), Some(crate::remote_state::ControllerHolder::Remote(conn_b)));
-}
-
-/// hello.ok 携带 conn_id / controller / revision（前端遮罩与基线判定依据）
-#[tokio::test]
-async fn Controller_HelloOk携带控制权快照() {
+async fn Controller_HelloOk控制权恒null() {
     let state = RemoteState::new();
     let (conn_a, mut rx_a) = setup_conn(&state);
 
@@ -1143,7 +1142,7 @@ async fn Controller_HelloOk携带控制权快照() {
     match recv_timeout(&mut rx_a).await {
         ServerMessage::HelloOk { conn_id, controller, revision, .. } => {
             assert_eq!(conn_id, conn_a);
-            assert_eq!(controller, None);
+            assert_eq!(controller, None, "controller 字段必须恒 null（兼容契约）");
             assert_eq!(revision, 0);
         }
         other => panic!("expected HelloOk, got {:?}", other),
@@ -1257,13 +1256,8 @@ async fn RemoteState_Hello_ViaRelay_校验失败后拒绝后续消息() {
         res
     );
 
-    // 恶意客户端无视错误继续接管：不得获得控制权
+    // 恶意客户端无视错误继续发消息：认证门闩全部忽略（不产生任何回复）
     state.handle_client_message(conn, &ClientMessage::ControllerTakeover);
-    assert_ne!(
-        state.controller(),
-        Some(crate::remote_state::ControllerHolder::Remote(conn)),
-        "未认证连接不得通过后续消息获得控制权"
-    );
     // 后续读类消息同样被忽略（不产生任何回复）
     state.handle_client_message(conn, &ClientMessage::SessionsList);
     let res = tokio::time::timeout(std::time::Duration::from_millis(150), rx.recv()).await;
@@ -1295,11 +1289,11 @@ async fn Rpc_GetAppConfig_全链路应答() {
     }
 }
 
-/// update_app_config 写命令全链路 + 成功后自动持有 controller（复现接管风暴源头）。
+/// update_app_config 写命令全链路（写命令直通，无控制权互斥）。
 /// 落盘必须隔离到临时目录：走真实命令链路意味着真实写 ~/.cc-box/config.json
 /// （曾把各开发者的 theme 污染成 dark）
 #[tokio::test]
-async fn Rpc_UpdateAppConfig_写命令自动持有() {
+async fn Rpc_UpdateAppConfig_写命令全链路直通() {
     // GUI_CONFIG_DIR_OVERRIDE 全局互斥：与其他配置隔离用户并行会互相清除
     let _cfg_lock = super::CONFIG_DIR_TEST_LOCK.lock();
     // 真实 ~/.cc-box/config.json 快照：测试结束前后必须字节一致（污染守卫）
@@ -1311,10 +1305,8 @@ async fn Rpc_UpdateAppConfig_写命令自动持有() {
     // GUI 配置目录指到独立临时目录（RAII Drop 还原覆盖并清理）
     let _cfg_guard = TestConfigDirGuard::new("update-app-config");
 
-    // dispatch 走全局 REMOTE_STATE 的 broadcast；持有逻辑在 handle_rpc 走全局，
-    // 因此在全局实例上验证（先记录原 controller 以便还原）
+    // dispatch 走全局 REMOTE_STATE 的 broadcast，因此在全局实例上验证
     let (conn, mut rx) = setup_conn(&crate::remote_state::REMOTE_STATE);
-    let before = crate::remote_state::REMOTE_STATE.controller();
 
     crate::rpc_dispatch::handle_rpc(
         conn,
@@ -1322,12 +1314,12 @@ async fn Rpc_UpdateAppConfig_写命令自动持有() {
         "update_app_config",
         &serde_json::json!({ "updates": { "theme": "dark" } }),
     );
-    // 广播（state-changed / controller-changed）先于 RpcResult 入队，循环收到为止
+    // state-changed 广播先于 RpcResult 入队，循环收到为止
     let result = loop {
         match recv_timeout(&mut rx).await {
             ServerMessage::RpcResult { id, ok, error, .. } => {
                 assert_eq!(id, 4243);
-                assert!(ok, "update_app_config 应成功: {:?}", error);
+                assert!(ok, "update_app_config 应成功（写命令直通无控制权）: {:?}", error);
                 break;
             }
             ServerMessage::RpcEvent { .. } => continue,
@@ -1335,10 +1327,6 @@ async fn Rpc_UpdateAppConfig_写命令自动持有() {
         }
     };
     let _ = result;
-    // 成功后无人持有时自动成为 controller
-    if before.is_none() {
-        assert_eq!(crate::remote_state::REMOTE_STATE.controller(), Some(crate::remote_state::ControllerHolder::Remote(conn)));
-    }
     // 命令确实落盘——但落在隔离目录（而非真实 ~/.cc-box）
     let isolated = std::fs::read_to_string(_cfg_guard.0.join("config.json"))
         .expect("隔离 config.json 应已落盘");
@@ -1359,105 +1347,77 @@ async fn Rpc_UpdateAppConfig_写命令自动持有() {
 /// 把 GUI 配置目录临时指到独立临时目录（RAII Drop 还原覆盖并清理）。
 /// 全局覆盖与并行测试：当前仅 update_app_config 全链路测试需要写隔离；
 /// 并行只读测试（Rpc_GetAppConfig）可能短暂读到隔离目录的默认配置，无害
-/// 桌面显式接管（controller_takeover command）：桌面获得控制权 + 剥离远程终端
-/// + 广播（hello.ok 视角 controller=Some(0)=桌面；远程写操作被拒）
+/// 桌面 claim（终端接管回来）：per-session 抢占——收回该终端并通知旧持有者
 #[tokio::test]
-async fn Controller_桌面接管获得控制权并拒绝远程写() {
-    let state = RemoteState::new();
-    state.register_pty("pd1", "claude", "/tmp");
-    let (conn_a, mut rx_a) = setup_conn(&state);
-
-    // 手机 attach 持有
-    state.handle_client_message(
-        conn_a,
-        &ClientMessage::SessionAttach { id: "pd1".into(), cols: 80, rows: 24 },
-    );
-    let _ = recv_timeout(&mut rx_a).await; // attached
-    let _ = recv_controller_changed(&mut rx_a).await;
-    assert!(state.is_remote_active("pd1"));
-
-    // 桌面接管：控制权归桌面 + 远程终端剥离
-    state.desktop_takeover();
-    assert_eq!(state.controller(), Some(crate::remote_state::ControllerHolder::Desktop));
-    assert!(!state.is_remote_active("pd1"));
-    // 广播 id 标签为 "desktop"
-    assert_eq!(recv_controller_changed(&mut rx_a).await, "desktop");
-
-    // 桌面持有期间远程写操作被拒
-    assert!(state.controller_gate(conn_a).is_err());
-
-    // 幂等：再次桌面接管不重复广播（无新消息到达）
-    state.desktop_takeover();
-    assert!(
-        tokio::time::timeout(std::time::Duration::from_millis(150), rx_a.recv())
-            .await
-            .is_err(),
-        "重复接管不应再广播"
-    );
-}
-
-/// 桌面 claim（终端接管回来）同时获得全局控制权
-#[tokio::test]
-async fn Controller_桌面claim同时获得控制权() {
+async fn Controller_桌面claim收回单终端并通知持有者() {
     let state = RemoteState::new();
     state.register_pty("pd2", "claude", "/tmp");
+    state.register_pty("pd3", "claude", "/tmp");
     let (conn_a, mut rx_a) = setup_conn(&state);
 
+    // A 同时持有两个终端（attach 两次）
     state.handle_client_message(
         conn_a,
         &ClientMessage::SessionAttach { id: "pd2".into(), cols: 80, rows: 24 },
     );
-    let _ = recv_timeout(&mut rx_a).await; // attached
-    let _ = recv_controller_changed(&mut rx_a).await;
+    let _ = recv_timeout(&mut rx_a).await; // attached(pd2)
+    state.handle_client_message(
+        conn_a,
+        &ClientMessage::SessionAttach { id: "pd3".into(), cols: 80, rows: 24 },
+    );
+    let _ = recv_timeout(&mut rx_a).await; // attached(pd3)
 
+    // claim 单个终端：只收回 pd2，pd3 仍是 A 的（无全局剥离）
     state.claim("pd2");
-    assert_eq!(state.controller(), Some(crate::remote_state::ControllerHolder::Desktop));
-    // claim 的 reclaimed 走全局 emit_event（独立实例收不到），controller-changed 走 self
-    assert_eq!(recv_controller_changed(&mut rx_a).await, "desktop");
+    assert!(!state.is_remote_active("pd2"));
+    assert!(state.is_remote_active("pd3"), "claim 是会话级操作，不应波及其他终端");
+    match recv_timeout(&mut rx_a).await {
+        ServerMessage::RpcEvent { name, payload } => {
+            assert_eq!(name, "session-taken-over");
+            assert_eq!(payload["id"], "pd2");
+        }
+        other => panic!("expected RpcEvent(session-taken-over), got {:?}", other),
+    }
 }
 
 /// revision 取号与广播入队必须同锁窗口（保序）：跨线程并发 emit_state_changed
-/// 与 controller takeover 时，若取号（bump_revision）与入队（broadcast_event）
-/// 分属两个锁窗口，后取号的事件可能先入队——浏览器端 filterStaleEvent 按
-/// revision 单调过滤，低版本后到即被当旧事件丢弃（遮罩/刷新状态永久丢失）。
+/// 时，若取号（bump_revision）与入队（broadcast_event）分属两个锁窗口，
+/// 后取号的事件可能先入队——浏览器端 filterStaleEvent 按 revision 单调过滤，
+/// 低版本后到即被当旧事件丢弃（刷新状态永久丢失）。
 /// 回归：两线程交错广播，同一连接到达序的 revision 必须严格递增
 #[test]
 fn Controller_并发广播到达序revision严格递增() {
+    // emit_state_changed 走全局 EVENT_HOOK：与其他设置 hook 的测试串行，
+    // 防止本测试的广播帧混入它们的断言（HOOK_TEST_LOCK 全局互斥）
+    let _hook_lock = crate::tests::HOOK_TEST_LOCK.lock();
     let state = std::sync::Arc::new(RemoteState::new());
     let (tx, mut rx) = mpsc::channel(8192);
-    // 只注册一个接收连接（每帧广播对每个连接各入队一份，双连接会成对到达）；
-    // takeover 在两连接 id 间交替（transfer 无幂等检查，每次都触发广播），
-    // conn_b 不注册 channel 也能发消息——广播仍只入队 conn_a 一份
+    // 只注册一个接收连接（每帧广播对每个连接各入队一份，双连接会成对到达）
     let conn_a = crate::remote_state::next_conn_id();
-    let conn_b = crate::remote_state::next_conn_id();
     state.add_conn(conn_a, tx, false);
 
     const N: usize = 2000;
-    // conn_b 须注册连接（认证门闩会忽略未注册连接的消息）
-    let (tx_b, _rx_b) = mpsc::channel(8);
-    state.add_conn(conn_b, tx_b, false);
     let s1 = state.clone();
-    let writer = std::thread::spawn(move || {
+    let writer1 = std::thread::spawn(move || {
         for _ in 0..N {
             s1.emit_state_changed(crate::rpc_dispatch::StateSection::Config);
         }
     });
     let s2 = state.clone();
-    let taker = std::thread::spawn(move || {
-        for i in 0..N {
-            let who = if i % 2 == 0 { conn_a } else { conn_b };
-            s2.handle_client_message(who, &ClientMessage::ControllerTakeover);
+    let writer2 = std::thread::spawn(move || {
+        for _ in 0..N {
+            s2.emit_state_changed(crate::rpc_dispatch::StateSection::Providers);
         }
     });
 
-    writer.join().unwrap();
-    taker.join().unwrap();
+    writer1.join().unwrap();
+    writer2.join().unwrap();
 
     let mut last: u64 = 0;
     let mut count = 0;
     while let Ok(msg) = rx.try_recv() {
         if let ServerMessage::RpcEvent { name, payload } = msg {
-            if name == "state-changed" || name == "controller-changed" {
+            if name == "state-changed" {
                 let rev: u64 = payload["data"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0);
                 assert!(
                     rev > last,
@@ -1527,7 +1487,7 @@ async fn RemoteState_Attach_清除pending并广播已读() {
         "attach 后服务端 pending 应清 false"
     );
 
-    // 其他端收到 session-viewed 广播（可能伴随 controller-changed，循环找目标）
+    // 其他端收到 session-viewed 广播（途中可能伴随其他 RpcEvent，循环找目标）
     let mut viewed = false;
     for _ in 0..4 {
         match recv_timeout(&mut rx2).await {
@@ -1578,23 +1538,13 @@ async fn RemoteState_Attach_清除pending并广播已读() {
     assert!(state.session_list().iter().any(|s| s.id == "t-vw" && s.pending));
 
     // ① 只读订阅（subscribe）不是"打开"：pending 保持
+    //（原负向分支 ②「他人持权 attach 被拒」已随全局控制权退役：attach 即抢占即打开）
     state.handle_client_message(_conn2, &ClientMessage::SessionSubscribe { id: "t-vw".into() });
     assert!(
         state.session_list().iter().any(|s| s.id == "t-vw" && s.pending),
         "只读订阅不应清除 pending"
     );
     state.handle_client_message(_conn2, &ClientMessage::SessionUnsubscribed { id: "t-vw".into() });
-
-    // ② 他人持有控制权时 attach 被拒：pending 保持
-    state.handle_client_message(conn1, &ClientMessage::ControllerTakeover);
-    state.handle_client_message(
-        _conn2,
-        &ClientMessage::SessionAttach { id: "t-vw".into(), cols: 80, rows: 24 },
-    );
-    assert!(
-        state.session_list().iter().any(|s| s.id == "t-vw" && s.pending),
-        "attach 被拒（他人持权）不应清除 pending"
-    );
 }
 
 /// 票据受限连接：只放行该文件的下载分块与心跳，其余消息全部拒绝

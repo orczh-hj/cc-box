@@ -1,9 +1,8 @@
 /**
- * remote-transport 控制权与 revision 机制测试
+ * remote-transport 连接与 revision 机制测试
  *
- * 覆盖：hello.ok 快照（connId/controllerId/revision 基线）、controller-changed
- * 更新与接管确认（remote-connected 全量重同步语义）、state-changed 的
- * revision 单调过滤（旧事件不覆盖新状态）。
+ * 覆盖：hello.ok 快照（connId/revision 基线）、state-changed 的
+ * revision 单调过滤（旧事件不覆盖新状态）与跳变重同步。
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import type { Unlisten } from '../../src/api/transport'
@@ -68,58 +67,23 @@ describe('remote-transport 控制权与 revision', () => {
     remoteTransport.connectWithToken('test-token')
     const ws = lastWs()
     ws.serverOpen()
-    ws.serverSend({ type: 'hello.ok', ver: 1, deviceName: 'D', connId: 7, controller: 7, revision: 3, ...helloOk })
+    ws.serverSend({ type: 'hello.ok', ver: 1, deviceName: 'D', connId: 7, revision: 3, ...helloOk })
     un()
     return ws
   }
 
-  // hello.ok 快照：connId/controllerLabel 与 revision 基线
+  // hello.ok 快照：connId 与 revision 基线（per-session 化后无 controller 字段）
   it('RemoteTransport_HelloOk快照_001', async () => {
     const ws = await connect()
     expect(remoteTransport.connId).toBe(7)
-    expect(remoteTransport.controllerLabel).toBe('7')
     // hello 后应已发出 ping 之前的事件；连接保持
     expect(ws.readyState).toBe(1)
   })
 
-  // hello 时无人持有：controllerLabel 为 ''（无遮罩）
-  it('RemoteTransport_无人持有_002', async () => {
+  // 旧桌面端 hello.ok 携带 controller 字段（deprecated）：解析不受影响、无人消费
+  it('RemoteTransport_旧帧controller字段被忽略_002', async () => {
     await connect({ controller: null, connId: 9, revision: 0 })
     expect(remoteTransport.connId).toBe(9)
-    expect(remoteTransport.controllerLabel).toBe('')
-  })
-
-  // 桌面持有（controller=0 保留值）：标签归一化为 'desktop'（遮罩判定用）
-  it('RemoteTransport_桌面持有标签_008', async () => {
-    await connect({ controller: 0, connId: 5, revision: 1 })
-    expect(remoteTransport.controllerLabel).toBe('desktop')
-  })
-
-  // controller-changed 更新控制者并分发给订阅者（遮罩判定依据）
-  it('RemoteTransport_ControllerChanged更新_003', async () => {
-    const ws = await connect({ controller: null, connId: 5, revision: 1 })
-    const received: string[] = []
-    const un = await remoteTransport.listen<{ id: string }>('controller-changed', ({ id }) => received.push(id))
-
-    ws.serverSend({ type: 'rpc.event', name: 'controller-changed', payload: { id: '12', data: '2' } })
-    expect(remoteTransport.controllerLabel).toBe('12')
-    expect(received).toEqual(['12'])
-    un()
-  })
-
-  // 接管确认（controller 变为自己）→ 按"重连"语义 dispatch remote-connected（全量重同步）
-  it('RemoteTransport_接管确认触发全量重同步_004', async () => {
-    const ws = await connect({ controller: null, connId: 5, revision: 1 })
-    let resync = 0
-    const un = await remoteTransport.listen('remote-connected', () => resync++)
-
-    // 他人持有 → 自己（接管成功）
-    ws.serverSend({ type: 'rpc.event', name: 'controller-changed', payload: { id: '8', data: '2' } })
-    expect(resync).toBe(0)
-    ws.serverSend({ type: 'rpc.event', name: 'controller-changed', payload: { id: '5', data: '3' } })
-    expect(resync).toBe(1)
-    expect(remoteTransport.controllerLabel).toBe('5')
-    un()
   })
 
   // 切换设备：旧 socket 必须被摘除回调并关闭，否则其 onclose 会按新 token
@@ -136,21 +100,9 @@ describe('remote-transport 控制权与 revision', () => {
     expect(ws1.onopen).toBeNull()
   })
 
-  // 释放（空 id）：controllerId 置 null，不触发重同步
-  it('RemoteTransport_释放广播_005', async () => {
-    const ws = await connect({ controller: 8, connId: 5, revision: 4 })
-    let resync = 0
-    const un = await remoteTransport.listen('remote-connected', () => resync++)
-
-    ws.serverSend({ type: 'rpc.event', name: 'controller-changed', payload: { id: '', data: '5' } })
-    expect(remoteTransport.controllerLabel).toBe('')
-    expect(resync).toBe(0)
-    un()
-  })
-
   // revision 单调过滤：旧版本（≤ 已应用）的 state-changed 被丢弃
   it('RemoteTransport_旧状态事件被过滤_006', async () => {
-    const ws = await connect({ controller: null, connId: 5, revision: 10 })
+    const ws = await connect({ connId: 5, revision: 10 })
     const sections: string[] = []
     const un = await remoteTransport.listen<{ id: string }>('state-changed', ({ id }) => sections.push(id))
 
@@ -168,7 +120,7 @@ describe('remote-transport 控制权与 revision', () => {
 
   // 版本跳变（gap）：中间事件可能丢失 → 触发 state-resync-needed 权威重拉，且跳变事件本身不丢弃
   it('RemoteTransport_版本跳变触发重同步_009', async () => {
-    const ws = await connect({ controller: null, connId: 5, revision: 10 })
+    const ws = await connect({ connId: 5, revision: 10 })
     const sections: string[] = []
     let resync = 0
     const un1 = await remoteTransport.listen<{ id: string }>('state-changed', ({ id }) => sections.push(id))
@@ -186,9 +138,32 @@ describe('remote-transport 控制权与 revision', () => {
     un2()
   })
 
+  // 同 origin 切换设备：remote-connected 必须带 deviceChanged=true，
+  // 上层据此丢弃旧设备 Tabs；首次连接/同设备重连为 false
+  it('RemoteTransport_设备切换标记_010', async () => {
+    const flags: Array<boolean | undefined> = []
+    const un = await remoteTransport.listen<{ deviceChanged?: boolean }>(
+      'remote-connected',
+      (p) => flags.push(p?.deviceChanged),
+    )
+    const handshake = (token: string) => {
+      remoteTransport.connectWithToken(token)
+      const ws = lastWs()
+      ws.serverOpen()
+      ws.serverSend({ type: 'hello.ok', ver: 1, deviceName: 'D', connId: 7, revision: 3 })
+    }
+    // 先建立基线（transport 是模块单例，可能残留前序用例的设备 id）
+    handshake('token-a')
+    flags.length = 0
+    handshake('token-a') // 同一设备重连
+    handshake('token-b') // 切换设备
+    expect(flags).toEqual([false, true])
+    un()
+  })
+
   // sessions 全量应答推进 revision 基线（防其后旧事件覆盖全量结果）
   it('RemoteTransport_Sessions推进基线_007', async () => {
-    const ws = await connect({ controller: null, connId: 5, revision: 1 })
+    const ws = await connect({ connId: 5, revision: 1 })
     const sections: string[] = []
     const un = await remoteTransport.listen<{ id: string }>('state-changed', ({ id }) => sections.push(id))
 
@@ -215,7 +190,7 @@ describe('remote-transport sessionKill quiet 参数', () => {
     remoteTransport.connectWithToken('test-token')
     const ws = lastWs()
     ws.serverOpen()
-    ws.serverSend({ type: 'hello.ok', ver: 1, deviceName: 'D', connId: 7, controller: 7, revision: 3 })
+    ws.serverSend({ type: 'hello.ok', ver: 1, deviceName: 'D', connId: 7, revision: 3 })
   }
 
   function sentKills(): Array<Record<string, unknown>> {
@@ -252,7 +227,6 @@ describe('remote-transport 输出序号与缺口', () => {
       ver: 1,
       deviceName: 'D',
       connId: 1,
-      controller: null,
       revision: 0,
     })
 
@@ -287,7 +261,6 @@ describe('remote-transport 输出序号与缺口', () => {
       ver: 1,
       deviceName: 'D',
       connId: 1,
-      controller: null,
       revision: 0,
     })
 
@@ -325,7 +298,7 @@ describe('remote-transport 设备离线与 attach 拒绝（重启实测回归）
     remoteTransport.connectWithToken('test-token')
     const ws = lastWs()
     ws.serverOpen()
-    ws.serverSend({ type: 'hello.ok', ver: 1, deviceName: 'D', connId: 7, controller: 7, revision: 3, ...helloOk })
+    ws.serverSend({ type: 'hello.ok', ver: 1, deviceName: 'D', connId: 7, revision: 3, ...helloOk })
     return ws
   }
 
@@ -355,7 +328,7 @@ describe('remote-transport 设备离线与 attach 拒绝（重启实测回归）
       const ws2 = lastWs()
       expect(ws2).not.toBe(ws)
       ws2.serverOpen()
-      ws2.serverSend({ type: 'hello.ok', ver: 1, deviceName: 'D', connId: 8, controller: 8, revision: 3 })
+      ws2.serverSend({ type: 'hello.ok', ver: 1, deviceName: 'D', connId: 8, revision: 3 })
       expect(remoteTransport.connState).toBe('connected')
     } finally {
       vi.useRealTimers()
@@ -363,12 +336,12 @@ describe('remote-transport 设备离线与 attach 拒绝（重启实测回归）
   })
 
   /**
-   * Bug 回归（手机刷新终端白屏）：桌面持控制权时手机 attach 被 gate_write 拒绝，
-   * 服务端已回 session.attach.denied——前端必须分发事件（会话层置 Tab 遮罩 +
-   * 接管入口），否则 attach 悬挂、终端永久白屏。
+   * Bug 回归（手机刷新终端白屏）：服务端回 session.attach.denied（现仅
+   * session not found）——前端必须分发事件（会话层按 reason 分支处理），
+   * 否则 attach 悬挂、终端永久白屏。
    */
   it('RemoteTransport_attach被拒分发事件_002', async () => {
-    const ws = await connect({ controller: 0, connId: 9 })
+    const ws = await connect({ connId: 9 })
     const got: Array<{ id: string; reason: string }> = []
     const un = (await remoteTransport.listen('session-attach-denied', (p) => {
       got.push(p as { id: string; reason: string })
@@ -376,10 +349,10 @@ describe('remote-transport 设备离线与 attach 拒绝（重启实测回归）
     ws.serverSend({
       type: 'session.attach.denied',
       id: 'pty-1',
-      reason: 'controller held by another device',
+      reason: 'session not found',
     })
     un()
-    expect(got).toEqual([{ id: 'pty-1', reason: 'controller held by another device' }])
+    expect(got).toEqual([{ id: 'pty-1', reason: 'session not found' }])
   })
 })
 
@@ -393,7 +366,7 @@ describe('remote-transport 会话剥离分发（同类问题回归）', () => {
     remoteTransport.connectWithToken('test-token')
     const ws = lastWs()
     ws.serverOpen()
-    ws.serverSend({ type: 'hello.ok', ver: 1, deviceName: 'D', connId: 7, controller: 7, revision: 3, ...helloOk })
+    ws.serverSend({ type: 'hello.ok', ver: 1, deviceName: 'D', connId: 7, revision: 3, ...helloOk })
     return ws
   }
 

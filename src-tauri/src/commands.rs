@@ -105,30 +105,11 @@ pub async fn pty_resize(id: String, cols: u16, rows: u16) -> Result<bool, String
         .map_err(|e| e.to_string())
 }
 
-/// 桌面端接管被远程持有的会话（解除遮罩 + 收回控制权 + 获得全局控制权）
+/// 桌面端接管被远程持有的会话（per-session 抢占：解除遮罩 + 收回该终端归属）
 #[tauri::command]
 pub async fn pty_claim(id: String) -> Result<(), String> {
     crate::remote_state::REMOTE_STATE.claim(&id);
     Ok(())
-}
-
-/// 桌面端显式接管全局控制权（设备互斥：ControllerMask「接管」按钮调用；
-/// 剥离远程持有者全部终端归属并广播，桌面普通操作不触发）
-#[tauri::command]
-pub async fn controller_takeover() -> Result<(), String> {
-    crate::remote_state::REMOTE_STATE.desktop_takeover();
-    Ok(())
-}
-
-/// 当前全局控制权持有者（''=无人；'desktop'=桌面；数字串=远程连接 id）。
-/// 桌面 UI 启动/重载时错过历史 controller-changed 事件，挂载时查询补初始快照
-/// （远程端 hello.ok 自带快照，此命令作统一校准入口）
-#[tauri::command]
-pub async fn controller_status() -> Result<String, String> {
-    Ok(crate::remote_state::REMOTE_STATE
-        .controller()
-        .map(|c| c.id_label())
-        .unwrap_or_default())
 }
 
 /// 会话重命名双端同步（广播中转：Rust 不存 Tab 元数据，桌面/手机两端各自

@@ -134,42 +134,33 @@ R1 已实现消息集（ver=1；正本在 `remote/protocol/src/lib.rs` 与 `prot
 | 桌面→手机 | `rpc.event` | `{name, payload}` | 控制类事件隧道（hook-event、session-taken-over/reclaimed 等；remote-transport 映射回 Tauri 同名事件，组件零改动） |
 | 双向 | `ping` / `pong` | `{}` | 30s 心跳 |
 
-R2 已实现（控制权独占，见 6.3）：`session.attach`（接管 + ring buffer 快照）、`pty.input`、`pty.resize`、`session.detach`、`session.detached`、桌面 Tauri 事件 `session-taken-over` / `session-reclaimed`。**PTY 数据流不走 rpc**——继续走 session.create/attach/pty.input/pty.resize/PtyOutput 专用消息（attach 即订阅、单 mpsc 保序、独占语义免费）；rpc.event 仅作控制面事件隧道。
+R2 已实现（会话独占，见 6.3）：`session.attach`（接管 + ring buffer 快照）、`pty.input`、`pty.resize`、`session.detach`、`session.detached`、桌面 Tauri 事件 `session-taken-over` / `session-reclaimed`。**PTY 数据流不走 rpc**——继续走 session.create/attach/pty.input/pty.resize/PtyOutput 专用消息（attach 即订阅、单 mpsc 保序、独占语义免费）；rpc.event 仅作控制面事件隧道。
 
 桌面内部 Tauri 事件：`emit("session-taken-over")` → 前端该 tab 全遮罩"已在远程端接管"；`emit("session-reclaimed")` → 解除遮罩。
 
-### 6.3 active_view 状态机（控制权独占）
+### 6.3 active_view 状态机（per-session 会话控制权）
 
-产品决策：**同一时间只有一端能看到和控制某个终端**。状态：`Desktop | Remote(conn_id)`。
+产品决策：**冲突单位是单个会话的输入流——同一时间只有一端能操作某个终端；不同设备可同时操作不同会话**。状态：每会话独立 `SessionEntry.active: Desktop | Remote(conn_id)`（全局控制权层已退役）。
 
 ```
 远程 attach        Desktop ──► Remote(new)：resize 远程尺寸，taken-over 广播（桌面遮罩）
-远程互抢（新规则）  Remote(old) ──takeover──► Desktop ──attach──► Remote(new)：
-                   takeover 剥离旧持有者终端（reclaimed），attach 时 taken-over 广播（旧端遮罩；订阅保留）
-被接管端点"接管回来" Remote(new) ──► Remote(me)：takeover（或桌面持有期间直接 attach）+ taken-over 广播
-桌面点"接管回来"    Remote ──► Desktop：resize 桌面尺寸，reclaimed 广播（全部解除遮罩）
-远程 WS 断开       Remote ──► Desktop：自动归还 + resize 回桌面（持有权不赖在远程端上；控制权释放）
+远程互抢           Remote(old) ──attach──► Remote(new)：attach 直接抢占（后到优先），
+                   旧端收 taken-over 广播（遮罩；订阅保留）
+被接管端点"接管回来" Remote(new) ──attach──► Remote(me)：重新 attach 抢回 + taken-over 广播
+桌面点"接管回来"    Remote ──► Desktop：claim 收回单终端，旧端收 taken-over 遮罩（订阅保留），
+                   桌面清遮罩 + resize 桌面尺寸
+浏览器切 Tab        旧焦点 ──detach+subscribe──► Desktop（保留后台输出）；新 Tab ──attach──► Remote
+远程 WS 断开       Remote ──► Desktop：自动归还 + resize 回桌面（持有权不赖在远程端上）
 PTY 退出           清理状态
 ```
 
-规则：**终端级** active_view 由 attach 驱动（远程端受全局控制权约束，见 6.4）；输入/resize 只接受 active 端；**被接管只是显示层暂时遮罩——旧持有者（桌面或另一远程端）订阅保留，输出流持续同步**，遮罩上的「接管回来」按钮随时可重 attach 抢回（claim 传当前实际尺寸，重 attach 的 tail 快照跳过防重复）。`sessions.list` 与 `hook.event` 不受独占限制。
+规则：active_view 由 attach 驱动（**attach 即无条件抢占**，无前置消息）；输入/resize 只接受 active 持有连接；离散写命令（rpc write）不做控制权互斥（白名单 + revision 排序 + state-changed 广播收敛）；**被接管只是显示层暂时遮罩——旧持有者（桌面或另一远程端）订阅保留，输出流持续同步**，遮罩上的「接管回来」按钮随时可重 attach 抢回（claim 传当前实际尺寸，重 attach 的 tail 快照跳过防重复）。`sessions.list` 与 `hook.event` 不受独占限制。**规则正本见 [docs/protocol.md](docs/protocol.md)「会话控制权（per-session active）」**（唯一权威，此处仅为设计摘要）。
 
-### 6.4 全局控制权（设备互斥）
+### 6.4 revision 版本号与状态广播
 
-> **规则正本见 [docs/protocol.md](docs/protocol.md)「全局控制权」**（唯一权威，此处仅为设计摘要；attach 不能抢占、接管入口、revision 过滤与跳变重同步等细节以正本为准）
+每次状态变化（写命令广播、会话建关）+1，附在 `state-changed`（写命令统一广播，section = skills/agents/mcp/plugins/providers/config）payload 与 `hello.ok`/`sessions`；前端 `filterStaleEvent` 单调过滤旧事件防乱序覆盖，版本跳变触发 `state-resync-needed` 权威重拉兜底。写命令广播由 `#[cc_command]` 宏在函数出口自动执行（登记见 `rpc_dispatch.rs` `registry!` 宏表，守卫测试三道强制），协议细节 → [docs/protocol.md](docs/protocol.md)。
 
-产品决策：**同一时间只有一个设备可操作——桌面与所有远程设备对等参与互斥**。状态 `StateInner.controller: Option<ControllerHolder>`（`Desktop | Remote(connId)`），Rust 单点裁决，前端只展示（`ControllerMask.vue` 全局遮罩 +「接管」按钮，桌面/浏览器同构挂载）：
-
-| 场景 | 行为 |
-|---|---|
-| 无人持有 | 远程写操作（rpc 写命令/session.create/kill/attach）自动使发起者持有 + 广播 `controller-changed`；**桌面普通操作不自动持有**（不抢占远程） |
-| 他人（含桌面）持有 | 远程写操作被服务端拒绝：attach 回 `session.attach.denied`、写命令回 rpc 错误、create 回 failed；**attach 不能抢占**；桌面被遮罩时 UI 挡住操作入口 |
-| 显式接管（唯一转移方式） | 远程 `controller.takeover` 消息；桌面 `controller_takeover` command（ControllerMask「接管」按钮）与 `pty_claim`（终端「接管回来」顺带获得）。转移 + 剥离旧持有者全部终端归属（归还桌面 + resize 恢复）+ 广播；接管者以广播确认并按"重连"语义全量重同步（sessions.list 重拉 + 终端重 attach） |
-| 持有者断连 | 自动释放 + 广播空 id（其他设备遮罩消失） |
-
-配套 **revision 版本号**（`StateInner.revision`）：每次状态变化 +1，附在 `state-changed`（写命令统一广播，section = skills/agents/mcp/plugins/providers/config）/`controller-changed` payload 与 `hello.ok`/`sessions`；前端 `filterStaleEvent` 单调过滤旧事件防乱序覆盖，版本跳变触发 `state-resync-needed` 权威重拉兜底。写命令广播由 `#[cc_command]` 宏在函数出口自动执行（登记见 `rpc_dispatch.rs` `registry!` 宏表，守卫测试三道强制），协议细节 → [docs/protocol.md](docs/protocol.md)。
-
-**运行中会话恢复**：浏览器端 Tabs 是内存态，刷新/新设备连接后由 `App.vue` 常驻订阅（`remote-sessions` 事件）重拉 `sessions.list` 重建 Tabs（不自动 attach）；Tab 名优先取历史会话名（sessionId 匹配），历史未加载时回退项目名、加载完成后 `backfillTabNamesFromHistory` 自动修正。用户点击 Tab/进入项目时 `ensureBrowserAttached` 才 attach 接管。WS 重连后（`remote-connected` 事件）attach 标记失效，自动重拉列表并重 attach 当前 Tab（接管确认同此语义）。
+**运行中会话恢复**：浏览器端 Tabs 是内存态，刷新/新设备连接后由 `App.vue` 常驻订阅（`remote-sessions` 事件）重拉 `sessions.list` 重建 Tabs（不自动 attach）；Tab 名优先取历史会话名（sessionId 匹配），历史未加载时回退项目名、加载完成后 `backfillTabNamesFromHistory` 自动修正。用户点击 Tab/进入项目时 `ensureBrowserAttached` 才 attach 接管。WS 重连后（`remote-connected` 事件）attach 标记失效，自动重拉列表并重 attach 当前 Tab。
 
 ## 7. 配对与凭证
 

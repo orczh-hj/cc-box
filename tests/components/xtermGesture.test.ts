@@ -9,6 +9,7 @@ const terminalMock = vi.hoisted(() => ({
   disposeCount: 0,
   focusCount: 0,
   lastTextarea: null as HTMLTextAreaElement | null,
+  lastTerminal: null as any,
   dataCb: null as ((data: string) => void) | null,
   resizeCb: null as ((size: { cols: number; rows: number }) => void) | null,
 }))
@@ -25,6 +26,7 @@ vi.mock('@xterm/xterm', () => ({
     constructor() {
       this.textarea = document.createElement('textarea')
       terminalMock.lastTextarea = this.textarea
+      terminalMock.lastTerminal = this
     }
     loadAddon() {}
     open(el: HTMLElement) { this.element = el }
@@ -158,7 +160,8 @@ async function mountAndStart() {
 function dispatchGesture(el: Element, type: string, props: Record<string, number>) {
   const ev = new Event(type)
   for (const [k, v] of Object.entries(props)) {
-    Object.defineProperty(ev, k, { value: v })
+    // 与 xterm 真实事件一致：属性可写（组件会按需改 translationY）
+    Object.defineProperty(ev, k, { value: v, writable: true, configurable: true })
   }
   el.dispatchEvent(ev)
 }
@@ -330,6 +333,34 @@ describe('XTermTerminal 触摸手势（xterm 6 原生 Gesture）', () => {
 
     expect(seen!.clientX).toBe(100)
     expect(seen!.clientY).toBe(200)
+    wrapper.unmount()
+  })
+
+  // 手机端滚轮/方向键通道：Claude Code 的 CLAUDE_CODE_SCROLL_SPEED 放大
+  // 每步行数，GUI 在 capture 链把 translationY 减半后再交给 xterm
+  it('XtermGesture_TouchScrollHalf_008', async () => {
+    const wrapper = await mountAndStart()
+    const termEl = wrapper.find('.terminal-wrapper[data-tab="t1"]').element
+    let seen = 0
+    termEl.addEventListener('-xterm-gesturechange', (ev) => {
+      seen = (ev as Event & { translationY?: number }).translationY ?? 0
+    }, true)
+    dispatchGesture(termEl, '-xterm-gesturechange', { translationY: 30 })
+    expect(seen).toBe(15)
+    wrapper.unmount()
+  })
+
+  // normal scrollback 是像素 1:1 直滚，不能缩放
+  it('XtermGesture_TouchScrollNormalUnscaled_009', async () => {
+    const wrapper = await mountAndStart()
+    terminalMock.lastTerminal.buffer.active.type = 'normal'
+    const termEl = wrapper.find('.terminal-wrapper[data-tab="t1"]').element
+    let seen = 0
+    termEl.addEventListener('-xterm-gesturechange', (ev) => {
+      seen = (ev as Event & { translationY?: number }).translationY ?? 0
+    }, true)
+    dispatchGesture(termEl, '-xterm-gesturechange', { translationY: 30 })
+    expect(seen).toBe(30)
     wrapper.unmount()
   })
 

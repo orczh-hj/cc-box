@@ -6,7 +6,7 @@ use tokio::sync::{mpsc, watch};
 
 use crate::gateway;
 use crate::gateway_proto::{GwDown, GwUp, WindowAction, GW_PROTO_VER, LEGACY_PROTO_VER};
-use crate::remote_state::{ControllerHolder, REMOTE_STATE};
+use crate::remote_state::REMOTE_STATE;
 
 fn make_session(id: &str) -> RemoteSession {
     RemoteSession {
@@ -23,7 +23,7 @@ fn make_session(id: &str) -> RemoteSession {
 
 async fn next_client_msg(
     rx: &mut mpsc::Receiver<GwDown>,
-) -> (u64, bool, ClientMessage, Option<Option<u64>>) {
+) -> (u64, bool, ClientMessage) {
     for _ in 0..16 {
         let down = tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv())
             .await
@@ -33,10 +33,9 @@ async fn next_client_msg(
             conn_id,
             via_relay,
             msg,
-            holder,
         } = down
         {
-            return (conn_id, via_relay, msg, holder);
+            return (conn_id, via_relay, msg);
         }
     }
     panic!("no ClientMsg within frames");
@@ -91,7 +90,6 @@ fn cleanup(members: &[String], ptys: &[&str]) {
     for id in ptys {
         REMOTE_STATE.remove_pty(id);
     }
-    REMOTE_STATE.sync_controller_shadow(None);
 }
 
 async fn recv_until<F: Fn(&ServerMessage) -> bool>(
@@ -110,7 +108,7 @@ async fn recv_until<F: Fn(&ServerMessage) -> bool>(
     panic!("expected message not received");
 }
 
-/// 成员会话按 pty_id 转发；holder 透传当前控制者
+/// 成员会话按 pty_id 转发（per-session 化后无控制权拦截，直通）
 #[tokio::test]
 async fn Gateway_Dispatch_会话路由转发成员_1() {
     let _lock = super::REMOTE_SERVER_TEST_LOCK.lock();
@@ -128,11 +126,10 @@ async fn Gateway_Dispatch_会话路由转发成员_1() {
         },
     )
     .await;
-    let (conn_id, via_relay, msg, holder) = next_client_msg(&mut down_rx).await;
+    let (conn_id, via_relay, msg) = next_client_msg(&mut down_rx).await;
     assert_eq!(conn_id, 9);
     assert!(!via_relay);
     assert!(matches!(msg, ClientMessage::SessionAttach { ref id, .. } if id == "member-1"));
-    assert_eq!(holder, Some(Some(9)), "写操作成功后发起者自动持有控制权");
 
     // 未知会话不再回退本机：不转发，手机收到拒绝 + 快照
     REMOTE_STATE.remove_conn(9);
@@ -154,16 +151,16 @@ async fn Gateway_聚合列表_实例字段_2() {
     cleanup(&[inst], &[]);
 }
 
-/// 控制权门：桌面持有时拒绝；释放后自动持有
+/// 写命令转发直通（per-session 化：无控制权拦截，任何连接可发）
 #[tokio::test]
-async fn Gateway_Dispatch_控制权门拒绝_3() {
+async fn Gateway_Dispatch_写命令转发直通_3() {
     let _lock = super::REMOTE_SERVER_TEST_LOCK.lock();
     gateway::test_reset();
-    let (_down_rx, inst) = register_mock_member("gate", &["gm-1"]).await;
+    let (mut down_rx, inst) = register_mock_member("gate", &["gm-1"]).await;
 
     let (tx, mut rx) = mpsc::channel(64);
     REMOTE_STATE.add_conn(11, tx, false);
-    REMOTE_STATE.desktop_takeover();
+    // 连续两个连接的写类消息都直通转发（全局控制权门已退役）
     gateway::dispatch(
         11,
         &ClientMessage::SessionAttach {
@@ -173,29 +170,17 @@ async fn Gateway_Dispatch_控制权门拒绝_3() {
         },
     )
     .await;
-    let denied = recv_until(&mut rx, |m| {
-        matches!(m, ServerMessage::SessionAttachDenied { .. })
-    })
-    .await;
-    match denied {
-        ServerMessage::SessionAttachDenied { id, reason } => {
-            assert_eq!(id, "gm-1");
-            assert!(reason.contains("controller"));
-        }
-        _ => unreachable!(),
-    }
-
-    REMOTE_STATE.sync_controller_shadow(None);
-    gateway::dispatch(
-        11,
-        &ClientMessage::SessionAttach {
-            id: "gm-1".into(),
-            cols: 80,
-            rows: 24,
-        },
-    )
-    .await;
-    assert_eq!(REMOTE_STATE.controller(), Some(ControllerHolder::Remote(11)));
+    let (conn_id, _, msg) = next_client_msg(&mut down_rx).await;
+    assert_eq!(conn_id, 11);
+    assert!(matches!(msg, ClientMessage::SessionAttach { .. }));
+    // 无拒绝帧到达手机（SessionAttachDenied 已随控制权门退役）
+    assert!(
+        !tokio::time::timeout(std::time::Duration::from_millis(150), rx.recv())
+            .await
+            .map(|m| matches!(m, Some(ServerMessage::SessionAttachDenied { .. })))
+            .unwrap_or(false),
+        "不应再有控制权拒绝帧"
+    );
 
     REMOTE_STATE.remove_conn(11);
     cleanup(&[inst], &[]);
@@ -210,7 +195,6 @@ async fn Gateway_Dispatch_rpc粘连跟随成员_4() {
 
     let (tx, _rx) = mpsc::channel(16);
     REMOTE_STATE.add_conn(12, tx, false);
-    REMOTE_STATE.sync_controller_shadow(None);
 
     gateway::dispatch(
         12,
@@ -221,7 +205,7 @@ async fn Gateway_Dispatch_rpc粘连跟随成员_4() {
         },
     )
     .await;
-    let (conn_id, _, _, _) = next_client_msg(&mut down_rx).await;
+    let (conn_id, _, _) = next_client_msg(&mut down_rx).await;
     assert_eq!(conn_id, 12);
 
     gateway::dispatch(
@@ -233,7 +217,7 @@ async fn Gateway_Dispatch_rpc粘连跟随成员_4() {
         },
     )
     .await;
-    let (_, _, msg, _) = next_client_msg(&mut down_rx).await;
+    let (_, _, msg) = next_client_msg(&mut down_rx).await;
     assert!(matches!(msg, ClientMessage::RpcCall { ref cmd, .. } if cmd == "file_upload_chunk"));
 
     // 非上传命令（带 ptyId）转发后清粘连
@@ -246,7 +230,7 @@ async fn Gateway_Dispatch_rpc粘连跟随成员_4() {
         },
     )
     .await;
-    let (_, _, msg, _) = next_client_msg(&mut down_rx).await;
+    let (_, _, msg) = next_client_msg(&mut down_rx).await;
     assert!(matches!(msg, ClientMessage::RpcCall { ref cmd, .. } if cmd == "rename_session"));
 
     // 粘连已清：后续无 ptyId 的 chunk 被拒绝（未知会话），不再转发
@@ -273,7 +257,6 @@ async fn Gateway_Dispatch_Create按实例路由_5() {
 
     let (tx, _rx) = mpsc::channel(16);
     REMOTE_STATE.add_conn(13, tx, false);
-    REMOTE_STATE.sync_controller_shadow(None);
 
     gateway::dispatch(
         13,
@@ -287,10 +270,8 @@ async fn Gateway_Dispatch_Create按实例路由_5() {
         },
     )
     .await;
-    let (conn_id, _, _, _) = next_client_msg(&mut down_rx).await;
+    let (conn_id, _, _) = next_client_msg(&mut down_rx).await;
     assert_eq!(conn_id, 13);
-
-    REMOTE_STATE.sync_controller_shadow(None);
     gateway::dispatch(
         13,
         &ClientMessage::SessionCreate {
@@ -303,22 +284,17 @@ async fn Gateway_Dispatch_Create按实例路由_5() {
         },
     )
     .await;
-    let (conn_id, _, _, _) = next_client_msg(&mut down_rx).await;
+    let (conn_id, _, _) = next_client_msg(&mut down_rx).await;
     assert_eq!(conn_id, 13, "旧手机创建应落到默认成员");
 
     REMOTE_STATE.remove_conn(13);
     cleanup(&[inst], &[]);
 }
 
-/// 控制权影子与剥离（成员侧执行体）
+/// 手机断连（ConnDrop）：成员侧 remove_conn 自动归还该连接接管的终端
 #[tokio::test]
-async fn Gateway_控制权影子与剥离_6() {
+async fn Gateway_断连归还终端_6() {
     let _lock = super::REMOTE_SERVER_TEST_LOCK.lock();
-    REMOTE_STATE.sync_controller_shadow(Some(42));
-    assert_eq!(REMOTE_STATE.controller(), Some(ControllerHolder::Remote(42)));
-    REMOTE_STATE.sync_controller_shadow(None);
-    assert_eq!(REMOTE_STATE.controller(), None);
-
     REMOTE_STATE.register_pty("strip-1", "claude", "/p");
     let (tx, mut rx) = mpsc::channel(16);
     REMOTE_STATE.add_member_conn(42, tx, false);
@@ -331,11 +307,12 @@ async fn Gateway_控制权影子与剥离_6() {
         },
     );
     let _ = recv_until(&mut rx, |m| matches!(m, ServerMessage::SessionAttached { .. })).await;
-    REMOTE_STATE.strip_controller_conn(42);
-    assert!(!REMOTE_STATE.is_remote_active("strip-1"));
+    assert!(REMOTE_STATE.is_remote_active("strip-1"));
 
     REMOTE_STATE.remove_conn(42);
-    cleanup(&[], &["strip-1"]);
+    assert!(!REMOTE_STATE.is_remote_active("strip-1"), "断连后终端归还桌面");
+
+    REMOTE_STATE.remove_pty("strip-1");
 }
 
 /// 实例名单：所有注册成员（含零会话），不再注入 Broker 自身
@@ -426,7 +403,6 @@ async fn Gateway_上传粘连_跨分块保持_10() {
 
     let (tx, _rx) = mpsc::channel(16);
     REMOTE_STATE.add_conn(23, tx, false);
-    REMOTE_STATE.sync_controller_shadow(None);
 
     gateway::dispatch(
         23,
@@ -449,7 +425,7 @@ async fn Gateway_上传粘连_跨分块保持_10() {
             },
         )
         .await;
-        let (conn_id, _, msg, _) = next_client_msg(&mut down_rx).await;
+        let (conn_id, _, msg) = next_client_msg(&mut down_rx).await;
         assert_eq!(conn_id, 23);
         assert!(matches!(msg, ClientMessage::RpcCall { ref cmd, .. } if cmd == "file_upload_chunk"));
     }
@@ -547,7 +523,6 @@ async fn Gateway_断连清理待处理请求_13() {
     let (mut down_rx, inst) = register_mock_member("pending", &["p-1"]).await;
     let (tx, mut rx) = mpsc::channel(32);
     REMOTE_STATE.add_conn(33, tx, false);
-    REMOTE_STATE.sync_controller_shadow(None);
 
     gateway::dispatch(
         33,
@@ -745,7 +720,6 @@ async fn Gateway_StateChangedFanout_18() {
 
     let (tx, mut rx) = mpsc::channel(16);
     REMOTE_STATE.add_conn(31, tx, false);
-    REMOTE_STATE.sync_controller_shadow(None);
 
     gateway::handle_member_up(
         &inst,
@@ -794,16 +768,15 @@ async fn Gateway_StateChangedFanout_18() {
     cleanup(&[inst], &[]);
 }
 
-/// 裸 pty.input 不能抢占全局控制权（未 attach 时成员会丢弃输入）
+/// 裸 pty.input 只被原样转发（无任何控制面副作用；未 attach 时成员端丢弃输入）
 #[tokio::test]
-async fn Gateway_PtyInputDoesNotAcquireController_19() {
+async fn Gateway_PtyInputBareForwardOnly_19() {
     let _lock = super::REMOTE_SERVER_TEST_LOCK.lock();
     gateway::test_reset();
-    let (_down_rx, inst) = register_mock_member("input", &["in-1"]).await;
+    let (mut down_rx, inst) = register_mock_member("input", &["in-1"]).await;
 
     let (tx, _rx) = mpsc::channel(16);
     REMOTE_STATE.add_conn(32, tx, false);
-    REMOTE_STATE.sync_controller_shadow(None);
 
     gateway::dispatch(
         32,
@@ -813,12 +786,9 @@ async fn Gateway_PtyInputDoesNotAcquireController_19() {
         },
     )
     .await;
-
-    assert_eq!(
-        REMOTE_STATE.controller(),
-        None,
-        "bare input must not acquire controller without attach"
-    );
+    let (conn_id, _, msg) = next_client_msg(&mut down_rx).await;
+    assert_eq!(conn_id, 32);
+    assert!(matches!(msg, ClientMessage::PtyInput { ref id, .. } if id == "in-1"));
 
     REMOTE_STATE.remove_conn(32);
     cleanup(&[inst], &[]);

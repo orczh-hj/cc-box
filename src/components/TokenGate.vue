@@ -11,25 +11,14 @@
       </div>
 
       <!-- 已保存设备列表（多设备凭证：点击连接，× 删除） -->
-      <div v-if="desktops.length > 0" class="gate-desktops">
-        <button
-          v-for="d in desktops"
-          :key="d.id"
-          class="desktop-item"
-          :class="{ active: d.id === activeId }"
-          @click="activate(d.id)"
-        >
-          <span class="dot" :class="dotClass(d)"></span>
-          <span class="desktop-name">{{ d.name || fallbackName(d) }}</span>
-          <span v-if="d.invalid" class="tag invalid">令牌无效</span>
-          <span class="tag kind">{{ d.kind === 'lan' ? '局域网' : '中继' }}</span>
-          <span
-            class="desktop-remove"
-            title="删除此设备"
-            @click.stop="remove(d.id)"
-          >×</span>
-        </button>
-      </div>
+      <DeviceList
+        v-if="desktops.length > 0"
+        :desktops="desktops"
+        :active-id="activeId"
+        :conn-state="connState"
+        @select="activate"
+        @remove="remove"
+      />
 
       <!-- 需要输入 token（closed 无 token / denied 且无可用列表） -->
       <template v-if="!busy">
@@ -54,6 +43,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { remoteTransport } from '@/api/remote-transport'
 import { listDesktops, removeDesktop, type StoredDesktop } from '@/api/remote-desktops'
+import DeviceList from '@/components/remote/DeviceList.vue'
 
 const emit = defineEmits<{ connected: [] }>()
 
@@ -88,24 +78,6 @@ const busyText = computed(() => {
   const name = desktops.value.find(d => d.id === activeId.value)?.name
   return name ? `${name} · ${stateText.value}` : stateText.value
 })
-
-/** 圆点：当前条目按连接状态着色，其余条目灰色 */
-function dotClass(d: StoredDesktop): string {
-  if (d.id !== activeId.value) return 'unknown'
-  switch (connState.value) {
-    case 'connected': return 'connected'
-    case 'connecting':
-    case 'authenticating':
-    case 'reconnecting': return 'connecting'
-    case 'denied': return 'denied'
-    default: return 'unknown'
-  }
-}
-
-function fallbackName(d: StoredDesktop): string {
-  const short = d.id.slice(-6)
-  return `桌面 · ${short}`
-}
 
 function activate(id: string): void {
   busy.value = true
@@ -204,77 +176,6 @@ function connect() {
 }
 @keyframes spin {
   to { transform: rotate(360deg); }
-}
-.gate-desktops {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  max-height: 240px;
-  overflow-y: auto;
-}
-.desktop-item {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 10px 10px;
-  background: var(--bg-primary, #fff);
-  border: 1px solid var(--border-color, #d9d5cc);
-  border-radius: 8px;
-  font-size: 14px;
-  color: var(--text-primary, #1a1816);
-  text-align: left;
-  cursor: pointer;
-}
-.desktop-item.active {
-  border-color: var(--accent-primary, #1e3a5f);
-}
-.dot {
-  flex: none;
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--border-color, #d9d5cc);
-}
-.dot.connected { background: #27ae60; }
-.dot.connecting {
-  background: #f39c12;
-  animation: pulse 1s ease-in-out infinite;
-}
-.dot.denied { background: #e74c3c; }
-@keyframes pulse {
-  50% { opacity: 0.4; }
-}
-.desktop-name {
-  flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.tag {
-  flex: none;
-  font-size: 11px;
-  padding: 1px 6px;
-  border-radius: 4px;
-  background: var(--bg-secondary, #f5f3ee);
-  color: var(--text-secondary, #5a5550);
-}
-.tag.invalid {
-  background: #fdecea;
-  color: #e74c3c;
-}
-.desktop-remove {
-  flex: none;
-  width: 22px;
-  height: 22px;
-  line-height: 20px;
-  border-radius: 4px;
-  font-size: 15px;
-  color: var(--text-secondary, #5a5550);
-  text-align: center;
-}
-.desktop-remove:hover {
-  background: #fdecea;
-  color: #e74c3c;
 }
 .gate-input {
   background: var(--bg-primary, #fff);

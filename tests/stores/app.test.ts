@@ -354,3 +354,23 @@ describe('hideProject / unhideProjectIfHidden', () => {
     expect(store.cachedRecentSessions.map(s => s.sessionId)).toEqual(['s2'])
   })
 })
+
+describe('resetHomeCache', () => {
+  // 浏览器切换设备：项目/近期会话/分页状态全部回到未加载（随后重拉）
+  it('App_ResetHomeCache_001', () => {
+    const store = useAppStore()
+    store.cachedProjects = [{ path: '/a', name: 'a' }]
+    store.cachedRecentSessions = [
+      { sessionId: 's1', name: 's1', projectPath: '/a', lastActiveAt: 1 },
+    ]
+    store.cacheLoaded = true
+    store.hasMoreProjects = false
+
+    store.resetHomeCache()
+
+    expect(store.cachedProjects).toEqual([])
+    expect(store.cachedRecentSessions).toEqual([])
+    expect(store.cacheLoaded).toBe(false)
+    expect(store.hasMoreProjects).toBe(true)
+  })
+})

@@ -17,7 +17,7 @@
       <!-- 远程（手机）接管遮罩：显示层独占，数据层继续写入 -->
       <div v-if="isTabTakenOver(tabId)" class="taken-over-overlay">
         <div class="taken-over-card">
-          <p class="taken-over-title">{{ t('remoteTakenOver') }}</p>
+          <p class="taken-over-title">{{ takenOverTitle }}</p>
           <p class="taken-over-hint">{{ t('remoteTakenOverHint') }}</p>
           <button class="taken-over-btn" @click="handleClaim(tabId)">{{ t('remoteClaimBack') }}</button>
         </div>
@@ -54,7 +54,6 @@ import {
   onPtyError,
   onSessionTakenOver,
   onSessionReclaimed,
-  controllerTakeover,
   logMessage,
 } from '@/api/tauri'
 import { registerTerminalCommand } from '@/composables/useTerminalCommand'
@@ -79,6 +78,8 @@ const emit = defineEmits<{
 }>()
 
 const appStore = useAppStore()
+/** 遮罩文案按端区分：桌面上是「远程端接管」，手机上是「桌面/其他设备接管」 */
+const takenOverTitle = computed(() => t(isTauriEnv ? 'remoteTakenOver' : 'remoteTakenOverByPeer'))
 const sessionStore = useSessionStore()
 const isMobile = useIsMobile()
 
@@ -153,6 +154,12 @@ let unlistenSessionDetached: (() => void) | null = null
 // 浏览器远程模式：已 attach 的 ptyId 集合（attach = 接管输出流 + 控制权）。
 // 重连后服务端订阅清空，标记失效需清空重 attach
 const attachedPtyIds = new Set<string>()
+// 浏览器远程模式当前焦点会话：同一连接同一时刻只持有一个会话的控制权。
+// 切 Tab 先释放旧焦点（保留输出订阅）再接管新焦点，桌面只对当前查看的
+// 会话显示「被接管中」。
+let focusedPtyId: string | null = null
+// 本端主动释放的 ptyId：忽略随后到达的 session.detached，Tab 保持 running
+const releasingPtyIds = new Set<string>()
 
 // ResizeObserver
 let resizeObserver: ResizeObserver | null = null
@@ -226,7 +233,8 @@ function setTerminalEl(tabId: string, el: HTMLElement | null) {
     if (instance && !instance.term.element) {
       instance.term.open(el)
       loadRendererAddons(instance.term)
-      ensureBrowserAttached(tabId)
+      // 只为当前显示的 Tab 争取焦点；后台实例不得抢占控制权
+      if (tabId === currentDisplayTabId.value) ensureBrowserFocus(tabId)
       if (tabId === currentDisplayTabId.value) {
         requestAnimationFrame(() => instance.fitAddon.fit())
       }
@@ -553,8 +561,10 @@ onMounted(async () => {
   if (!isTauriEnv) {
     unlistenRemoteConn = await transport.listen('remote-connected', () => {
       attachedPtyIds.clear()
+      releasingPtyIds.clear()
+      focusedPtyId = null
       const tabId = currentDisplayTabId.value
-      if (tabId) ensureBrowserAttached(tabId)
+      if (tabId) ensureBrowserFocus(tabId)
     })
   }
 })
@@ -615,8 +625,10 @@ async function setupEventListeners() {
   )
 
   // 会话被剥离（宿主窗口断开，服务端 session.detached）：Tab 置 stopped，
-  // 清 attach 标记——否则 Tab 永远 running、终端冻结无输出
+  // 清 attach 标记——否则 Tab 永远 running、终端冻结无输出。
+  // 例外：本端切 Tab/离开页面主动释放的会话仍保持订阅，不按断开处理。
   unlistenSessionDetached = await transport.listen<{ id: string }>('session-detached', ({ id }) => {
+    if (releasingPtyIds.delete(id)) return
     attachedPtyIds.delete(id)
     sessionStore.handleRemoteDetached(id)
   })
@@ -694,7 +706,10 @@ watch(() => [...sessionStore.tabs.keys()].join('|'), () => {
     void disposeTerminal(instance.term, `tabsChange removed(tabId=${tabId})`)
     terminalInstances.delete(tabId)
     terminalEls.delete(tabId)
-    if (instance.ptyId) attachedPtyIds.delete(instance.ptyId)
+    if (instance.ptyId) {
+      attachedPtyIds.delete(instance.ptyId)
+      if (focusedPtyId === instance.ptyId) focusedPtyId = null
+    }
   }
 })
 
@@ -706,6 +721,11 @@ watch(() => sessionStore.activeTabId, async (newTabId, oldTabId) => {
     fitCurrentTerminal()
     return
   }
+
+  // 浏览器模式：切 Tab = 控制权转移。先释放旧焦点（保留订阅），
+  // 再让新 Tab 接管；新 Tab 为 stopped 时只释放、不接管。
+  // 放在 isPtyStarting 之前：新会话 spawn 期间用户切走也要归还旧会话。
+  releaseBrowserFocus()
 
   if (isPtyStarting.value) return
 
@@ -734,6 +754,8 @@ watch(() => sessionStore.activeTabId, async (newTabId, oldTabId) => {
       // 已停止的 Tab：不自动启动，等用户操作
     }
   }
+
+  ensureBrowserFocus(newTabId)
 })
 
 // 为已有 PTY 的 Tab 创建 Terminal 实例
@@ -755,7 +777,7 @@ async function createTerminalForTab(tabId: string, ptyId: string) {
     term.open(el)
     loadRendererAddons(term)
     // 浏览器端 attach 输出流（刷新恢复/重新显示 Tab 场景；已 attach 时幂等跳过）
-    ensureBrowserAttached(tabId)
+    ensureBrowserFocus(tabId)
 
     if (!isActive) {
       requestAnimationFrame(() => {
@@ -815,6 +837,10 @@ async function startTab(tabId: string) {
     fitAddon = new FitAddon()
     term.loadAddon(fitAddon)
 
+    // 浏览器模式：spawn 内部会 attach 新会话，必须先释放上一个焦点
+    // （restartTab 同一 Tab 的旧 pty 已 kill，release 会因 activeTab 相同而跳过）
+    if (!isTauriEnv) releaseBrowserFocus()
+
     const info = await ptySpawn({
       cwd,
       cols: 80,
@@ -836,6 +862,7 @@ async function startTab(tabId: string) {
     if (info) {
       // 浏览器端 spawnSession 内部已 create+attach，记录标记防重复 attach
       attachedPtyIds.add(info.id)
+      if (!isTauriEnv) focusedPtyId = info.id
       terminalInstances.set(tabId, { term: markRaw(term), fitAddon: markRaw(fitAddon), ptyId: info.id })
       sessionStore.setTabPty(tabId, info.id)
       sessionStore.setActiveTab(tabId)
@@ -899,6 +926,10 @@ async function restartTab(tabId: string) {
     fitAddon = new FitAddon()
     term.loadAddon(fitAddon)
 
+    // 浏览器模式：spawn 内部会 attach 新会话，先释放上一个焦点
+    // （同一 Tab 重启时旧 pty 已 kill，release 会因 activeTab 相同而跳过）
+    if (!isTauriEnv) releaseBrowserFocus()
+
     const info = await ptySpawn({
       cwd,
       cols: 80,
@@ -916,6 +947,7 @@ async function restartTab(tabId: string) {
     if (info) {
       // 浏览器端 spawnSession 内部已 create+attach，记录标记防重复 attach
       attachedPtyIds.add(info.id)
+      if (!isTauriEnv) focusedPtyId = info.id
       terminalInstances.set(tabId, { term: markRaw(term), fitAddon: markRaw(fitAddon), ptyId: info.id })
       sessionStore.setTabPty(tabId, info.id)
       sessionStore.setActiveTab(tabId)
@@ -1050,22 +1082,55 @@ function sendText(text: string, focusAfter = true) {
   }
 }
 
-// 浏览器远程模式：确保 Tab 已 attach（输出流 + 控制权；后 attach 优先抢占，
-// 从桌面/其他远程端接管回来即走此路径）。桌面 Tauri 模式 PTY 输出全局广播，无需 attach
-function ensureBrowserAttached(tabId: string) {
+// 浏览器远程模式：释放当前焦点会话的控制权，但保留输出订阅。
+// detach 让服务端把 active 归还桌面（桌面清遮罩），立即 subscribe 保持后台
+// Tab 继续收输出、重新接管时无需回放 tail。切 Tab 与离开终端页共用。
+function releaseBrowserFocus(force = false, keepSubscription = true) {
   if (isTauriEnv) return
+  const ptyId = focusedPtyId
+  if (!ptyId) return
+  // 已切回同一个会话（典型：startTab 先 setActiveTab 后设置 ptyId）时不要误释放；
+  // 离开终端页（unmount）必须强制归还，此时 activeTab 仍指向该会话
+  const activeTab = sessionStore.activeTabId
+    ? sessionStore.tabs.get(sessionStore.activeTabId)
+    : null
+  if (!force && activeTab?.ptyId === ptyId) return
+  focusedPtyId = null
+  if (!attachedPtyIds.has(ptyId)) return
+  releasingPtyIds.add(ptyId)
+  transport.sendClient({ type: 'session.detach', id: ptyId })
+  // 切 Tab：订阅保留让后台 Tab 输出不断档，重新 attach 时跳过 tail 防重复；
+  // 离开终端页则无需后台输出，不重新订阅
+  if (keepSubscription) transport.sendClient({ type: 'session.subscribe', id: ptyId })
+}
+
+// 浏览器远程模式：让当前显示的 Tab 成为本连接唯一焦点（attach = 抢占 + 订阅）。
+// 已订阅 → claim 重 attach（跳过 tail 防重复）；未订阅 → 正常 attach 拿快照。
+// 桌面 Tauri 模式 PTY 输出全局广播，无需 attach。
+function ensureBrowserFocus(tabId: string) {
+  if (isTauriEnv) return
+  if (tabId !== currentDisplayTabId.value) return
   const tab = sessionStore.tabs.get(tabId)
   if (!tab?.ptyId || tab.status !== 'running') return
-  if (attachedPtyIds.has(tab.ptyId)) return
   const instance = terminalInstances.get(tabId)
   if (!instance) return
-  attachedPtyIds.add(tab.ptyId)
-  transport.sendClient({
-    type: 'session.attach',
-    id: tab.ptyId,
-    cols: instance.term.cols,
-    rows: instance.term.rows,
-  })
+  const ptyId = tab.ptyId
+  if (focusedPtyId === ptyId && attachedPtyIds.has(ptyId)) return
+  if (attachedPtyIds.has(ptyId)) {
+    // 已有实时订阅：只转移 active，跳过 attached 的 tail 快照
+    void ptyClaim(ptyId, instance.term.cols, instance.term.rows)
+  } else {
+    attachedPtyIds.add(ptyId)
+    transport.sendClient({
+      type: 'session.attach',
+      id: ptyId,
+      cols: instance.term.cols,
+      rows: instance.term.rows,
+    })
+  }
+  focusedPtyId = ptyId
+  // 切到该 Tab 即接管：清掉可能残留的他人持有遮罩
+  tab.takenOver = false
 }
 
 // 浏览器远程模式：拉取服务端运行中的会话列表 → 重建 Tabs（刷新/新设备后的
@@ -1122,6 +1187,18 @@ function captureSnapshot(): SnapshotData {
 const GESTURE_CHANGE = '-xterm-gesturechange'
 const GESTURE_TAP = '-xterm-gesturetap'
 
+/** 手机滚动手感系数：Claude Code 的 CLAUDE_CODE_SCROLL_SPEED 会放大滚轮/
+ *  方向键每步行数（实测约 5x）。xterm 把手指位移按 cellHeight 合成该通道，
+ *  手机端除以 2 后约 2.5 行/行，接近用户期望的 2x。仅作用于滚轮/方向键
+ *  通道；normal scrollback 是像素 1:1 直滚，不缩放。 */
+const TOUCH_SCROLL_DIVISOR = 2
+
+function shouldScaleTouchScroll(term: Terminal | undefined): boolean {
+  if (!term) return false
+  return term.buffer.active.type !== 'normal'
+    || term.element?.classList.contains('enable-mouse-events') === true
+}
+
 // 惯性事件坐标修复：xterm 6 beta 的 _inertia（抬手惯性）派发的 CHANGE 不带
 // clientX/clientY，mouse reporting 下 getMouseReportCoords 用缺失坐标换算出 NaN，
 // 编码出 "aN;NaNM" 垃圾序列（加速滑动抬起后必现）。capture 链上先于 xterm 处理，
@@ -1144,9 +1221,17 @@ function handleGestureChange(e: Event) {
   }
 
   if (!isMobile.value) return
+  const term = currentInstance()?.term
   const dy = (ev as Event & { translationY?: number }).translationY ?? 0
+  if (shouldScaleTouchScroll(term)) {
+    // 必须在 xterm 的 target 监听器之前改（本监听挂在祖先 capture 上）。
+    // 事件属性是普通可写属性；只读实现下静默放弃，不影响功能。
+    try {
+      ;(ev as Event & { translationY?: number }).translationY = dy / TOUCH_SCROLL_DIVISOR
+    } catch { /* 只读事件 */ }
+  }
   if (Math.abs(dy) < 10) return
-  const ta = currentInstance()?.term.textarea
+  const ta = term?.textarea
   if (ta && document.activeElement === ta) ta.blur()
 }
 
@@ -1201,6 +1286,9 @@ async function restartCurrentPty() {
 }
 
 onUnmounted(() => {
+  // 浏览器模式离开终端页：归还控制权（此时 activeTab 仍指向该会话，需强制；
+  // 无后台 Tab 需要输出，不再重新订阅）
+  releaseBrowserFocus(true, false)
   fitCurrentTerminal.cancel()
   resizeObserver?.disconnect()
   window.removeEventListener('copy', handleNativeCopy)
@@ -1231,14 +1319,12 @@ async function handleClaim(tabId: string) {
     // 浏览器端 claim = 重新 attach（sessionClaim），记录标记防重复；
     // 传当前实际尺寸（attach 会 resize PTY，默认值会把终端打回 80×24）
     attachedPtyIds.add(instance.ptyId)
-    // 浏览器端 attach 受全局控制权门拦截：先显式接管（同连接消息有序，
-    // 服务端先处理 takeover 再处理 attach），否则重挂被拒、遮罩解不开
-    if (!isTauriEnv) await controllerTakeover()
     await ptyClaim(instance.ptyId, instance.term.cols, instance.term.rows)
     // claim 后 Rust 会 emit session-reclaimed 解除遮罩；主动 fit 恢复尺寸。
     // 接管者自身的遮罩没有对应的解除事件（taken-over 只发给被抢方），本地解除
     const tab = sessionStore.getTabByPtyId(instance.ptyId)
     if (tab) tab.takenOver = false
+    if (!isTauriEnv) focusedPtyId = instance.ptyId
     instance.fitAddon.fit()
     // 移动端不聚焦：接管是点按钮触发的，聚焦会突然弹出软键盘（键盘只由工具条「键盘」按钮唤出）
     if (!isMobile.value) instance.term.focus()

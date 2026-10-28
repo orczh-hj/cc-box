@@ -265,8 +265,9 @@ function handleSettingsClick() {
     width: 100%;
     flex-direction: row;
     align-items: center;
-    justify-content: space-between;
-    padding: 6px 12px calc(6px + var(--safe-area-bottom));
+    justify-content: flex-start;
+    gap: 4px;
+    padding: 6px 8px calc(6px + var(--safe-area-bottom));
     border-right: none;
     border-top: 1px solid var(--border-color);
     box-shadow: 0 -2px 8px rgba(26, 24, 22, 0.06);
@@ -275,17 +276,47 @@ function handleSettingsClick() {
 
   .icon-group {
     flex-direction: row;
-    gap: 6px;
+    gap: 4px;
   }
 
+  /* 左侧面板组：空间不足时横向滚动（隐藏滚动条），不挤压右侧 */
+  .icon-group.top {
+    flex: 1 1 auto;
+    min-width: 0;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: none;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior-x: contain;
+  }
+
+  .icon-group.top::-webkit-scrollbar {
+    display: none;
+  }
+
+  .icon-group.top .icon-btn {
+    flex: 0 0 auto;
+  }
+
+  /* 右侧 Files/Settings：固定宽度，不参与收缩 */
   .icon-group.bottom {
+    flex: 0 0 auto;
     margin-top: 0;
+    margin-left: auto;
+  }
+
+  /* 手机端收窄按钮（高度保持 40px 触控目标），减少横向占用 */
+  .icon-btn {
+    width: 36px;
+    height: 40px;
+    margin: 0;
   }
 
   /* 激活指示条：左侧竖条 → 底部横条 */
   .icon-btn.active::before {
-    left: 8px;
-    right: 8px;
+    left: 6px;
+    right: 6px;
     top: auto;
     bottom: 1px;
     width: auto;

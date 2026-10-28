@@ -41,8 +41,6 @@ pub const EXCLUDED: &[&str] = &[
     "pty_kill",
     "pty_kill_all",
     "pty_claim",
-    // 桌面专属接管（远程走 controller.takeover 协议消息）
-    "controller_takeover",
     // 桌面级（打开本地文件/文件夹）
     "open_in_file_manager",
     "open_claude_user_settings",
@@ -225,8 +223,6 @@ registry! {
     // ==== 远程设置（浏览器端查看/管理远程开关） ====
     "get_remote_status" => read() => | | crate::commands::get_remote_status,
     "set_remote_enabled" => write(None) => |enabled: bool| crate::commands::set_remote_enabled,
-    // 全局控制权只读查询（桌面 UI 启动补快照；浏览器端错过事件后校准）
-    "controller_status" => read() => | | crate::commands::controller_status,
     // set_relay_url 不远程暴露：已连客户端可把中继重定向到攻击者服务器，
     // 下次注册即送出 device_key（身份窃取）。中继地址由环境变量/内置默认管理
 
@@ -338,8 +334,8 @@ pub const WRITE_EXEMPT: &[&str] = &["run_checks", "save_last_project"];
 
 /// RPC 入口（remote_state 的 RpcCall 分支调用）：线程内执行（dispatch 是 async；
 /// 调用频率低，独立线程 + current_thread runtime，与 SessionCreate 先例一致）。
-/// 写命令受全局控制权准入（设备互斥）：他人持有时拒绝、不执行；执行成功后
-/// 无人持有则发起者自动持有（write_success_acquire，与 attach/create 同规则）
+/// 写命令不做控制权互斥（per-session 化决策）：任何设备随时可发，靠白名单 +
+/// revision 排序 + state-changed 广播收敛；is_remote_write 仅做审计日志
 pub fn handle_rpc(conn_id: u64, rpc_id: u64, cmd: &str, args: &Value) {
     let cmd = cmd.to_string();
     let mut args = args.as_object().cloned().unwrap_or_default();
@@ -350,28 +346,8 @@ pub fn handle_rpc(conn_id: u64, rpc_id: u64, cmd: &str, args: &Value) {
             .unwrap_or(true); // 未知连接按中继从严
         inject_file_transfer_args(conn_id, &cmd, &mut args, via);
     }
-    let is_write = is_remote_write(&cmd);
-    if is_write {
+    if is_remote_write(&cmd) {
         log::info!("[remote] rpc write cmd '{}' from conn {}", cmd, conn_id);
-        // 服务端兜底拦截（前端全局遮罩是第一道）：非控制设备的写操作被拒
-        if let Err(holder) = crate::remote_state::REMOTE_STATE.controller_gate(conn_id) {
-            log::warn!(
-                "[remote] rpc write '{}' denied (conn {} != controller {})",
-                cmd,
-                conn_id,
-                holder.id_label()
-            );
-            crate::remote_state::REMOTE_STATE.try_send(
-                conn_id,
-                ServerMessage::RpcResult {
-                    id: rpc_id,
-                    ok: false,
-                    data: None,
-                    error: Some("controller held by another device, takeover first".to_string()),
-                },
-            );
-            return;
-        }
     }
     std::thread::spawn(move || {
         let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
@@ -382,10 +358,6 @@ pub fn handle_rpc(conn_id: u64, rpc_id: u64, cmd: &str, args: &Value) {
             }
         };
         let result = rt.block_on(dispatch(&cmd, &args));
-        if is_write && result.is_ok() {
-            // 写操作成功 → 无人持有时自动成为控制者（广播 controller-changed）
-            crate::remote_state::REMOTE_STATE.write_success_acquire(conn_id);
-        }
         let msg = match result {
             Ok(data) => ServerMessage::RpcResult {
                 id: rpc_id,

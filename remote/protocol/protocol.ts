@@ -24,7 +24,8 @@ export type ClientMessage =
   | { type: 'pty.resize'; id: string; cols: number; rows: number }
   | { type: 'ping' }
   | { type: 'rpc.call'; id: number; cmd: string; args: Record<string, unknown> }
-  /** 抢占全局控制权（设备互斥：他端持有时唯一获取方式；attach 不能抢占） */
+  /** 【deprecated】全局控制权已 per-session 化（attach/claim 即会话级抢占）。
+   *  服务端对旧版缓存 UI 发来的本消息 no-op 忽略 */
   | { type: 'controller.takeover' }
 
 /** 票据连接的下载范围（受限会话：只能拉取这一个文件的分块） */
@@ -70,8 +71,9 @@ export type ServerMessage =
       deviceName: string
       /** 本连接唯一标识（前端自判"当前控制者是不是自己"）；旧桌面端缺省 0 */
       connId: number
-      /** 当前全局控制者（null=无人持有；0=桌面持有——conn_id 从 1 起，0 保留）；旧桌面端缺省 null */
-      controller: number | null
+      /** 【deprecated】全局控制权已 per-session 化，服务端恒不发该字段（保留
+       *  兼容旧端缓存 UI，勿再消费）；旧桌面端可能下发（0=桌面/连接 id） */
+      controller?: number | null
       /** 服务端状态版本基线；旧桌面端缺省 0 */
       revision: number
       /** 票据连接：只能拉取该文件的下载分块；普通连接缺省（旧桌面端不下发） */
@@ -86,7 +88,8 @@ export type ServerMessage =
   | { type: 'session.subscribed'; id: string; tail: string; tailSeq?: number }
   | { type: 'session.unsubscribed'; id: string }
   | { type: 'session.attached'; id: string; cols: number; rows: number; tail: string; tailSeq?: number }
-  /** attach 被拒：全局控制权被其他设备持有（先 controller.takeover 接管） */
+  /** attach 被拒（现仅 "session not found"：会话已退出。per-session 控制权下
+   *  attach 即抢占，不再有控制权拒绝） */
   | { type: 'session.attach.denied'; id: string; reason: string }
   | { type: 'session.detached'; id: string; reason: string }
   | { type: 'session.status'; id: string; working: boolean; pending: boolean }

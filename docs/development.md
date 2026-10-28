@@ -122,7 +122,7 @@ UI 已浏览器化（一套 UI 走桌面 Tauri / 宽屏浏览器 / 手机浏览�
 - **进程**：`cc-box --broker`；Windows/macOS 带托盘（标题 `CC-Box`），Linux 纯 tokio 无头（托盘缺失优雅降级）。GUI 启动时按需拉起；`broker.lock` OS 排他锁保证单实例；**所有窗口关闭后常驻**，不再空闲退出；`cc-box --quit-broker` 可退出。
 - **窗口管理**：成员 `member.hello` 带 pid/windowTitle，项目切换经 `window.title` 更新；托盘顶部只有 `CC-Box`，**每个窗口直接是一级菜单项，单击显示/聚焦**；不再提供单窗口关闭/重启；`window.command{close|show|openRemote}` 仍用于整体退出/更新/远程连接。新建窗口带 `--new-window`，停在项目页；Windows 用 `CreateProcessW` + `CREATE_NO_WINDOW` 避免 debug 控制台与句柄继承。零窗口时远程 `rpc.call "spawn_new_instance"` 由 Broker 拉起空窗口（12 上限 + 2s 冷却）。
 - **远程快捷动作**：托盘「远程连接」显示第一个可控制窗口并打开面板（无窗口先新建）；顺序为 远程连接 → 刷新远程密钥 → 关闭/开启远程连接。破坏性操作弹原生确认对话框（关闭远程连接、刷新密钥、退出 CC-Box）。
-- **跨窗口状态**：成员写命令的 `state-changed` 经 `GwUp::StateChanged` 上行，Broker 重分配 revision 后扇出所有 v2 成员与手机；PtyInput/PtyResize 只校验控制权、不主动 acquire；PTY 退出只上行 `SessionRemove`，Broker 统一广播一次 `SessionExit`。
+- **跨窗口状态**：成员写命令的 `state-changed` 经 `GwUp::StateChanged` 上行，Broker 重分配 revision 后扇出所有 v2 成员与手机；PtyInput/PtyResize 只校验该会话 active 归属、无控制面副作用；PTY 退出只上行 `SessionRemove`，Broker 统一广播一次 `SessionExit`。
 - **退出/更新可靠性**：Quit/PrepareForUpdate 先写回 admin 响应再退出；更新安装失败调用 `resume_broker_connection` 清除 update 标记/抑制并恢复 Broker；gateway.lock 心跳校验 owner + 原子写；IPC server 创建失败直接退出释放锁。
 - **客户端细节**：`tailSeq` 在 claim/重 attach 时只抬高不降低；Linux AppImage 拉起 Broker 优先 `$APPIMAGE`；设置页自启动状态每 5s 校准。
 - **开机自启动**：仅 Broker；入口在**设置 → 启动**与托盘勾选项，不在远程面板；Windows Run / macOS LaunchAgent / Linux XDG autostart，命令 `<exe> --broker --autostart`。
@@ -134,16 +134,18 @@ UI 已浏览器化（一套 UI 走桌面 Tauri / 宽屏浏览器 / 手机浏览�
 - **测试**：`cargo test`（`tests/gateway.rs`、`broker_ipc.rs`、`broker_lifecycle.rs`）+ `npm test`；macOS/Linux 行为需在对应平台本地构建验证（macOS 注意 locale 相关的排序断言需显式指定 locale）。
 - **本地手工验证**：启动两个 GUI → 确认只有一个 `cc-box --broker`；任务管理器结束 Broker → GUI 自动恢复；托盘关闭单个/全部窗口 → Broker 仍存活；手机零窗口「启动窗口」；「退出 CC-Box」关闭全部窗口；开机自启动项开/关；LAN 端口被第三方占用时 relay 仍可用；旧版占口时面板显示 legacy 警告。
 
-## 全局控制权（设备互斥）与状态同步
+## 会话控制权（per-session active）与状态同步
 
-> **行为规则正本见 [remote/docs/protocol.md](../remote/docs/protocol.md)「全局控制权」**（唯一权威；attach 不能抢占/接管入口/revision 过滤与跳变重同步细节以正本为准），本节为机制摘要。
+> **行为规则正本见 [remote/docs/protocol.md](../remote/docs/protocol.md)「会话控制权（per-session active）」**（唯一权威；attach 抢占/断连归还/revision 过滤与跳变重同步细节以正本为准），本节为机制摘要。
 
-同一时间只有一个设备可操作——**桌面与所有远程设备对等参与互斥**。控制权由 Rust `remote_state.rs` `StateInner.controller`（`ControllerHolder::Desktop | Remote(connId)`）单点裁决，前端只展示（`ControllerMask.vue` 全局遮罩+接管按钮，桌面/浏览器同构挂载）：
+**冲突单位是单个会话的输入流，不是整台设备**——每个 PTY 会话独立归属（`remote_state.rs` `SessionEntry.active: ActiveView`），不同设备可同时操作不同会话；离散写命令不做控制权互斥。全局控制权层（`ControllerHolder`/ControllerMask/controller-changed/controller.takeover）已退役：
 
-- **远程写操作即持有**：rpc 写命令/session.create/kill/attach 在无人持有时自动持有并广播 `controller-changed`（payload id：`"desktop"`/连接 id/空串；桌面同时经 Tauri emit 下发）；**桌面普通操作不自动持有**（不抢占远程）；他人（含桌面）持有时远程写被服务端拒绝（attach 回 `session.attach.denied`、写命令回错误）
-- **显式接管是唯一转移方式**：远程 `controller.takeover` 消息；桌面 `controller_takeover` command（遮罩「接管」按钮）与 `pty_claim`（终端接管回来顺带获得）。转移 + 剥离旧持有者全部终端归属归还桌面；接管确认按"重连"语义全量重同步（sessions.list 重拉 + 终端重 attach，见 remote-transport `applyControllerChanged`）
-- **断连自动释放**；持有期间其他设备（含桌面）整界面遮罩（ControllerMask `selfLabel` 响应式维护——重连换连接 id 后旧快照会自己遮自己；桌面 UI 启动/重载经 `controller_status` command 补初始快照）
-- **revision 版本号**：每次状态变化 +1，附在 `state-changed`/`controller-changed` payload 与 hello.ok（controller：null=无人/0=桌面/连接 id）/sessions；前端（remote-transport `filterStaleEvent`）单调过滤旧事件防乱序覆盖，**版本跳变触发 `state-resync-needed` 全 section 权威重拉**（兜底乱序漏刷）；**服务端保序**：`emit_state_changed`/`broadcast_controller_changed` 取号与入队同一锁窗口（到达序=取号序，并发回归测试守卫），否则低版本事件后到被前端丢弃、状态永久丢失
+- **attach 即抢占**（后到优先，单用户多设备无协商）：`session.attach` 无条件置 active；旧持有者收 `session-taken-over` 广播（排除接管者）并保留订阅继续收输出；桌面/手机「接管回来」= `pty_claim`（桌面，收回单终端并向旧持有者发 taken-over，仅桌面清遮罩）或重新 attach（浏览器，`sessionClaim` 单条消息，无前置）
+- **同一连接单一焦点**：浏览器一次只看一个终端。切 Tab 时前端先 `session.detach` 旧会话 + `session.subscribe` 保留后台输出，再 attach/claim 新会话；旧 Tab 保持 running（自触发的 `session.detached` 忽略），桌面只对当前查看会话显示遮罩。离开终端页同样释放焦点
+- **输入独占**：`pty.input`/`pty.resize` 仅该会话 active 持有连接生效；**断连自动归还**该连接全部会话（active → Desktop + `session-reclaimed` + 恢复桌面尺寸）
+- **写命令直通**：rpc 写命令/session.create/kill 不做控制权检查（白名单/并发上限/revision 保留），靠 state-changed 广播收敛
+- **旧版兼容**：旧手机缓存 UI 发 `controller.takeover` → no-op；hello.ok 的 controller 字段保留但服务端恒不发（serde skip），旧端解析 null=无人持有不遮罩；**新 Broker + 旧 GUI 成员混部**时旧成员本地 controller 残留可能致跨会话互斥退化（单会话自洽，双端升级后消除）
+- **revision 版本号**：每次状态变化 +1，附在 `state-changed` payload 与 hello.ok/sessions；前端（remote-transport `filterStaleEvent`）单调过滤旧事件防乱序覆盖，**版本跳变触发 `state-resync-needed` 全 section 权威重拉**（兜底乱序漏刷）；**服务端保序**：`emit_state_changed` 取号与入队同一锁窗口（到达序=取号序，并发回归测试守卫），否则低版本事件后到被前端丢弃、状态永久丢失
 - **state-changed 统一广播**：写命令落盘后（`#[cc_command]` 宏出口自动 emit）全端按 section 权威刷新（前端状态中心 `src/state/sections.ts` 查表分发：section → loader 注册表，plugins 级联子项、providers/config 设置面板打开时暂存防覆盖编辑中表单、关闭补刷；App.vue 只订阅转发，新功能在注册表加一行）。**注意**：刷新回调链不得包含写操作（曾因 loadAppConfig 内无条件 doSyncEnv 写回 + 事件刷新形成 写→广播→读→写 死循环，风暴塞满通道致 RpcResult 丢失、config.json 原子写窗口被击穿丢失 remote 配置）
 
 ### 用户级资源开关（skills/agents/mcp/plugins）
@@ -167,7 +169,7 @@ UI 已浏览器化（一套 UI 走桌面 Tauri / 宽屏浏览器 / 手机浏览�
 
 手机经 WS 与桌面互传文件，**纯 rpc 分块命令**（无新协议消息，relay 零改动）：512KB 串行 base64 块（< relay 4MiB 消息上限），实现单点 `file_transfer.rs`，传输逻辑层 `api/fileTransfer.ts`，UI `components/files/FilesPanel.vue`（IconBar 按钮 `v-if="!isTauriEnv"`）。正本见 [remote/docs/protocol.md](../remote/docs/protocol.md)「文件传输」：
 
-- **权限模型**：读写范围锁定**授权项目内**（~/.claude/projects 出现过的路径，`is_within_known_project` canonicalize 锚点校验防 junction/symlink 逃逸）；上传写入收敛到会话项目 `.cc-box-files/`（客户端只传 ptyId+裸文件名，路径服务端拼接 + sanitize）；上传/下载均 write(None)（受 controller_gate，无控制权被拒）
+- **权限模型**：读写范围锁定**授权项目内**（~/.claude/projects 出现过的路径，`is_within_known_project` canonicalize 锚点校验防 junction/symlink 逃逸）；上传写入收敛到会话项目 `.cc-box-files/`（客户端只传 ptyId+裸文件名，路径服务端拼接 + sanitize）；上传/下载均 write(None)（无控制权互斥，直通）
 - **可靠性**：幂等 chunk（`offset+len==written` 重发不重写，ACK 丢失安全）；finish 用 `hard_link` 原子 no-replace 提交（绝不覆盖，冲突自动 `(n)` 改名）；下载会话固化 size/mtime，源变化即拒；会话绑定 conn_id（`connId`/`viaRelay` 由 handle_rpc 服务端注入覆盖伪造值）
 - **双限额（流量成本）**：`config.remote.fileTransferMaxDirect`（默认 200MB）/`fileTransferMaxRelay`（默认 20MB，中继流量 ≈2.7× 文件大小；`0`=禁用）；判定依据是「经由中继」（连接表 `via_relay`），非「公网」——局域 relay 本地测试可调高
 - **清理三层**：RPC 入口惰性 TTL（10 分钟）+ setup 定时 sweep + 启动扫已知项目 `.upload-*.part`

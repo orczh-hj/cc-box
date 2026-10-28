@@ -5,8 +5,8 @@
 
 ## 1. 一句话概括
 
-一台电脑 = **一个后台 Broker** = 一个设备身份、一个 LAN 入口、一条 relay 连接、一套全局控制权。
-这台电脑上的每个 CC-Box GUI 都是 Broker 的**成员**：PTY 留在各自进程，Broker 只做注册、路由、认证、控制权与状态聚合。手机扫任意实例的码，看到的都是整台设备；会话按实例分组，可控制所有实例。
+一台电脑 = **一个后台 Broker** = 一个设备身份、一个 LAN 入口、一条 relay 连接。
+这台电脑上的每个 CC-Box GUI 都是 Broker 的**成员**：PTY 留在各自进程，Broker 只做注册、路由、认证与状态聚合。手机扫任意实例的码，看到的都是整台设备；会话按实例分组，可控制所有实例。
 
 ---
 
@@ -34,7 +34,7 @@
 
 1. **配对**：扫桌面面板的中继码（跨网络）或局域码（同一网络直连）；可保存多台电脑，TokenGate 设备列表点击切换
 2. **会话列表**：按窗口分组，分组名 = 窗口真实标题；圆点实时反映各会话工作状态
-3. **进入会话**：点开即 attach 并取得全局控制权；同一时间只有一个设备可操作（桌面/手机互斥），其他端须显式接管；操作端断连自动释放
+3. **进入会话**：点开即 attach 抢占该会话（per-session 控制权）；不同设备可同时操作不同会话；同会话后 attach 优先，旧操作端收遮罩可抢回；操作端断连自动归还
 4. **新建/恢复会话**：设备上有 ≥2 个窗口时先弹「选择实例」；只有 1 个窗口不弹直接创建；取消则不创建
 5. **零窗口**：桌面窗口全关时，手机项目页出现「启动窗口」→ 桌面拉起空窗口（停在项目页）；停留在终端页时同样显示「启动窗口」入口
 6. **状态同步**：任一窗口或手机修改 provider/配置/开关，其他所有端 UI 自动刷新，无需手动操作
@@ -51,9 +51,9 @@
 | 开机自启动 | 设置 → 启动 / 托盘勾选 | 仅后台服务随系统启动，不开窗口 |
 | 退出 CC-Box | 托盘（原生确认）/ `--quit-broker` | 关全部窗口 + 后台退出；手动重开 GUI 恢复 |
 | 启动窗口（零窗口时） | 手机项目页 / 终端页覆盖层 | 桌面拉起空窗口并自动注册 |
-| 接管控制权 | 手机操作被拒时的提示 | 唯一转移方式；原操作端被剥离归还 |
+| 接管会话（终端遮罩「接管回来」） | 终端 Tab 遮罩按钮 | 重新 attach/claim 抢占该会话；原操作端收遮罩 |
 
-> 生命周期状态（`user_quit` / `update_in_progress` 等）与操作语义的正本见第 4 节；控制权规则正本见 [protocol.md](protocol.md)「全局控制权」。
+> 生命周期状态（`user_quit` / `update_in_progress` 等）与操作语义的正本见第 4 节；会话控制权规则正本见 [protocol.md](protocol.md)「会话控制权（per-session active）」。
 
 ## 3. 进程模型
 
@@ -138,14 +138,13 @@ cc-box --quit-broker   → 通过 IPC 退出 Broker（会关闭所有窗口）
 
 | 类别 | 消息 | 策略 |
 |---|---|---|
-| 可靠控制面/输入 | 控制权、ConnDrop、Shutdown/BrokerExit、SessionUpsert/Remove、SessionCreated/Attached/...、RpcResult、Heartbeat、PtyInput、PtyResize、SessionCreate/Kill/Attach、RPC | 异步路径 `send().await`；5s 超时断开成员并触发重注册；同步广播 `try_send` 满则断开成员。**绝不静默丢输入** |
+| 可靠控制面/输入 | ConnDrop、Shutdown/BrokerExit、SessionUpsert/Remove、SessionCreated/Attached/...、RpcResult、Heartbeat、PtyInput、PtyResize、SessionCreate/Kill/Attach、RPC | 异步路径 `send().await`；5s 超时断开成员并触发重注册；同步广播 `try_send` 满则断开成员。**绝不静默丢输入** |
 | 可丢数据面 | `PtyOutput` | 队列保留 25% headroom；超限丢弃，但每条带 `seq`，客户端检测缺口并显示「输出中断」 |
 
 - `SessionAttached.tail_seq` / `SessionSubscribed.tail_seq` 是快照基线；客户端丢弃 `seq <= tailSeq` 的重叠帧。
-- v2 `ClientMsg` 携带 `holder`（字段缺失=旧帧，`null`=无人，数字=持有 conn）；成员先应用控制权影子再处理，失败关闭。
-- v1 旧成员依赖同一队列中 `ControllerSet` 先于 `ClientMsg` 的顺序。
+- `ClientMsg` 不再携带 `holder`（全局控制权已 per-session 化）；旧 Broker 帧中的该字段被成员忽略。
 - 成员本地写命令的 `state-changed` 经 `state.changed` 上行；Broker 重分配设备级 revision 后同时扇出给所有 v2 成员与手机，保证窗口 A 的 provider/config 修改能刷新窗口 B/C。
-- `PtyInput/PtyResize` 只校验控制权、不主动 acquire；必须已有 attach（attach 时取得控制权）。
+- `PtyInput/PtyResize` 只校验该会话 active 归属、不产生控制面副作用；必须已有 attach。
 - PTY 退出由成员上行 `session.remove`，Broker 统一广播一次 `session.exit`；成员不再本地重复广播给桥接手机。
 - `tailSeq` 基线在 claim/重 attach 时只抬高不降低，避免把已收到的实时序号误判为缺口。
 
@@ -158,8 +157,8 @@ cc-box --quit-broker   → 通过 IPC 退出 Broker（会关闭所有窗口）
 - 未知 `pty_id`：按消息类型回 `SessionExit` / `SessionAttachDenied` / `RpcResult error`，并推送 `Sessions` 快照；**绝不在 Broker 本地执行**（Broker 没有 PTY）。
 - `SessionCreate` 不带 `instanceId`（旧手机）：落到最近注册的默认成员；无成员时显式 `SessionCreateFailed`。
 - 成员断连清理：路由、会话缓存、上传粘连、待处理 RPC、待处理创建全部回收；向手机发 `SessionDetached{instance disconnected}`；待处理创建/RPC 明确回失败。
-- 成员重连：Broker 补发当前 `ControllerSet`；成员 `reset_remote_views()` 把旧的远端 active 会话归还桌面，避免残留在旧 conn。
-- 控制权门覆盖 Attach/Create/Kill/PtyInput/PtyResize/RpcCall；成员侧仍保留 `active + controller` 双检查。
+- 成员重连：成员 `reset_remote_views()` 把旧的远端 active 会话归还桌面，避免残留在旧 conn。
+- per-session 控制权：成员侧 `handle_client_message` 对 `PtyInput/PtyResize` 只校验该会话 active；Attach/Create/Kill/RpcCall 直通转发（无控制权门）。
 
 ---
 
@@ -168,7 +167,8 @@ cc-box --quit-broker   → 通过 IPC 退出 Broker（会关闭所有窗口）
 | 组合 | 行为 |
 |---|---|
 | 新 Broker + 新 GUI | IPC v2，全部功能（含窗口重启/关闭、开机自启动、远程启动窗口） |
-| 新 Broker + 旧 GUI | 旧 GUI 经 `/internal/gw-ws` v1 注册；Broker 只发 v1 消息；旧 GUI 收不到 `DesktopEvent`/`WindowCommand`，也没有 pid → 托盘只展示、不能关闭/重启该窗口 |
+| 新 Broker + 旧 GUI | 旧 GUI 经 `/internal/gw-ws` v1 注册；Broker 只发 v1 消息；旧 GUI 收不到 `DesktopEvent`/`WindowCommand`，也没有 pid → 托盘只展示、不能关闭/重启该窗口。**控制权混部退化**：旧 GUI 成员的 PtyInput 仍含全局 controller 双检查（本地残留），多设备各用不同会话时可能出现先到者输入被拒——双端升级后消除 |
+| 新 Web UI（web 目录独立部署）+ 旧桌面 | 旧桌面仍按全局控制权 gate 写命令/attach（新 UI 无全局遮罩，被拒时 rpc 错误 / attach.denied 原样显示）；新 UI 发的 controller.takeover 旧桌面照常处理——行为等价旧 UI 的接管流，瞬态混部可接受。前端与 relay 部署解耦（见 deploy.md），前端更新通常先/随桌面一起上线 |
 | 旧 Gateway + 新 GUI | Broker 进入 `legacy_owned`：不启动 LAN、不连 relay、不抢 `gateway.lock`；面板显示「旧版本实例占用远程入口」；旧版退出后自动接管 |
 | 旧 GUI 在 Broker 运行时启动 | 旧 GUI 探到 `/gateway.ok` → 作为 v1 成员加入 |
 | 第三方程序占 8747 | Broker 记录 `lanError`，**仍连接 relay**；面板提示局域网不可用 |
@@ -226,6 +226,6 @@ CC-Box
 
 ## 11. 相关测试
 
-- Rust：`src-tauri/src/tests/gateway.rs`（路由/窗口名单/关闭指令/控制权/断连清理）、`broker_ipc.rs`（IPC 注册/管理/认证/pid/清理）、`broker_lifecycle.rs`（生命周期 + 单实例锁）、`remote_host.rs`（legacy/端口占用）、`broker/autostart.rs`（三平台命令生成）、`broker/tray.rs`（窗口菜单模型）。
+- Rust：`src-tauri/src/tests/gateway.rs`（路由/窗口名单/关闭指令/断连清理）、`broker_ipc.rs`（IPC 注册/管理/认证/pid/清理）、`broker_lifecycle.rs`（生命周期 + 单实例锁）、`remote_host.rs`（legacy/端口占用）、`broker/autostart.rs`（三平台命令生成）、`broker/tray.rs`（窗口菜单模型）、`remote_state.rs`（per-session 控制权规则矩阵）。
 - 前端：`tests/components/remoteModal.test.ts`（统一 Broker 状态/legacy 警告）、`tests/components/startupSection.test.ts`（开机自启动开关）、`tests/utils/remoteWindows.test.ts`（零窗口启动入口）、`tests/stores/session.test.ts`（空名单已知状态）、`tests/api/remote-transport.test.ts`（seq 缺口）。
 - 手动：`remote/docs/manual-test-cases.md` U-18。

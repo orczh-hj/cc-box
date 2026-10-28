@@ -51,7 +51,7 @@ cc-box/
 │   │   ├── hook_server.rs      # Hook HTTP 服务器（接收 Claude 运行时事件）
 │   │   ├── hook_config.rs      # Hook Plugin 文件管理
 │   │   ├── remote_server.rs    # 远程直连服务器（axum WS + Web UI + token 认证）
-│   │   ├── remote_state.rs     # 远程状态与消息处理（会话聚合、控制权、revision、广播）
+│   │   ├── remote_state.rs     # 远程状态与消息处理（会话聚合、per-session 控制权、revision、广播）
 │   │   ├── remote_client.rs    # 中继出站客户端（连接 relay、手机桥接、断线重连）
 │   │   ├── file_transfer.rs    # 远程文件传输（分块上传/下载、票据直链、双限额、三层清理）
 │   │   ├── rpc_dispatch.rs     # RPC 命令单一注册表（registry! 宏表）
@@ -150,9 +150,9 @@ npm run release -- --bump patch --notes "### Features\n- Add feature"
 | [docs/roadmap.md](docs/roadmap.md)                           | 开发路线图、进度跟踪、待办事项                                       |
 | [docs/logging.md](docs/logging.md)                           | 日志文件路径、级别策略、轮转与清理机制                                   |
 | [docs/release-process.md](docs/release-process.md)           | 版本号管理、本地打包、CI/CD 发布、签名与分发                             |
-| [remote/README.md](remote/README.md)                         | **远程连接设计文档**：双模式架构、统一管理、消息协议、独占接管、中继部署、实施阶段 |
+| [remote/README.md](remote/README.md)                         | **远程连接设计文档**：双模式架构、统一管理、消息协议、会话控制权、中继部署、实施阶段 |
 | [remote/docs/deploy.md](remote/docs/deploy.md)               | **中继部署指南**：构建、systemd、nginx 反代、桌面接入、本地测试、日常更新部署 |
-| [remote/docs/protocol.md](remote/docs/protocol.md)           | **协议与行为规则正本**：消息定义、全局控制权、文件传输                       |
+| [remote/docs/protocol.md](remote/docs/protocol.md)           | **协议与行为规则正本**：消息定义、会话控制权（per-session）、文件传输                 |
 | [remote/docs/multi-instance-gateway.md](remote/docs/multi-instance-gateway.md) | **多实例远程实施与操作说明**：设备级 Broker 架构、窗口管理与生命周期、路由与控制权、桌面/手机用户操作逻辑、兼容矩阵、已知限制 |
 | [remote/docs/manual-test-cases.md](remote/docs/manual-test-cases.md) | **远程手动测试条目**：真机访问、状态圆点、断线重连、token 安全、快捷键工具条、窗口管理/托盘 |
 
@@ -185,15 +185,15 @@ UI 已浏览器化（一套 UI 走桌面 Tauri / 宽屏浏览器 / 手机浏览�
 
 守卫测试、背景与踩坑说明 → [docs/development.md](docs/development.md)「新增功能检查清单（完整版）」
 
-### 全局控制权与状态同步（速查）
+### 会话控制权 per-session（速查）
 
-同一时间只有一个设备可操作——桌面与所有远程设备对等互斥，由 Rust `remote_state.rs` 单点裁决，前端只展示（ControllerMask）。远程写操作无人持有时自动持有；显式接管是唯一转移方式；断连自动释放；revision 版本号单调过滤旧事件、跳变触发全量重拉。**写命令必须走 `#[cc_command]` 宏出口广播 state-changed，且刷新回调链不得包含写操作（防写→广播→读→写死循环）**。
+**冲突单位是单个会话的输入流，不是整台设备**——每个 PTY 会话独立归属（`remote_state.rs` `SessionEntry.active`），不同设备可同时操作不同会话。attach/claim 无条件抢占（后到优先，单用户多设备无协商），旧持有者收 `session-taken-over` 遮罩并保留订阅；**同一浏览器连接同一时刻只持有一个焦点会话**（切 Tab 先 detach+subscribe 旧会话再 attach 新会话，桌面 claim 也以 taken-over 通知而非 detached）；PtyInput/Resize 仅 active 持有连接生效；断连自动归还。离散写命令（rpc write）**不做控制权互斥**（白名单 + revision 排序 + state-changed 广播收敛）。全局控制权层（ControllerHolder/ControllerMask/controller-changed/controller.takeover）已退役；旧手机缓存 UI 的 takeover 消息 no-op、hello.ok controller 字段保留恒不发。**写命令必须走 `#[cc_command]` 宏出口广播 state-changed，且刷新回调链不得包含写操作（防写→广播→读→写死循环）**。
 
-行为规则正本 → [remote/docs/protocol.md](remote/docs/protocol.md)「全局控制权」；机制摘要 → [docs/development.md](docs/development.md)「全局控制权与状态同步」
+行为规则正本 → [remote/docs/protocol.md](remote/docs/protocol.md)「会话控制权（per-session active）」；机制摘要 → [docs/development.md](docs/development.md)「会话控制权（per-session active）与状态同步」
 
 ### 多实例设备级 Broker（速查）
 
-一台电脑 = 一个常驻后台 **Broker**（一个设备身份/LAN 入口/relay 连接/全局控制权，存共享 config 不迁移）；多个 GUI 窗口 = Broker 成员。**GUI 不再参与 Gateway 选举**，PTY 始终留在 GUI。手机协议不感知窗口拓扑（会话条目带 instanceId/instanceName 分组字段，路由按 `pty_id → instance` 反查转发）。要点：
+一台电脑 = 一个常驻后台 **Broker**（一个设备身份/LAN 入口/relay 连接，存共享 config 不迁移）；多个 GUI 窗口 = Broker 成员。**GUI 不再参与 Gateway 选举**，PTY 始终留在 GUI。手机协议不感知窗口拓扑（会话条目带 instanceId/instanceName 分组字段，路由按 `pty_id → instance` 反查转发）。要点：
 
 - **进程模型**：`cc-box --broker` 无 GUI 窗口；Windows/macOS 带托盘（标题 `CC-Box`），Linux 纯 tokio 无头。每个 GUI 启动确保 Broker 在线；`broker.lock`（OS 排他锁）保证单实例；**所有窗口关闭后 Broker 不退出**（托盘/远程入口保留）。
 - **窗口管理**：Broker 记录成员 pid 与真实窗口标题；托盘顶部只有 `CC-Box`，**每个窗口直接是一级菜单项，单击即显示/聚焦**（不再有「窗口」父级，也不提供单窗口关闭/重启）；`window.command{close|show|openRemote}` 仍用于整体退出/更新/远程连接。新建窗口带 `--new-window`，停在项目页不自动进终端，Windows 用 `CreateProcessW(bInheritHandles=FALSE, CREATE_NO_WINDOW)` 避免控制台与句柄泄漏。零窗口时手机/桌面可 `rpc.call "spawn_new_instance"` 拉起空窗口；手机终端页有 stopped Tab 时也显示「启动窗口」覆盖层。
@@ -201,7 +201,7 @@ UI 已浏览器化（一套 UI 走桌面 Tauri / 宽屏浏览器 / 手机浏览�
 - **远程快捷动作**：托盘「远程连接」显示第一个可控制窗口并打开面板（无窗口先新建）；菜单顺序为 远程连接 → 刷新远程密钥 → 关闭/开启远程连接。**有更新时**：Broker 每 2h 检查（启动等 30s），菜单标题下出现「更新到 vX.Y.Z」且托盘图标叠红点；点击＝显示窗口并跳转 设置→更新（下载/安装/失败恢复仍在 GUI 更新页）。**破坏性操作统一用原生确认对话框**：关闭远程连接、刷新远程密钥、退出 CC-Box；窗口单击显示/新建/开启远程/自启动/更新不确认。
 - **开机自启动**：仅 Broker（不开窗口）；入口在**设置 → 启动**与托盘勾选项，不在远程面板；Windows Run / macOS LaunchAgent / Linux XDG autostart，命令带 `--broker --autostart`；无托盘环境用 `cc-box --quit-broker`。
 - **IPC**（`gateway_proto.rs` / `broker/ipc.rs`）：Windows Named Pipe（显式 DACL）/ Unix UDS（0700+0600+peer UID）；v2 首帧 `member.hello`（含 pid/windowTitle）+ `broker.secret`；成员上行 `window.title`/`state.changed`；管理操作独立 `admin` 首帧。旧版 GUI 仍走 `/internal/gw-ws` + `gateway.secret`（v1），无 pid/窗口指令。
-- **状态同步**：成员本地写命令的 `state-changed` 经 `state.changed` 上行，Broker 重分配设备级 revision 后扇出所有 v2 成员与手机（窗口 A 修改刷新 B/C）；`PtyInput/PtyResize` 只校验控制权不主动 acquire（必须已有 attach）；PTY 退出由成员上行 `session.remove`，Broker 只广播一次 `session.exit`。
+- **状态同步**：成员本地写命令的 `state-changed` 经 `state.changed` 上行，Broker 重分配设备级 revision 后扇出所有 v2 成员与手机（窗口 A 修改刷新 B/C）；`PtyInput/PtyResize` 只校验该会话 active 归属、无控制面副作用（必须已有 attach）；PTY 退出由成员上行 `session.remove`，Broker 只广播一次 `session.exit`。
 - **退出/更新**：Quit/PrepareForUpdate 先写回 `admin.result` 再退出；更新安装失败调用 `resume_broker_connection` 清除 update 标记/抑制并恢复；gateway.lock 心跳校验 owner + 原子写，解析失败按 mtime 判 stale；IPC server 创建失败直接退出释放 broker.lock。
 - **客户端细节**：`tailSeq` 基线 claim/重 attach 时只抬高不降低；Linux AppImage 拉起 Broker 优先 `$APPIMAGE`；设置页开机自启动每 5s 校准。
 - **单一有序队列**：每成员/连接一条队列；控制面与 `PtyInput` 可靠投递（`send().await`，5s 超时断开重同步），**绝不 try_send 静默丢输入**；`PtyOutput` 可丢但带 `seq`，客户端检测缺口并提示。

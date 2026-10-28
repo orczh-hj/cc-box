@@ -1,5 +1,15 @@
 <template>
   <div class="welcome-view">
+    <!-- 浏览器模式：首页（无项目时即本页）提供设备切换入口 -->
+    <button
+      v-if="!isTauriEnv"
+      class="device-btn"
+      :title="t('deviceSwitchTitle')"
+      :aria-label="t('deviceSwitchTitle')"
+      @click="openDeviceSwitcher()"
+    >
+      <img src="@/assets/icons/phone.svg" alt="Devices" />
+    </button>
     <div class="welcome-content">
       <div class="logo">
         <svg width="80" height="80" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
@@ -26,8 +36,11 @@
 
 <script setup lang="ts">
 import { useI18n } from 'vue-i18n'
+import { isTauriEnv } from '@/api/platform'
+import { useDeviceSwitcher } from '@/composables/useDeviceSwitcher'
 
 const { t } = useI18n()
+const { open: openDeviceSwitcher } = useDeviceSwitcher()
 
 const emit = defineEmits<{
   selectProject: []
@@ -40,10 +53,36 @@ function handleSelectProject() {
 
 <style scoped>
 .welcome-view {
+  position: relative;
   display: flex;
   align-items: center;
   justify-content: center;
   background: var(--bg-primary);
+}
+
+.device-btn {
+  position: absolute;
+  top: max(16px, env(safe-area-inset-top));
+  right: 16px;
+  width: 40px;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.device-btn img {
+  width: 20px;
+  height: 20px;
+  opacity: 0.85;
+}
+.device-btn:hover {
+  background: var(--hover-bg);
+  color: var(--text-primary);
 }
 
 .welcome-content {

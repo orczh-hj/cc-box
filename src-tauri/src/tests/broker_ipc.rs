@@ -192,5 +192,4 @@ async fn BrokerIpc_RegisterAdminAndCleanup_1() {
 
     crate::gateway::test_reset();
     crate::remote_state::set_broker_mode(false);
-    crate::remote_state::REMOTE_STATE.sync_controller_shadow(None);
 }

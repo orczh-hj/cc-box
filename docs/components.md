@@ -6,6 +6,7 @@
 App.vue
 ├── TitleBar.vue                    # 自定义标题栏（Windows 去除原生装饰）
 ├── SettingsOverlay.vue             # 全局设置浮层
+├── DeviceSwitcherDialog.vue        # 浏览器模式多设备切换弹窗（remote/DeviceList.vue 复用设备列表）
 ├── TerminalView.vue                # 终端主视图（常驻 DOM，v-show 控制）
 │   ├── IconBar.vue                 # 左侧图标栏（面板切换入口）
 │   ├── SidebarPanel.vue            # 侧边栏面板容器
@@ -79,11 +80,17 @@ Events：
 固定宽度 40px，提供面板切换入口：
 - Sessions、Skills、Agents、MCP、Plugins 图标按钮
 - Settings 按钮
-- Open Folder 按钮
+- Open Folder 按钮（桌面专属）
+- 浏览器模式：Files 按钮（设备切换只在首页，避免手机底栏拥挤）
+- 手机断点：底栏左侧面板组可横向滚动（隐藏滚动条），右侧 Files/Settings 固定不收缩；按钮宽度 36px、间距 4px 以节省横向空间
 
 ### SidebarPanel.vue — 侧边栏面板
 
 根据 `sidebarStore.activePanel` 显示对应面板内容，支持 `v-show` 切换（保留各面板状态）。
+
+### DeviceSwitcherDialog.vue / DeviceList.vue — 多设备切换（浏览器远程模式专属）
+
+`DeviceSwitcherDialog` 全局挂载于 App.vue，只由**首页**（ProjectSelectView / 无项目时的 WelcomeView）右上角设备按钮打开（`useDeviceSwitcher` 单例状态）；终端页 IconBar 不放设备入口，避免手机底栏拥挤。`DeviceList` 复用同一列表 UI：名称、LAN/中继、令牌无效、当前设备高亮、删除；TokenGate 也使用它。选择设备调用 `remoteTransport.activateDesktop`（同 origin 原地重连，跨 origin 跳转）。切换成功后 `remote-connected` 携带 `deviceChanged=true`，App 调用 `sessionStore.resetRemoteTabs()` 丢弃上一台设备的 Tabs/历史缓存（不 kill 远端 PTY）。
 
 ### FilesPanel.vue — 文件传输面板（浏览器远程模式专属，IconBar `v-if="!isTauriEnv"` 守卫）
 
@@ -92,23 +99,11 @@ Events：
 - 上传完成：仅当活动终端仍是发起时的 ptyId 且 running 才 `sendTerminalCommand(quotePath(targetPath))` 插入（防串终端；路径转义三档：裸/双引号/单引号）
 - 下载：路径输入 + 项目内简易浏览器（`file_list`，入口=活动 Tab 项目根，回上级到根为止；文件点选回填不自动下载）；保存走 `saveBlobToFile`（utils/platform.ts，a[download]）
 - 限额：挂载时 `file_transfer_limits` 拉取，按 `remoteTransport.viaRelay` 选档展示；中继常显流量成本提示
-- 错误映射：控制权被占（附「接管」按钮 → controllerTakeover）/ 超限 / 项目外路径 / 源文件已变化 / 超时等本地化文案
+- 错误映射：超限 / 项目外路径 / 源文件已变化 / 超时等本地化文案（控制权被占分支已随全局控制权退役删除）
 
 ### TitleBar.vue — 自定义标题栏
 
 Windows 平台去除原生装饰后自定义的拖拽区域 + 窗口控制按钮。
-
-### ControllerMask.vue — 全局控制权遮罩（桌面/浏览器同构挂载）
-
-设备互斥（同一时间只有一个设备操作——桌面与远程对等参与）的展示层：
-- 挂载于 App.vue（双模式）：桌面经 Tauri 事件 `controller-changed` 驱动；浏览器经 rpc.event 驱动（payload `{id: "desktop"|连接id|空串}`）
-- 显示条件：控制者标签非空且不等于本端标签（桌面 = 'desktop'，浏览器 = 连接 id）
-- 本端标签（selfLabel）**响应式维护**：浏览器端每次重连服务端重新分配连接 id（旧 id 永不复用），`remote-connected` 回调同步刷新 selfLabel 与 controllerLabel——setup 一次性快照会在重连后过期，导致自己持有/接管确认时新 id ≠ 旧快照 → 自己遮自己且接管解不开
-- 桌面端初始快照：`controller-changed` 只在变化时广播，桌面 UI 启动/重载会错过历史事件，挂载时经 `controller_status` command 主动查询补快照
-- 「接管」按钮：桌面调 `controller_takeover` command；浏览器发 `controller.takeover` 协议消息（服务端剥离旧持有者终端并广播）
-- 控制权由 Rust 后端裁决（attach 不能抢占、远程写操作被服务端拦截、桌面普通操作不自动持有），本组件只做展示
-- 接管确认（controller-changed 变为自己）由 remote-transport 按"重连"语义触发全量重同步（sessions.list 重拉 + 终端重 attach）
-- 层级高于终端级 taken-over 遮罩（两层并存）
 
 ## Store 结构
 

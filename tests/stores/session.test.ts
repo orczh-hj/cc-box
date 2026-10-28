@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { setActivePinia, createPinia } from 'pinia'
 import { useSessionStore } from '@/stores/session'
 import { useAppStore } from '@/stores/app'
-import { getSessions } from '@/api/tauri'
+import { getSessions, ptyKill } from '@/api/tauri'
 import { randomUUID } from 'crypto'
 
 // crypto.randomUUID polyfill for jsdom
@@ -702,5 +702,28 @@ describe('session store 远程 attach 拒绝与剥离（同类问题回归）', 
     const { tabId, ptyId } = runningTab()
     store.handleRemoteDetached(ptyId)
     expect(store.tabs.get(tabId)!.status).toBe('stopped')
+  })
+})
+
+describe('resetRemoteTabs（切换设备）', () => {
+  // 切换设备丢弃上一台设备的 Tab/历史缓存，但绝不能 kill 远端 PTY
+  it('Session_ResetRemoteTabs_001', () => {
+    const store = useSessionStore()
+    const tabId = store.createTab('/old-device/project')
+    store.setTabPty(tabId, 'pty-old')
+    store.activeTabId = tabId
+    store.pendingInstanceId = 'inst-old'
+    store.setRemoteInstances([{ id: 'inst-old', name: '窗口 1' }])
+    const kill = vi.mocked(ptyKill)
+    kill.mockClear()
+
+    store.resetRemoteTabs()
+
+    expect(store.tabs.size).toBe(0)
+    expect(store.activeTabId).toBeNull()
+    expect(store.pendingInstanceId).toBeNull()
+    expect(store.remoteInstances).toEqual([])
+    expect(store.remoteInstancesKnown).toBe(false)
+    expect(kill).not.toHaveBeenCalled()
   })
 })

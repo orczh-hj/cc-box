@@ -78,13 +78,17 @@ function start(name, cmd, args, opts) {
 const procs = [
   // BIND 只接受纯 IP（端口由 CC_BOX_RELAY_PORT 控制，默认 8800）。
   // CARGO_TARGET_DIR 指到不被 git 跟踪的独立目录：remote/relay/target 下
-  // 的 debug 产物历史上被误跟踪，dev 构建会弄脏工作区
+  // 的 debug 产物历史上被误跟踪，dev 构建会弄脏工作区。
+  // WEB_DIR：relay 以 --no-default-features 构建（无内嵌 UI），只服务磁盘
+  // 目录——不注入则手机打开配对页得到纯文字 "not found"。指到仓库 dist
+  // （改前端后需 npm run build，手机刷新即生效）
   start('relay', 'cargo', ['run'], {
     cwd: path.join(ROOT, 'remote', 'relay'),
     env: {
       ...process.env,
       CC_BOX_RELAY_BIND: '0.0.0.0',
       CC_BOX_RELAY_PORT: String(PORT),
+      CC_BOX_RELAY_WEB_DIR: path.join(ROOT, 'dist'),
       CARGO_TARGET_DIR: path.join(ROOT, 'remote', 'relay', 'target-dev'),
     },
   }),

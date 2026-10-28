@@ -577,7 +577,6 @@ mod tests {
             relay_connected: true,
             relay_url: "wss://example".to_string(),
             relay_pair_code: String::new(),
-            controller: None,
             revision: 0,
             app_version: "test".to_string(),
             broker_pid: 1,

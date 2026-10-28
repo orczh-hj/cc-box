@@ -313,23 +313,13 @@ async fn connect_once(gen: u64) -> MemberEvent {
                     continue;
                 };
                 match down {
-                    GwDown::ClientMsg { conn_id, via_relay, msg, holder } => {
-                        if let Some(holder) = holder {
-                            crate::remote_state::REMOTE_STATE
-                                .sync_controller_shadow_if_changed(holder);
-                        }
+                    GwDown::ClientMsg { conn_id, via_relay, msg } => {
                         ensure_bridge(conn_id, via_relay, data_tx.clone());
                         crate::remote_state::REMOTE_STATE.handle_client_message(conn_id, &msg);
                     }
                     GwDown::ConnDrop { conn_id } => {
                         BRIDGES.lock().remove(&conn_id);
                         crate::remote_state::REMOTE_STATE.remove_conn(conn_id);
-                    }
-                    GwDown::ControllerSet { holder } => {
-                        crate::remote_state::REMOTE_STATE.sync_controller_shadow(holder);
-                    }
-                    GwDown::ControllerStrip { conn_id } => {
-                        crate::remote_state::REMOTE_STATE.strip_controller_conn(conn_id);
                     }
                     GwDown::RelayStatus { .. } => {}
                     GwDown::BrokerStatus { status } => {
@@ -408,14 +398,8 @@ fn ensure_bridge(conn_id: u64, via_relay: bool, data_tx: mpsc::Sender<GwUp>) {
     BRIDGES.lock().insert(conn_id, tx);
     tokio::spawn(async move {
         while let Some(msg) = rx.recv().await {
-            // controller-changed 真源在 Broker，成员影子事件不上行；
             // state-changed 必须上行（成员桌面/成员路由写操作导致的配置变化，
             // Broker 转发时会重新分配设备级 revision）
-            if let ServerMessage::RpcEvent { ref name, .. } = msg {
-                if name == crate::events::names::CONTROLLER_CHANGED {
-                    continue;
-                }
-            }
             let is_output = matches!(msg, ServerMessage::PtyOutput { .. });
             let up = GwUp::ToConn { conn_id, msg };
             if is_output {

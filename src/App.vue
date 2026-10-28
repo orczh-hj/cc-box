@@ -121,10 +121,10 @@
 
   <!-- 多实例远程：新建/恢复会话前的实例选择（Teleport 到 body） -->
   <InstancePickerDialog />
-  <!-- 全局控制权遮罩（设备互斥：桌面与远程设备对等，其他设备操作中时显示） -->
-  <ControllerMask />
   <!-- 全局远程连接面板（IconBar 与托盘“远程连接”共用） -->
   <RemoteModal :visible="remotePanelVisible" @close="remotePanelVisible = false" />
+  <!-- 浏览器模式：多设备切换弹窗 -->
+  <DeviceSwitcherDialog />
   <!-- 全局通知宿主（useToast 的唯一渲染点） -->
   <ToastHost />
 </div>
@@ -170,10 +170,10 @@ import DirectoryPicker from '@/components/DirectoryPicker.vue'
 import WelcomeView from '@/components/WelcomeView.vue'
 import ProjectSelectView from '@/components/ProjectSelectView.vue'
 import TitleBar from '@/components/TitleBar.vue'
-import ControllerMask from '@/components/ControllerMask.vue'
 import InstancePickerDialog from '@/components/InstancePickerDialog.vue'
 import ToastHost from '@/components/ToastHost.vue'
 import RemoteModal from '@/components/RemoteModal.vue'
+import DeviceSwitcherDialog from '@/components/remote/DeviceSwitcherDialog.vue'
 import { useRemotePanel } from '@/composables/useRemotePanel'
 
 const TerminalView = defineAsyncComponent(() => import('@/components/TerminalView.vue'))
@@ -354,10 +354,26 @@ function setupRemoteSessionSync() {
     // 历史已加载的场景立即回填会话名（未加载时由 TerminalView 加载完成后回填）
     sessionStore.backfillTabNamesFromHistory()
   })
-  void transport.listen('remote-connected', () => {
-    // 新连接/切换设备：先清旧实例名单（新设备可能是旧桌面，不会再下发
-    // 名单；不清会让选择器残留上一台设备的实例）
-    sessionStore.resetRemoteInstances()
+  void transport.listen<{ deviceChanged?: boolean }>('remote-connected', (payload) => {
+    // 同 origin 切换设备：旧设备 Tabs/历史缓存必须丢弃（不能 kill PTY——
+    // 它们属于另一台设备）。普通重连只清实例名单，保留 Tabs 就地恢复。
+    if (payload?.deviceChanged === true) {
+      sessionStore.resetRemoteTabs()
+      // 项目/近期会话/配置都是设备级数据：清缓存回首页，按新设备重拉
+      appStore.resetHomeCache()
+      appStore.setCwd('')
+      void appStore.loadAppConfig()
+      void appStore.loadCache().then(() => {
+        if (appStore.cachedProjects.length > 0 && currentView.value === 'welcome') {
+          currentView.value = 'projects'
+        }
+      })
+      if (currentView.value === 'terminal') currentView.value = 'welcome'
+    } else {
+      // 新连接/重连：清旧实例名单（新设备可能是旧桌面，不会再下发名单；
+      // 不清会让选择器残留上一台设备的实例）
+      sessionStore.resetRemoteInstances()
+    }
     transport.sendClient({ type: 'sessions.list' })
   })
   // 实例名单随每次 sessions.list 应答补发。旧 Broker 无 solicited 字段，按

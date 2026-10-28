@@ -26,39 +26,14 @@ const TAIL_MERGE_THRESHOLD: usize = 64;
 /// 每连接出站通道容量；快照帧（~256KB）不再与增量挤 256 槽
 pub(crate) const CONN_CHANNEL_CAPACITY: usize = 1024;
 
-/// 控制权持有者：同一时间只有一端能操作某个终端（产品决策）
+/// 会话归属（per-session 控制权，唯一裁决层）：同一时间只有一端能操作某个
+/// 终端。attach/claim 无条件抢占（后到优先，单用户多设备无协商）；不同连接
+/// 可同时持有不同会话。离散写命令（rpc write）不做控制权互斥（靠白名单 +
+/// revision 排序 + state-changed 广播收敛）
 #[derive(Debug, Clone, PartialEq)]
 pub enum ActiveView {
     Desktop,
     Remote(u64),
-}
-
-/// 全局控制权持有者：桌面与所有远程设备对等参与互斥（产品决策：
-/// 同一时间只有一个设备操作，任何被遮端点「接管」即可开始操作）。
-/// 桌面获得控制权仅通过显式接管（ControllerMask 接管按钮 / 终端接管回来），
-/// 桌面普通操作不抢占远程（远程普通写操作在无人持有时自动持有）
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum ControllerHolder {
-    Desktop,
-    Remote(u64),
-}
-
-impl ControllerHolder {
-    /// hello.ok / controller-changed 的 id 表示：桌面 = 0（conn_id 从 1 起，
-    /// 0 不与远程连接冲突）；远程 = conn_id
-    pub fn as_id(self) -> u64 {
-        match self {
-            ControllerHolder::Desktop => 0,
-            ControllerHolder::Remote(c) => c,
-        }
-    }
-
-    pub(crate) fn id_label(self) -> String {
-        match self {
-            ControllerHolder::Desktop => "desktop".to_string(),
-            ControllerHolder::Remote(c) => c.to_string(),
-        }
-    }
 }
 
 struct SessionEntry {
@@ -172,17 +147,10 @@ struct StateInner {
     subscribers: HashMap<String, HashSet<u64>>,
     /// conn_id → 出站通道
     conns: HashMap<u64, ConnEntry>,
-    /// 全局状态版本号：每次状态变化（写命令广播/会话建关/控制权变更）+1。
-    /// 附在 state-changed/controller-changed payload 与 HelloOk 下发，前端
-    /// 单调过滤防旧事件乱序覆盖新状态；重连/接管后以服务端值为基线
+    /// 全局状态版本号：每次状态变化（写命令广播/会话建关）+1。
+    /// 附在 state-changed payload 与 HelloOk 下发，前端单调过滤防旧事件
+    /// 乱序覆盖新状态；重连后以服务端值为基线
     revision: u64,
-    /// 全局控制权持有者（None=无人持有）。设备互斥（桌面与远程对等）：
-    /// - 远程写操作（rpc 写命令/session.create/kill/attach）无人持有时自动持有
-    /// - 他人（含桌面）持有时远程写操作被服务端拒绝；attach 不能抢占
-    /// - 转移仅显式接管：远程 controller.takeover / 桌面 controller_takeover
-    ///   command（ControllerMask 接管按钮）与 pty_claim（终端接管回来）
-    /// - takeover 剥离旧持有者全部终端归属；断连自动释放
-    controller: Option<ControllerHolder>,
 }
 
 /// 票据受限连接的放行规则：只允许拉取该文件分块与心跳
@@ -212,7 +180,7 @@ pub(crate) fn is_broker() -> bool {
     BROKER_MODE.load(Ordering::SeqCst)
 }
 
-/// 成员状态上行通道（SessionUpsert/SessionRemove/DesktopTakeover）。
+/// 成员状态上行通道（SessionUpsert/SessionRemove）。
 /// **无界**：状态帧数量受会话数约束，可靠优先于内存上限；输出流不走这里，
 /// 由每连接的 bridge 单独限流并带 seq 缺口标记。
 static UPLINK: LazyLock<Mutex<Option<mpsc::UnboundedSender<crate::gateway_proto::GwUp>>>> =
@@ -353,153 +321,9 @@ impl RemoteState {
         self.inner.lock().revision
     }
 
-    // ==================== 全局控制权（设备互斥） ====================
-
-    /// 当前控制者（None=无人持有；HelloOk 下发前端判定遮罩，Desktop=0）
-    pub fn controller(&self) -> Option<ControllerHolder> {
-        self.inner.lock().controller
-    }
-
-    /// 远程写操作准入：他人（含桌面）持有 → Err(持有者)；无人/自己 → Ok。
-    /// 只做检查不改变状态（持有由 write_success_acquire / attach 完成）
-    pub(crate) fn controller_gate(&self, conn_id: u64) -> Result<(), ControllerHolder> {
-        match self.controller() {
-            Some(ControllerHolder::Remote(c)) if c == conn_id => Ok(()),
-            Some(other) => Err(other),
-            None => Ok(()),
-        }
-    }
-
-    /// 无人持有时自动持有并广播（远程写操作成功后调用；已持有幂等）。
-    /// 返回是否发生了持有变化
-    pub(crate) fn write_success_acquire(&self, conn_id: u64) -> bool {
-        let changed = {
-            let mut inner = self.inner.lock();
-            if inner.controller.is_some() {
-                false
-            } else {
-                inner.controller = Some(ControllerHolder::Remote(conn_id));
-                true
-            }
-        };
-        if changed {
-            self.broadcast_controller_changed();
-        }
-        changed
-    }
-
-    /// 广播 controller-changed（payload {id: "desktop"|connId|空串, data: revision}）：
-    /// 桌面 Tauri emit（桌面 ControllerMask 遮罩判定）+ 远程 WS 广播；
-    /// 各端据此显示/解除"被其他设备控制中"全局遮罩；revision 随之推进。
-    /// 取号与入队在同一锁窗口（保序）：跨线程与 state-changed 并发时若分属
-    /// 两个锁窗口，低 revision 事件可能后入队，被前端 filterStaleEvent
-    /// 当旧事件永久丢弃（遮罩/刷新状态丢失）
-    fn broadcast_controller_changed(&self) {
-        let name = crate::events::names::CONTROLLER_CHANGED;
-        let (rev, holder, id) = {
-            let mut inner = self.inner.lock();
-            inner.revision += 1;
-            let rev = inner.revision;
-            let holder = inner.controller;
-            let id = holder.map(|c| c.id_label()).unwrap_or_default();
-            let msg = ServerMessage::RpcEvent {
-                name: name.to_string(),
-                payload: serde_json::json!({ "id": id, "data": rev.to_string() }),
-            };
-            for e in inner.conns.values() {
-                if e.download_scope.is_some() {
-                    continue; // 票据受限连接不接收控制面事件
-                }
-                let _ = e.tx.try_send(msg.clone());
-            }
-            (rev, holder, id)
-        };
-        // 锁外调用 hook：Broker 的事件 hook 会取 GW_STATE，若在 inner 锁内调用
-        // 会与 unregister_member 的 GW_STATE→inner 形成 ABBA 死锁
-        emit_via_hook(name, &id, &rev.to_string());
-        // 多实例：向成员广播控制权影子（真源裁决结果；成员侧 pty.input 双重
-        // 校验依赖影子与真源一致）
-        crate::gateway::broadcast_down(crate::gateway_proto::GwDown::ControllerSet {
-            holder: holder.and_then(|c| match c {
-                ControllerHolder::Remote(conn) => Some(conn),
-                ControllerHolder::Desktop => None,
-            }),
-        });
-    }
-
-    /// 接管核心（远程 takeover 与桌面 controller_takeover 共用）：控制权转移给
-    /// new_holder + 剥离旧持有者（远程）全部终端归属（归还桌面：resize 恢复
-    /// 桌面尺寸）；旧持有者由 controller-changed 全局遮罩盖住，接管者以同一
-    /// 广播确认并触发全量刷新
-    fn transfer_controller(&self, new_holder: ControllerHolder) {
-        let (old, stripped) = {
-            let mut inner = self.inner.lock();
-            let old = inner.controller;
-            inner.controller = Some(new_holder);
-            let mut ids = Vec::new();
-            if let Some(ControllerHolder::Remote(old_conn)) = old {
-                if ControllerHolder::Remote(old_conn) != new_holder {
-                    for (id, entry) in inner.sessions.iter_mut() {
-                        if entry.active == ActiveView::Remote(old_conn) {
-                            entry.active = ActiveView::Desktop;
-                            ids.push(id.clone());
-                        }
-                    }
-                }
-            }
-            (old, ids)
-        };
-        for id in &stripped {
-            // 与 remove_conn 归还同构：遮罩解除 + 尺寸恢复
-            emit_event("session-reclaimed", id, "");
-            resize_pty(id, self.desktop_size_of(id));
-            log::info!("[remote] session {} stripped to desktop (takeover by {:?})", id, new_holder);
-        }
-        // 多实例：旧持有者的会话可能在成员上——广播 Strip 让成员归还
-        if let Some(ControllerHolder::Remote(old_conn)) = old {
-            if ControllerHolder::Remote(old_conn) != new_holder {
-                crate::gateway::broadcast_down(crate::gateway_proto::GwDown::ControllerStrip {
-                    conn_id: old_conn,
-                });
-            }
-        }
-        self.broadcast_controller_changed();
-    }
-
-    /// 远程显式接管（controller.takeover 消息）
-    fn handle_takeover(&self, conn_id: u64) {
-        self.transfer_controller(ControllerHolder::Remote(conn_id));
-    }
-
-    /// 控制权影子同步（Gateway 下发 ControllerSet，成员侧执行）：
-    /// 写影子状态 + 桌面 emit（不远程广播——真源在 Gateway，成员本地广播会被
-    /// 桥过滤器拦截）。emit 保证成员实例桌面在手机接管期间显示全局遮罩
-    pub(crate) fn sync_controller_shadow(&self, holder: Option<u64>) {
-        let id_label = holder.map(|c| c.to_string()).unwrap_or_default();
-        {
-            let mut inner = self.inner.lock();
-            inner.controller = holder.map(ControllerHolder::Remote);
-        }
-        emit_via_hook(crate::events::names::CONTROLLER_CHANGED, &id_label, "0");
-    }
-
-    /// v2 转发消息携带的 holder 先于消息应用：避免 ControllerSet 与
-    /// ClientMsg 在网络上交错时成员用过期影子拒绝输入。只在变化时 emit。
-    pub(crate) fn sync_controller_shadow_if_changed(&self, holder: Option<u64>) {
-        let current = {
-            let inner = self.inner.lock();
-            match inner.controller {
-                Some(ControllerHolder::Remote(c)) => Some(c),
-                _ => None,
-            }
-        };
-        if current != holder {
-            self.sync_controller_shadow(holder);
-        }
-    }
+    // ==================== 会话归属（per-session 控制权） ====================
 
     /// 成员重连/断连清理：所有远端接管的会话归还桌面、清空订阅索引。
-    /// 不触碰控制权真源（影子由 ControllerSet/holder 重新对齐）。
     pub(crate) fn reset_remote_views(&self) {
         let ids = {
             let mut inner = self.inner.lock();
@@ -520,61 +344,10 @@ impl RemoteState {
         }
     }
 
-    /// 剥离指定连接的全部 active 归属（Gateway 下发 ControllerStrip，成员侧
-    /// 执行）：归还桌面 + resize 恢复尺寸（与 transfer_controller 的本机 strip
-    /// 主体同构，但不触碰 controller 字段）
-    pub(crate) fn strip_controller_conn(&self, conn_id: u64) {
-        let ids = {
-            let mut inner = self.inner.lock();
-            let mut ids = Vec::new();
-            for (id, entry) in inner.sessions.iter_mut() {
-                if entry.active == ActiveView::Remote(conn_id) {
-                    entry.active = ActiveView::Desktop;
-                    ids.push(id.clone());
-                }
-            }
-            ids
-        };
-        for id in &ids {
-            emit_event("session-reclaimed", id, "");
-            resize_pty(id, self.desktop_size_of(id));
-            log::info!("[remote] session {} stripped to desktop (gateway takeover)", id);
-        }
-    }
-
-    /// 桌面显式接管（Tauri command controller_takeover / pty_claim 调用）：
-    /// 桌面获得全局控制权 + 剥离当前远程持有者的全部终端归属
-    pub fn desktop_takeover(&self) {
-        if self.controller() == Some(ControllerHolder::Desktop) {
-            return; // 已持有，幂等
-        }
-        log::info!("[remote] desktop takeover");
-        self.transfer_controller(ControllerHolder::Desktop);
-        // 多实例成员：桌面接管必须上报 Gateway（真源同步转 Desktop——
-        // 否则 Gateway 真源滞留 Remote(手机)，转发输入被成员影子门静默拒绝）
-        uplink_send(crate::gateway_proto::GwUp::DesktopTakeover);
-    }
-
-    /// 控制权释放（远程持有者断连时调用；广播空 id = 无人持有）
-    fn release_controller(&self, conn_id: u64) {
-        let was_holder = {
-            let mut inner = self.inner.lock();
-            if inner.controller == Some(ControllerHolder::Remote(conn_id)) {
-                inner.controller = None;
-                true
-            } else {
-                false
-            }
-        };
-        if was_holder {
-            log::info!("[remote] controller released (conn {} closed)", conn_id);
-            self.broadcast_controller_changed();
-        }
-    }
-
     /// state-changed 广播（实例方法：单元测试用独立实例验证广播半链）。
     /// 桌面 hook emit + 全体远程连接广播，payload {id: section, data: revision}。
-    /// 取号与入队在同一锁窗口（保序，同 broadcast_controller_changed）
+    /// 取号与入队在同一锁窗口（保序：并发时低 revision 事件若后入队，
+    /// 会被前端 filterStaleEvent 当旧事件永久丢弃）
     pub fn emit_state_changed(&self, section: StateSection) {
         let name = crate::events::names::STATE_CHANGED;
         let section = section.as_str();
@@ -594,7 +367,8 @@ impl RemoteState {
             }
             rev
         };
-        // 锁外调用 hook（Broker 中会取 GW_STATE，见 broadcast_controller_changed）
+        // 锁外调用 hook：Broker 的事件 hook 会取 GW_STATE，若在 inner 锁内调用
+        // 会与 unregister_member 的 GW_STATE→inner 形成 ABBA 死锁
         emit_via_hook(name, section, &rev.to_string());
         // 成员模式：上行给 Broker，由 Broker 重新分配设备级 revision 后
         // 扇出给其他 GUI 与全部手机。Broker 模式下 UPLINK 为 None，安全 no-op。
@@ -829,8 +603,6 @@ impl RemoteState {
         crate::file_transfer::cleanup_conn(conn_id);
         // Gateway 侧：清 rpc 粘连路由（file_upload 后续命令不再跟随）
         crate::gateway::conn_dropped(conn_id);
-        // 控制权释放（持有者断连；广播空 id = 其他设备可自由操作）
-        self.release_controller(conn_id);
         let reclaimed = {
             let mut inner = self.inner.lock();
             inner.conns.remove(&conn_id);
@@ -875,8 +647,8 @@ impl RemoteState {
         )
     }
 
-    /// 桌面端"接管回来"（Tauri 命令 pty_claim 调用）。显式接管动作：
-    /// 收回该终端 + 同时获得全局控制权（设备互斥语义，桌面遮罩随广播解除）
+    /// 桌面端"接管回来"（Tauri 命令 pty_claim 调用）：无条件收回该终端的
+    /// active 归属（per-session 抢占，单用户多设备无协商），通知旧远程持有者
     pub fn claim(&self, id: &str) {
         let old = {
             let mut inner = self.inner.lock();
@@ -884,20 +656,21 @@ impl RemoteState {
             std::mem::replace(&mut entry.active, ActiveView::Desktop)
         };
         if let ActiveView::Remote(old_conn) = old {
+            // 只收回控制权、不摘订阅：旧远程保留输出流，显示 taken-over 遮罩
+            // 可随时重新 attach 抢回。发 SessionDetached 会让对方把 Tab 置
+            // stopped（表现为"断开但仍见内容"），语义错误。
             self.try_send(
                 old_conn,
-                ServerMessage::SessionDetached {
-                    id: id.to_string(),
-                    reason: "desktop".to_string(),
+                ServerMessage::RpcEvent {
+                    name: "session-taken-over".to_string(),
+                    payload: serde_json::json!({ "id": id, "data": "" }),
                 },
             );
         }
-        emit_event("session-reclaimed", id, "");
+        // 仅桌面需要清遮罩；广播 reclaimed 会把刚发给旧远程的 taken-over
+        // 又清掉（同一连接队列后到者生效）
+        emit_desktop_only("session-reclaimed", id, "");
         resize_pty(id, self.desktop_size_of(id));
-        // 全局控制权：桌面接管回来同时获得（其他远程端显示遮罩）
-        if self.controller() != Some(ControllerHolder::Desktop) {
-            self.transfer_controller(ControllerHolder::Desktop);
-        }
     }
 
     /// 应用层消息分发（认证后的消息，局域网/中继同一条路径）
@@ -981,13 +754,13 @@ impl RemoteState {
                         }
                     }
                 }
-                let (controller, revision) = {
+                let revision = {
                     let mut inner = self.inner.lock();
                     if let Some(e) = inner.conns.get_mut(&conn_id) {
                         e.authed = true;
                         e.download_scope = download_scope.clone();
                     }
-                    (inner.controller.map(|c| c.as_id()), inner.revision)
+                    inner.revision
                 };
                 self.try_send(
                     conn_id,
@@ -995,8 +768,8 @@ impl RemoteState {
                         ver: cc_box_remote_protocol::PROTOCOL_VERSION,
                         device_name: device_name(),
                         conn_id,
-                        // 桌面持有 = Some(0)（conn_id 从 1 起，0 保留给桌面）
-                        controller,
+                        // 控制权已 per-session 化：恒 null（字段保留兼容旧端缓存 UI）
+                        controller: None,
                         revision,
                         download_scope,
                     },
@@ -1021,21 +794,6 @@ impl RemoteState {
                 self.try_send(conn_id, ServerMessage::Projects { list });
             }
             ClientMessage::SessionCreate { path, session_id, skip_permissions, custom_args, session_name, .. } => {
-                // 设备互斥：写操作，他人持有时拒绝（前端遮罩是第一道，此处服务端兜底）
-                if let Err(holder) = self.controller_gate(conn_id) {
-                    log::warn!(
-                        "[remote] session create denied (conn {} != controller {})",
-                        conn_id,
-                        holder.id_label()
-                    );
-                    self.try_send(
-                        conn_id,
-                        ServerMessage::SessionCreateFailed {
-                            error: "controller held by another device".to_string(),
-                        },
-                    );
-                    return;
-                }
                 // 并发上限（先于白名单：检查最便宜且无需 IO）
                 if REMOTE_SPAWN_INFLIGHT.fetch_add(1, Ordering::AcqRel) >= REMOTE_SPAWN_LIMIT {
                     REMOTE_SPAWN_INFLIGHT.fetch_sub(1, Ordering::AcqRel);
@@ -1099,8 +857,6 @@ impl RemoteState {
                             })
                             .to_string();
                             emit_desktop_only("remote-session-created", &info.id, &data);
-                            // 写操作成功 → 无人持有时自动成为控制者（设备互斥）
-                            REMOTE_STATE.write_success_acquire(conn_id);
                             reply(ServerMessage::SessionCreated {
                                 id: info.id,
                                 path: info.cwd,
@@ -1139,15 +895,6 @@ impl RemoteState {
                 });
             }
             ClientMessage::SessionKill { id, quiet } => {
-                // 设备互斥：写操作，他人持有时拒绝（kill 无应答通道，忽略 + log）
-                if let Err(holder) = self.controller_gate(conn_id) {
-                    log::warn!(
-                        "[remote] session kill denied (conn {} != controller {})",
-                        conn_id,
-                        holder.id_label()
-                    );
-                    return;
-                }
                 // 用户显式关闭 = 各端联动删 Tab（桌面 closeTab / 其他浏览器端
                 // 均从"打开的标签页"移除）。先 emit 后 kill：manager.kill 内部会
                 // 先 emit pty-exit（前端收到即清 tab.ptyId 置 stopped），若本事件
@@ -1228,30 +975,15 @@ impl RemoteState {
                 );
             }
             ClientMessage::SessionAttach { id, cols, rows } => {
-                // 设备互斥：attach 不能抢占（产品决策）——他人持有控制权时拒绝，
-                // 前端提示接管（controller.takeover 是唯一转移方式）
-                if let Err(holder) = self.controller_gate(conn_id) {
-                    log::warn!(
-                        "[remote] attach denied for session {} (conn {} != controller {})",
-                        id,
-                        conn_id,
-                        holder.id_label()
-                    );
-                    self.try_send(
-                        conn_id,
-                        ServerMessage::SessionAttachDenied {
-                            id: id.clone(),
-                            reason: "controller held by another device".to_string(),
-                        },
-                    );
-                    return;
-                }
+                // attach 即抢占式接管（handle_attach）：不同连接可同时 attach
+                // 不同会话；同一会话后到者优先，旧持有者收 taken-over 遮罩
                 self.handle_attach(conn_id, id, *cols, *rows);
-                // attach 成功（无人持有或已是自己）→ 自动持有控制权
-                self.write_success_acquire(conn_id);
             }
+            // 全局控制权已 per-session 化（attach/claim 即会话级抢占）。
+            // 旧版手机缓存 UI 仍会发送本消息——no-op 静默忽略（删 variant 会让
+            // 旧端整帧反序列化失败），不产生任何状态变化
             ClientMessage::ControllerTakeover => {
-                self.handle_takeover(conn_id);
+                log::debug!("[remote] legacy controller.takeover ignored (conn {})", conn_id);
             }
             ClientMessage::SessionDetach { id } => {
                 let was_active = {
@@ -1282,8 +1014,8 @@ impl RemoteState {
                 );
             }
             ClientMessage::PtyInput { id, data } => {
-                // 终端级 active 检查 + 全局控制权兜底（takeover 剥离后旧持有者
-                // 不应再写入；正常流两者恒一致，此处双保险）
+                // 会话级裁决：仅该会话的 active 持有者可写入（被抢占/断连归还后
+                // active 不再匹配，旧持有者输入自然被拒）
                 let allowed = {
                     let inner = self.inner.lock();
                     inner
@@ -1291,7 +1023,6 @@ impl RemoteState {
                         .get(id)
                         .map(|e| e.active == ActiveView::Remote(conn_id))
                         .unwrap_or(false)
-                        && matches!(inner.controller, Some(ControllerHolder::Remote(c)) if c == conn_id)
                 };
                 if allowed {
                     if let Some(manager) = crate::pty::get_pty_manager() {
@@ -1311,7 +1042,6 @@ impl RemoteState {
                         .get(id)
                         .map(|e| e.active == ActiveView::Remote(conn_id))
                         .unwrap_or(false)
-                        && matches!(inner.controller, Some(ControllerHolder::Remote(c)) if c == conn_id)
                 };
                 if allowed {
                     resize_pty(id, Some((*cols, *rows)));

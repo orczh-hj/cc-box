@@ -25,7 +25,6 @@ vi.mock('@/api/fileTransfer', async (importOriginal) => {
 vi.mock('@/api/tauri', () => ({
   fileTransferLimits: vi.fn().mockResolvedValue({ directMax: 200 * 1024 * 1024, relayMax: 20 * 1024 * 1024 }),
   fileList: vi.fn(),
-  controllerTakeover: vi.fn(),
   saveLastProject: vi.fn().mockResolvedValue(undefined),
 }))
 

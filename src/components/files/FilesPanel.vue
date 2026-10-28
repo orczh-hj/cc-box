@@ -54,7 +54,6 @@
         <template v-else-if="upState === 'error'">
           <p class="error-text">{{ upError }}</p>
           <div class="error-actions">
-            <button v-if="upErrorIsController" class="primary-btn" @click="takeover">{{ t('filesTakeover') }}</button>
             <button class="secondary-btn" @click="resetUpload">{{ t('filesRetry') }}</button>
           </div>
         </template>
@@ -171,7 +170,6 @@
         <template v-else-if="dlState === 'error'">
           <p class="error-text">{{ dlError }}</p>
           <div class="error-actions">
-            <button v-if="dlErrorIsController" class="primary-btn" @click="takeover">{{ t('filesTakeover') }}</button>
             <button class="secondary-btn" @click="dlState = 'idle'">{{ t('filesRetry') }}</button>
           </div>
         </template>
@@ -207,7 +205,7 @@ import { sendTerminalCommand } from '@/composables/useTerminalCommand'
 import { copyText } from '@/api/platform'
 import { transport } from '@/api/transport'
 import { remoteTransport } from '@/api/remote-transport'
-import { controllerTakeover, fileList, fileTransferLimits, type FileEntryLite, type TransferLimits } from '@/api/tauri'
+import { fileList, fileTransferLimits, type FileEntryLite, type TransferLimits } from '@/api/tauri'
 import {
   uploadFile,
   downloadFile,
@@ -307,7 +305,6 @@ const copied = ref(false)
 const upPercent = computed(() =>
   upProgress.value.total > 0 ? Math.floor((upProgress.value.transferred / upProgress.value.total) * 100) : 0,
 )
-const upErrorIsController = computed(() => upError.value === t('filesErrController'))
 
 function resetUpload() {
   upState.value = 'idle'
@@ -388,7 +385,6 @@ const dlInFlight = computed(
 const dlPercent = computed(() =>
   dlProgress.value.total > 0 ? Math.floor((dlProgress.value.transferred / dlProgress.value.total) * 100) : 0,
 )
-const dlErrorIsController = computed(() => dlError.value === t('filesErrController'))
 
 /** 清空输入框（并复位下载状态/复制反馈） */
 function clearDownloadPath() {
@@ -656,16 +652,11 @@ function browserUp() {
 
 // ==================== 通用 ====================
 
-function takeover() {
-  void controllerTakeover()
-}
-
 /** 服务端错误文案 → 本地化提示（未识别的原样透出便于诊断） */
 function mapError(e: unknown): string {
   const msg = e instanceof Error ? e.message : String(e)
   // 先精确匹配会话类错误（避免 "transfer session not found" 误落"路径不存在"）
   if (msg.includes('transfer session not found')) return t('filesErrSessionGone')
-  if (msg.includes('controller held by another device')) return t('filesErrController')
   if (msg.includes('file too large') || msg.includes('exceeds declared size')) {
     return `${t('filesErrTooLarge')}（${msg}）`
   }

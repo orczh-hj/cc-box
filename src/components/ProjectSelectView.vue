@@ -107,6 +107,10 @@
                 <img src="@/assets/icons/half-right.svg" alt="Snap right" />
               </button>
             </template>
+            <!-- 设备切换——仅浏览器远程模式 -->
+            <button v-if="!isTauriEnv" class="header-btn" @click="openDeviceSwitcher()" :title="t('deviceSwitchTitle')">
+              <img src="@/assets/icons/phone.svg" alt="Devices" />
+            </button>
             <button class="settings-btn" @click="handleSettingsClick" :title="t('titleSettings', { key: ctrl + '+,' })">
               <img src="@/assets/icons/settings.svg" alt="Settings" />
               <span v-if="sidebarStore.updateAvailable" class="update-badge"></span>
@@ -229,6 +233,7 @@ import { ctrl, cmd } from '@/utils/platform'
 import { isTauriEnv } from '@/api/platform'
 import { spawnNewInstance, type SessionInfo } from '@/api/tauri'
 import { shouldOfferLaunchWindow } from '@/utils/remoteWindows'
+import { useDeviceSwitcher } from '@/composables/useDeviceSwitcher'
 
 const { t } = useI18n()
 
@@ -243,6 +248,7 @@ const appStore = useAppStore()
 const sessionStore = useSessionStore()
 const sidebarStore = useSidebarStore()
 const toast = useToast()
+const { open: openDeviceSwitcher } = useDeviceSwitcher()
 const searchQuery = ref('')
 const projectListRef = ref<HTMLElement | null>(null)
 const isMobile = useIsMobile()

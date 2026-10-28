@@ -123,6 +123,18 @@ export const useSessionStore = defineStore('session', () => {
     remoteInstancesKnown.value = false
   }
 
+  /** 浏览器模式切换设备：丢弃上一台设备的 Tab/历史缓存。
+   *  不 kill PTY——PTY 属于另一台设备，本端无权也不应结束它们。 */
+  function resetRemoteTabs() {
+    tabs.clear()
+    activeTabId.value = null
+    historyCacheMap.clear()
+    currentHistoryProject.value = ''
+    inflightLoadProject.value = null
+    pendingInstanceId.value = null
+    resetRemoteInstances()
+  }
+
   /** 运行中的 Tab ID 列表 */
   const runningTabIds = computed<string[]>(() => {
     return [...tabs.values()]
@@ -687,6 +699,7 @@ export const useSessionStore = defineStore('session', () => {
     remoteInstancesKnown,
     setRemoteInstances,
     resetRemoteInstances,
+    resetRemoteTabs,
     knownInstances,
 
     // Active tab

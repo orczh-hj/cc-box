@@ -164,6 +164,16 @@ export const useAppStore = defineStore('app', () => {
     if (cliHealth.value && cliHealth.value.status !== 'ok') cliHealth.value = null
   }
 
+  /** 浏览器切换设备：丢弃上一台设备的项目/近期会话缓存（随后 loadCache 重拉） */
+  function resetHomeCache() {
+    cachedProjects.value = []
+    cachedRecentSessions.value = []
+    cacheLoaded.value = false
+    projectsPage.value = 0
+    hasMoreProjects.value = true
+    isLoadingProjects.value = false
+  }
+
   async function loadCache() {
     if (cacheLoaded.value) return
     try {
@@ -459,6 +469,7 @@ export const useAppStore = defineStore('app', () => {
     loadAppConfig,
     runChecks: doChecks,
     loadCache,
+    resetHomeCache,
     loadMoreProjects,
     refreshCache,
     hideProject,

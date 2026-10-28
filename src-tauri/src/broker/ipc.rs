@@ -333,11 +333,6 @@ where
     if let Some(status) = super::status_snapshot() {
         let _ = down_tx.send(GwDown::BrokerStatus { status }).await;
     }
-    let holder = match crate::remote_state::REMOTE_STATE.controller() {
-        Some(crate::remote_state::ControllerHolder::Remote(c)) => Some(c),
-        _ => None,
-    };
-    let _ = down_tx.send(GwDown::ControllerSet { holder }).await;
     crate::gateway::notify_sessions_changed();
     // 新实例上线：其余成员的状态镜像也要刷新在线数量
     crate::gateway::broadcast_broker_status();

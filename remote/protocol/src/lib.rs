@@ -85,8 +85,9 @@ pub enum ClientMessage {
         cmd: String,
         args: serde_json::Value,
     },
-    /// 抢占全局控制权（设备互斥：他端持有时唯一获取方式；attach 不能抢占，
-    /// 断连自动释放。接管成功以 controller-changed 广播确认）
+    /// 【deprecated】全局控制权已 per-session 化：attach/claim 即会话级抢占。
+    /// 旧版手机缓存 UI 仍可能发送本消息——服务端 no-op 静默忽略（保留 variant
+    /// 是为让旧帧可反序列化，删掉会导致旧端整帧解析失败）
     #[serde(rename = "controller.takeover")]
     ControllerTakeover,
 }
@@ -99,11 +100,11 @@ pub enum ServerMessage {
     HelloOk {
         ver: u32,
         device_name: String,
-        /// 本连接唯一标识（前端自判"当前控制者是不是自己"的遮罩依据）
+        /// 本连接唯一标识（前端判定会话遮罩归属的依据之一）
         #[serde(default)]
         conn_id: u64,
-        /// 当前全局控制者连接 id（None=无人持有，桌面不受限）；serde default
-        /// 兼容旧桌面端不下发该字段的场景
+        /// 【deprecated】全局控制权已 per-session 化，服务端恒发 null（字段保留
+        /// 兼容旧端缓存 UI，勿再消费）；serde default 兼容旧桌面端不下发该字段
         #[serde(default, skip_serializing_if = "Option::is_none")]
         controller: Option<u64>,
         /// 服务端状态版本基线（接管/重连后全量刷新对齐；防旧事件覆盖）
@@ -156,7 +157,8 @@ pub enum ServerMessage {
         #[serde(default, skip_serializing_if = "is_zero_u64")]
         tail_seq: u64,
     },
-    /// attach 被拒：全局控制权被其他设备持有（先 controller.takeover 接管）
+    /// attach 被拒（现仅 "session not found"：会话已退出。per-session 控制权下
+    /// attach 即抢占，不再有控制权拒绝）
     #[serde(rename = "session.attach.denied")]
     SessionAttachDenied { id: String, reason: String },
     /// 会话被收回（桌面接管 / 连接断开自动归还）

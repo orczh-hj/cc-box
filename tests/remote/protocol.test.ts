@@ -98,14 +98,14 @@ describe('Remote_ProtocolContract_字段值保真', () => {
     })
   })
 
-  it('hello.ok 携带连接标识/控制者/版本基线', () => {
+  it('hello.ok 携带连接标识/版本基线（controller 已弃用恒 null）', () => {
     const msg = parseServerMessage(loadSample('server-hello-ok.json'))
     expect(msg).toEqual({
       type: 'hello.ok',
       ver: PROTOCOL_VERSION,
       deviceName: expect.any(String),
       connId: 7,
-      controller: 7,
+      controller: null,
       revision: 3,
     })
   })

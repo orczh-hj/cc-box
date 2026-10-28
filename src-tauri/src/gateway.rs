@@ -459,7 +459,7 @@ pub(crate) fn broadcast_broker_status() {
     }
 }
 
-/// v2 桌面事件扇出（Broker 本地 state-changed / controller-changed 等）
+/// v2 桌面事件扇出（Broker 本地 state-changed 等）
 pub(crate) fn broadcast_desktop_event(name: &str, payload: serde_json::Value) {
     broadcast_down(GwDown::DesktopEvent {
         name: name.to_string(),
@@ -641,18 +641,10 @@ pub async fn dispatch(conn_id: u64, msg: &ClientMessage) {
         }
         RouteTarget::UnknownSession => reject_unknown_session(conn_id, msg),
         RouteTarget::Member(inst) => {
-            if !gate_write(conn_id, msg) {
-                return;
-            }
-            let holder = match REMOTE_STATE.controller() {
-                Some(crate::remote_state::ControllerHolder::Remote(c)) => Some(c),
-                _ => None,
-            };
             let down = GwDown::ClientMsg {
                 conn_id,
                 via_relay: REMOTE_STATE.conn_via_relay(conn_id).unwrap_or(true),
                 msg: msg.clone(),
-                holder: Some(holder),
             };
             match send_to_member(&inst, down).await {
                 Ok(()) => {
@@ -776,75 +768,12 @@ fn reject_unknown_session(conn_id: u64, msg: &ClientMessage) {
     REMOTE_STATE.try_send(conn_id, ServerMessage::Sessions { list, revision });
 }
 
-/// 写类消息的 Broker 侧控制权门。所有会改变 PTY/控制权的操作都必须经过。
-fn gate_write(conn_id: u64, msg: &ClientMessage) -> bool {
-    use crate::remote_state::REMOTE_STATE;
-    let is_write = matches!(
-        msg,
-        ClientMessage::SessionAttach { .. }
-            | ClientMessage::SessionCreate { .. }
-            | ClientMessage::SessionKill { .. }
-            | ClientMessage::PtyInput { .. }
-            | ClientMessage::PtyResize { .. }
-            | ClientMessage::RpcCall { .. }
-    );
-    if !is_write {
-        return true;
-    }
-    if let Err(holder) = REMOTE_STATE.controller_gate(conn_id) {
-        log::warn!(
-            "[broker-router] conn {} write denied (controller {})",
-            conn_id,
-            holder.id_label()
-        );
-        match msg {
-            ClientMessage::SessionAttach { id, .. } => REMOTE_STATE.try_send(
-                conn_id,
-                ServerMessage::SessionAttachDenied {
-                    id: id.clone(),
-                    reason: "controller held by another device".to_string(),
-                },
-            ),
-            ClientMessage::SessionCreate { .. } => REMOTE_STATE.try_send(
-                conn_id,
-                ServerMessage::SessionCreateFailed {
-                    error: "controller held by another device".to_string(),
-                },
-            ),
-            ClientMessage::RpcCall { id, .. } => REMOTE_STATE.try_send(
-                conn_id,
-                ServerMessage::RpcResult {
-                    id: *id,
-                    ok: false,
-                    data: None,
-                    error: Some("controller held by another device, takeover first".to_string()),
-                },
-            ),
-            ClientMessage::PtyInput { .. } | ClientMessage::PtyResize { .. } => {}
-            _ => {}
-        }
-        return false;
-    }
-    // PtyInput/PtyResize 依赖已有 attach（attach 时已取得控制权）。
-    // 裸输入帧不能把设备控制权“顺手”抢走：成员端 active 仍是桌面时
-    // 会丢弃输入，Broker 却已把控制者变成该手机。
-    if matches!(
-        msg,
-        ClientMessage::PtyInput { .. } | ClientMessage::PtyResize { .. }
-    ) {
-        return true;
-    }
-    REMOTE_STATE.write_success_acquire(conn_id);
-    true
-}
-
 /// 成员上行处理（IPC 与 legacy WS 共用）。
 /// 返回 false 表示连接应关闭（Done/Bye）。
 pub(crate) async fn handle_member_up(instance_id: &str, up: GwUp) -> bool {
     match up {
         GwUp::SessionUpsert { session } => member_session_upsert(instance_id, session),
         GwUp::SessionRemove { id } => member_session_remove(instance_id, &id),
-        GwUp::DesktopTakeover => crate::remote_state::REMOTE_STATE.desktop_takeover(),
         GwUp::ToConn { conn_id, msg } => {
             let msg = match msg {
                 // 创建成功：先登记路由，再投递手机（消除 attach 竞态）
@@ -1017,11 +946,6 @@ async fn handle_member_socket(mut socket: WebSocket) {
             let _ = down_tx.send(GwDown::BrokerStatus { status }).await;
         }
     }
-    let holder = match crate::remote_state::REMOTE_STATE.controller() {
-        Some(crate::remote_state::ControllerHolder::Remote(c)) => Some(c),
-        _ => None,
-    };
-    let _ = down_tx.send(GwDown::ControllerSet { holder }).await;
 
     notify_sessions_changed();
     broadcast_broker_status();

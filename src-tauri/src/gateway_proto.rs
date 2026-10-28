@@ -1,12 +1,10 @@
 //! 设备级 Broker 实例间 IPC 协议（Broker ↔ GUI 实例）
 //!
-//! 一台电脑只有一个 Broker（设备身份/LAN/relay/全局控制权/实例注册），
+//! 一台电脑只有一个 Broker（设备身份/LAN/relay/实例注册），
 //! 所有 GUI 实例都是成员：通过本协议注册、上报会话、接收路由后的手机消息。
 //! 旧版 GUI 仍可经 `/internal/gw-ws` 以 v1 协议接入；新版经 Named Pipe /
 //! Unix Domain Socket 以 v2 协议接入。手机协议消息
 //! （ClientMessage/ServerMessage）作为 payload 原样内嵌透传。
-
-use serde::Deserialize as _;
 
 use cc_box_remote_protocol::{ClientMessage, RemoteSession, ServerMessage};
 
@@ -38,31 +36,13 @@ pub enum GwDown {
     #[serde(rename = "reject")]
     Reject { reason: String },
     /// 手机消息原样转发（conn_id 透传；via_relay 保证文件限额档位正确）
-    ///
-    /// `holder`：发送时刻 Broker 侧控制权真源。
-    /// - 字段缺失（None）= 旧 Broker 未提供，成员沿用 ControllerSet 影子；
-    /// - Some(None) = 明确无人持有；
-    /// - Some(Some(conn_id)) = 该手机连接持有。
-    /// v2 成员在 handle 前应用影子，避免控制权变更与消息跨队列乱序。
     #[serde(rename = "client.msg")]
     ClientMsg {
         conn_id: u64,
         via_relay: bool,
         msg: ClientMessage,
-        #[serde(
-            default,
-            deserialize_with = "deserialize_double_option",
-            skip_serializing_if = "Option::is_none"
-        )]
-        holder: Option<Option<u64>>,
     },
-    /// 控制权影子同步（真源 Broker）：holder = 手机 conn_id / None = 无人
-    #[serde(rename = "controller.set")]
-    ControllerSet { holder: Option<u64> },
-    /// 剥离指定连接的全部 active 归属（接管时旧持有者的会话归还本机桌面）
-    #[serde(rename = "controller.strip")]
-    ControllerStrip { conn_id: u64 },
-    /// 手机断开：成员侧 remove_conn（strip + resize 恢复桌面尺寸）
+    /// 手机断开：成员侧 remove_conn（归还 active + resize 恢复桌面尺寸）
     #[serde(rename = "conn.drop")]
     ConnDrop { conn_id: u64 },
     /// Broker 退出/停止（v1 兼容；v2 用 BrokerExit）
@@ -79,7 +59,7 @@ pub enum GwDown {
     /// v2：Broker 运行状态全量镜像（远程面板/命令用）
     #[serde(rename = "broker.status")]
     BrokerStatus { status: BrokerStatus },
-    /// v2：Broker 自身桌面事件扇出（state-changed / controller-changed 等）
+    /// v2：Broker 自身桌面事件扇出（state-changed 等）
     #[serde(rename = "desktop.event")]
     DesktopEvent {
         name: String,
@@ -141,9 +121,6 @@ pub enum GwUp {
     /// 定向上行：发给指定手机连接的协议消息
     #[serde(rename = "to.conn")]
     ToConn { conn_id: u64, msg: ServerMessage },
-    /// 成员桌面接管通知
-    #[serde(rename = "desktop.takeover")]
-    DesktopTakeover,
     /// 成员主动退出（进程退出前的礼貌通知；断连同样触发清理）
     #[serde(rename = "done")]
     Done,
@@ -160,16 +137,6 @@ pub enum GwUp {
     /// v2：成员优雅退出（等价 Done，语义更明确）
     #[serde(rename = "bye")]
     Bye,
-}
-
-/// 区分「字段缺失」（default None）与「字段为 null」（Some(None)）
-fn deserialize_double_option<'de, D>(
-    deserializer: D,
-) -> Result<Option<Option<u64>>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    Option::<u64>::deserialize(deserializer).map(Some)
 }
 
 /// Broker 生命周期退出原因
@@ -201,9 +168,6 @@ pub struct BrokerStatus {
     pub relay_connected: bool,
     pub relay_url: String,
     pub relay_pair_code: String,
-    /// 当前控制者 conn_id（None=无人）
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub controller: Option<u64>,
     pub revision: u64,
     pub app_version: String,
     pub broker_pid: u32,
@@ -287,7 +251,6 @@ mod tests {
                 id: "abc".into(),
                 data: "ls\r".into(),
             },
-            holder: Some(Some(7)),
         };
         let json = serde_json::to_string(&down).unwrap();
         assert!(json.contains(r#""type":"client.msg""#));
@@ -341,16 +304,22 @@ mod tests {
     }
 
     #[test]
-    fn GatewayProto_ControllerSetNone_5() {
-        let set = GwDown::ControllerSet { holder: None };
-        let json = serde_json::to_string(&set).unwrap();
-        let back: GwDown = serde_json::from_str(&json).unwrap();
-        assert_eq!(set, back);
+    fn GatewayProto_LegacyControllerFramesDropped_5() {
+        // 控制权已 per-session 化：controller.set / desktop.takeover variant 已删。
+        // 旧成员/旧 Broker 发出的这两类帧反序列化失败被上层 log 忽略（连接不断）
+        assert!(serde_json::from_str::<GwDown>(
+            r#"{"type":"controller.set","holder":7}"#
+        )
+        .is_err());
+        assert!(serde_json::from_str::<GwUp>(
+            r#"{"type":"desktop.takeover"}"#
+        )
+        .is_err());
     }
 
     #[test]
     fn GatewayProto_LegacyHelloWithoutLabel_6() {
-        // v1 成员不带 label/holder：serde default 兼容
+        // v1 成员不带 label：serde default 兼容
         let raw = r#"{"type":"member.hello","ver":1,"instanceId":"i","secret":"s","sessions":[]}"#;
         let hello: GwUp = serde_json::from_str(raw).unwrap();
         match hello {
@@ -363,14 +332,12 @@ mod tests {
     }
 
     #[test]
-    fn GatewayProto_HolderAbsentVsNull_7() {
-        let absent = r#"{"type":"client.msg","connId":1,"viaRelay":false,"msg":{"type":"ping"}}"#;
-        let down: GwDown = serde_json::from_str(absent).unwrap();
-        assert!(matches!(down, GwDown::ClientMsg { holder: None, .. }));
-
-        let null = r#"{"type":"client.msg","connId":1,"viaRelay":false,"msg":{"type":"ping"},"holder":null}"#;
-        let down: GwDown = serde_json::from_str(null).unwrap();
-        assert!(matches!(down, GwDown::ClientMsg { holder: Some(None), .. }));
+    fn GatewayProto_LegacyClientMsgHolderIgnored_7() {
+        // 旧 Broker 的 client.msg 帧（per-session 化之前）携带 holder 字段：
+        // 新成员解析时未知字段被忽略（serde 默认），消息本身不受影响
+        let raw = r#"{"type":"client.msg","connId":1,"viaRelay":false,"msg":{"type":"ping"},"holder":null}"#;
+        let down: GwDown = serde_json::from_str(raw).unwrap();
+        assert!(matches!(down, GwDown::ClientMsg { conn_id: 1, .. }));
     }
 
     #[test]

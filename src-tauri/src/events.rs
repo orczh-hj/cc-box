@@ -32,8 +32,6 @@ pub mod names {
     pub const DOWNLOAD_PROGRESS: &str = "download-progress";
     /// 写命令统一状态广播（payload {id: section, data: revision}；全端按 section 刷新）
     pub const STATE_CHANGED: &str = "state-changed";
-    /// 全局控制权变更（payload {id: connId 或空串, data: revision}；远程端显示/解除全局遮罩）
-    pub const CONTROLLER_CHANGED: &str = "controller-changed";
     /// 多实例：实例上/下线或会话集合变化（前端重拉聚合会话列表）
     pub const INSTANCES_CHANGED: &str = "instances-changed";
 }

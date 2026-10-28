@@ -382,8 +382,6 @@ pub fn run(initial_dir: Option<String>, new_window: bool) {
             commands::pty_kill,
             commands::pty_kill_all,
             commands::pty_claim,
-            commands::controller_takeover,
-            commands::controller_status,
             commands::rename_session,
             commands::get_projects,
             commands::hide_project,

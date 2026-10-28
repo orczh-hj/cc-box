@@ -18,10 +18,6 @@ pub(crate) fn snapshot() -> Option<BrokerStatus> {
     let enabled = remote_enabled_from_config();
     let (relay_enabled, relay_connected, relay_url, pair_code) =
         crate::remote_client::status_snapshot();
-    let controller = match crate::remote_state::REMOTE_STATE.controller() {
-        Some(crate::remote_state::ControllerHolder::Remote(c)) => Some(c),
-        _ => None,
-    };
     Some(BrokerStatus {
         enabled,
         lan_running: crate::remote_server::is_running(),
@@ -33,7 +29,6 @@ pub(crate) fn snapshot() -> Option<BrokerStatus> {
         relay_connected,
         relay_url,
         relay_pair_code: pair_code,
-        controller,
         revision: crate::remote_state::REMOTE_STATE.revision(),
         app_version: env!("APP_VERSION").to_string(),
         broker_pid: std::process::id(),

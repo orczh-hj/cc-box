@@ -103,24 +103,11 @@ export const ptyKillAll = async (): Promise<void> => {
   }
 };
 
-/** 桌面端/本端接管被远程持有的会话（浏览器端 = 重新 attach 抢占，传实际尺寸防重置） */
+/** 桌面端/本端接管被远程持有的会话（per-session 抢占：桌面 = pty_claim 收回，
+ * 浏览器端 = 重新 attach 抢占，传实际尺寸防重置） */
 export const ptyClaim = async (id: string, cols?: number, rows?: number): Promise<void> => {
   return transport.sessionClaim(id, cols, rows);
 };
-
-/** 桌面端显式接管全局控制权（设备互斥遮罩「接管」按钮；浏览器端走
- * controller.takeover 协议消息，不经此 command） */
-export const controllerTakeover = async (): Promise<void> => {
-  if (isTauriEnv) {
-    await invoke<void>('controller_takeover');
-  } else {
-    transport.sendClient({ type: 'controller.takeover' });
-  }
-};
-
-/** 当前全局控制权持有者（''=无人；'desktop'=桌面；数字串=远程连接 id）。
- * 桌面 UI 启动/重载时错过历史 controller-changed 事件，挂载时查询补初始快照 */
-export const controllerStatus = (): Promise<string> => invoke<string>('controller_status');
 
 // ============================================
 // Event Listeners (Tauri events)
