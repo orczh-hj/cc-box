@@ -100,6 +100,8 @@ node scripts/release.js --bump minor --notes "### Features\n- Add sidebar panel\
 --notes "### Bug Fixes\n- 修复问题 A\n- 修复问题 B\n\n### Features\n- 新增功能 X"
 ```
 
+**写作角度**：中文书写，**从用户使用的角度出发**——写「修好了什么影响你的问题、你能用到什么新能力」，不罗列提交/模块/实现细节（用户不关心 broker revision、attach 语义这类内部概念）。
+
 ### 常用示例
 
 ```bash
@@ -213,7 +215,7 @@ CI 自动构建并上传：
 ## 重要提醒
 
 1. **每次发布必须编写 release notes**，说明变更内容
-2. **release notes 与 CHANGELOG.md 用中文编写**（2026-10 起）
+2. **release notes 与 CHANGELOG.md 用中文编写**（2026-10 起），**从用户使用角度出发**：写用户可感知的修复与新增能力，不罗列提交、模块名或内部实现概念
 3. **GitHub 操作需要代理**（国内环境），OSS 操作无需代理
 4. **OSS 配置文件包含敏感信息**，已在 `.gitignore` 中排除
 5. **新增 Rust crate 时必须把它的 `target/` 加入 `.gitignore`**——release 脚本 `git add -A` 会把构建产物（.o/.pdb/.dll，数百文件）提交进 Release commit

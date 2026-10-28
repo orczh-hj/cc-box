@@ -125,7 +125,7 @@ npm run release -- --bump patch --notes "### Features\n- Add feature"
 ```
 
 - 脚本自动完成：版本号 → CHANGELOG → 提交推送 → 标签 → CI → Release → OSS；失败后**重跑同一完整命令自动续跑**（不会二次 bump）
-- **`--bump major/minor` 只在用户明确指定时使用**；`--notes` 必填且必须用中文
+- **`--bump major/minor` 只在用户明确指定时使用**；`--notes` 必填、中文、从用户使用角度写（可感知的修复与新增能力，不写模块/实现细节）
 - **relay 二进制不内嵌 Web UI**（`web-assets` 以 `--no-default-features` 构建，UI 与 relay 部署完全独立）：生产 relay 必须配置 `CC_BOX_RELAY_WEB_DIR=/opt/cc-box/web`，前端（src/）改动只需 `npm run deploy:web`（构建 → staging → md5 校验 → 原子切换 → 线上校验，完整镜像替换、自动清理旧 bundle；勿直接用 `scp -r dist/*` 覆盖，否则历史 `index-*.js` 会永久堆叠），免重编、免重启；只有 relay 源码/服务逻辑（remote/relay/、web-assets 代码）改动才跑 `npm run deploy:relay`（不再构建前端；先桌面后 relay）。桌面安装包保留内嵌 UI（默认 feature）
 - 详细参数、断点续跑与远程组件发布清单 → [docs/release-process.md](docs/release-process.md)
 
