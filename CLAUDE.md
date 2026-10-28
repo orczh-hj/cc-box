@@ -114,6 +114,7 @@ npm run tauri:build        # 生产构建
 ## 环境与仓库（速查）
 
 - **Windows**：MSVC 工具链 + C++ Build Tools（link.exe 须为 MSVC 版本）；配置细节 → [docs/development.md](docs/development.md)「Windows 环境配置」
+- **mac 远程（SSH 免密）**：`ssh wangdatong@192.168.5.119` 可直接执行拉取/构建/安装/读日志（源码 `~/Desktop/czh/cc-box`，node 在 `/opt/homebrew/bin` 需加 PATH，安装=退出 CC-Box 后替换 `/Applications/CC-Box.app`；GUI 按键测试仍需用户配合）
 - **双仓库**：GitHub（需代理）/ Gitee（直连）；**始终分 URL 推送，勿用多 URL origin** → [docs/development.md](docs/development.md)「双仓库同步」
 - **打包**：首次下载 NSIS 组件需代理 → [docs/development.md](docs/development.md)「Windows 环境配置」
 
