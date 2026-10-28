@@ -470,10 +470,18 @@ pub(crate) fn broadcast_desktop_event(name: &str, payload: serde_json::Value) {
 /// 向所有成员广播。可靠消息入队失败 → 关闭该成员（重注册 + 快照）；
 /// v2-only 消息自动跳过旧成员。
 pub(crate) fn broadcast_down(msg: GwDown) {
+    broadcast_down_excluding(msg, None);
+}
+
+/// 同 [`broadcast_down`]，但跳过指定实例：发起成员的 state-changed 已由
+/// 成员本地 Tauri 事件通知，且本端有写回环抑制——二次回发会击穿抑制，
+/// 触发发起端全量刷新（桌面隐藏项目列表闪动回归）。
+pub(crate) fn broadcast_down_excluding(msg: GwDown, exclude: Option<&str>) {
     let targets: Vec<(String, mpsc::Sender<GwDown>, u32)> = {
         let st = GW_STATE.lock();
         st.members
             .iter()
+            .filter(|(id, _)| Some(id.as_str()) != exclude)
             .map(|(id, m)| (id.clone(), m.tx.clone(), m.proto_ver))
             .collect()
     };
@@ -822,11 +830,19 @@ pub(crate) async fn handle_member_up(instance_id: &str, up: GwUp) -> bool {
         GwUp::WindowTitle { title } => update_member_title(instance_id, title),
         GwUp::StateChanged { section } => {
             // 成员 revision 与 Broker 不可比：重新分配设备级 revision 后
-            // 扇出给所有 v2 成员（DesktopEvent）与手机（RpcEvent）。
+            // 扇出给其他 v2 成员（DesktopEvent）与手机（RpcEvent）。
+            // 发起成员不回发：其本端已有本地 Tauri 通知 + 写回环抑制，
+            // 二次回环会击穿抑制触发全量刷新。
             let rev = crate::remote_state::REMOTE_STATE.next_revision();
             let payload =
                 serde_json::json!({ "id": section, "data": rev.to_string() });
-            broadcast_desktop_event(crate::events::names::STATE_CHANGED, payload.clone());
+            broadcast_down_excluding(
+                GwDown::DesktopEvent {
+                    name: crate::events::names::STATE_CHANGED.to_string(),
+                    payload: payload.clone(),
+                },
+                Some(instance_id),
+            );
             crate::remote_state::REMOTE_STATE
                 .broadcast_event(crate::events::names::STATE_CHANGED, payload);
         }

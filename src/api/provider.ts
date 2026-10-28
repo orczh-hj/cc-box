@@ -3,7 +3,7 @@
  * 封装 Tauri invoke 调用（经 transport 统一层，浏览器远程模式走 rpc.call）
  */
 import { transport } from './transport'
-import type { Provider, ProvidersConfig, ImportResult, ProviderMeta, TestConnectionResult } from '@/types/provider'
+import type { Provider, ProvidersConfig, ImportResult, ProviderMeta, TestConnectionResult, AppliedSettings } from '@/types/provider'
 
 const invoke = <T,>(cmd: string, args?: Record<string, unknown>): Promise<T> =>
   transport.invoke<T>(cmd, args);
@@ -26,8 +26,8 @@ export async function saveProvidersConfig(config: ProvidersConfig): Promise<void
   return invoke('save_providers_config', { config })
 }
 
-/** 激活 Provider */
-export async function activateProvider(providerId: string): Promise<void> {
+/** 激活 Provider（返回更新后的 appliedSettings；旧后端返回 null，调用方需守卫） */
+export async function activateProvider(providerId: string): Promise<AppliedSettings> {
   return invoke('activate_provider', { providerId })
 }
 

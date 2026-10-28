@@ -654,7 +654,9 @@ pub(crate) fn merge_provider_into_settings(
 /// 激活 Provider
 /// effective = 通用默认层 + Provider 覆盖层（Provider 优先，状态字段已剥离），
 /// 再 merge 进用户 ~/.claude/settings.json：用户独有键保留，旧托管键按 appliedSettings 清理。
-pub fn activate_provider(provider_id: &str) -> Result<()> {
+/// 激活 Provider，返回更新后的 appliedSettings（托管路径清单）——
+/// 发起端用它精确更新本端状态，配合回环抑制免去一次全量刷新
+pub fn activate_provider(provider_id: &str) -> Result<AppliedSettings> {
     let config = get_providers_config()?;
 
     let effective = {
@@ -707,12 +709,13 @@ pub fn activate_provider(provider_id: &str) -> Result<()> {
     let content = serde_json::to_string_pretty(&merged)?;
     write_file_atomic(&settings_path, &content)?;
 
-    let mut updated_config = config;
-    updated_config.active_provider_id = Some(provider_id.to_string());
-    updated_config.applied_settings = AppliedSettings {
+    let applied = AppliedSettings {
         provider_id: Some(provider_id.to_string()),
         paths: new_paths,
     };
+    let mut updated_config = config;
+    updated_config.active_provider_id = Some(provider_id.to_string());
+    updated_config.applied_settings = applied.clone();
     if let Err(e) = save_providers_config(&updated_config) {
         // settings.json 已更新但 providers.json 失败：记录后返回，避免静默状态漂移
         log::error!(
@@ -722,7 +725,7 @@ pub fn activate_provider(provider_id: &str) -> Result<()> {
         return Err(e);
     }
 
-    Ok(())
+    Ok(applied)
 }
 
 /// 创建 Provider

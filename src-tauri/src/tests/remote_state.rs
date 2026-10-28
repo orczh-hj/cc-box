@@ -960,6 +960,39 @@ async fn RemoteState_StateChanged_广播半链与revision单调递增() {
     assert_eq!(state.revision(), rev2);
 }
 
+/// 成员模式（uplink 已注册）：state-changed 不再向本实例手机连接广播——
+/// Broker 会以设备级 revision 统一扇出。双发会让手机先收成员本地 revision、
+/// 再收设备级 revision，跳变触发 state-resync-needed 全量重拉。
+#[tokio::test]
+async fn RemoteState_StateChanged_成员模式跳过本地手机广播() {
+    let _hook_lock = crate::tests::HOOK_TEST_LOCK.lock();
+    let (up_tx, mut up_rx) = tokio::sync::mpsc::unbounded_channel();
+    crate::remote_state::set_uplink(Some(up_tx));
+
+    let state = RemoteState::new();
+    let (_conn_id, mut rx) = setup_conn(&state);
+
+    state.emit_state_changed(crate::rpc_dispatch::StateSection::Skills);
+
+    // 本地连接收不到（手机由 Broker 统一扇出）
+    match tokio::time::timeout(std::time::Duration::from_millis(150), rx.recv()).await {
+        Err(_) | Ok(None) => {}
+        Ok(Some(other)) => {
+            panic!("成员模式不应向本地连接广播 state-changed: {:?}", other)
+        }
+    }
+
+    // 上行通道收到 StateChanged（section 原样透传）
+    match tokio::time::timeout(std::time::Duration::from_millis(150), up_rx.recv()).await {
+        Ok(Some(crate::gateway_proto::GwUp::StateChanged { section })) => {
+            assert_eq!(section, "skills");
+        }
+        other => panic!("expected uplink StateChanged, got {:?}", other),
+    }
+
+    crate::remote_state::set_uplink(None);
+}
+
 /// rename 桌面半链：EVENT_HOOK（lib.rs 设置为 Tauri app.emit）在 rename_session
 /// 分发后必须收到 ("session-renamed", ptyId, name)——与广播半链测试共同覆盖双发。
 /// HOOK_TEST_LOCK：与其他整体 set/clear 全局 hook 的测试串行（防并行覆盖竞态）

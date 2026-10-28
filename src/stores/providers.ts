@@ -22,7 +22,8 @@ import {
 import { providerPresets } from '@/config/providerPresets'
 import type { ProviderPreset } from '@/types/provider'
 import { replaceInSettings } from '@/utils/json'
-import { stripEmptyCoreEnv } from '@/utils/provider-config'
+import { stripEmptyCoreEnv, stripCcStateFields } from '@/utils/provider-config'
+import { useSidebarStore } from '@/stores/sidebar'
 
 export const useProvidersStore = defineStore('providers', () => {
   const providers = ref<Provider[]>([])
@@ -89,10 +90,16 @@ export const useProvidersStore = defineStore('providers', () => {
   }
 
   async function activate(id: string) {
+    // 本端写回环登记：后端广播 state-changed(providers) 时状态中心跳过全量刷新；
+    // appliedSettings 用命令返回值精确更新（激活会改写 settings.json 托管路径）。
+    // 旧后端返回 null（无返回值协议）：守卫跳过，保持现状
+    useSidebarStore().markSelfWrite('providers')
     try {
-      await activateProvider(id)
+      const applied = await activateProvider(id)
+      if (applied) appliedSettings.value = applied
       activeProviderId.value = id
     } catch (err) {
+      useSidebarStore().cancelSelfWrite('providers')
       console.error('Failed to activate provider:', err)
       throw err
     }
@@ -135,17 +142,23 @@ export const useProvidersStore = defineStore('providers', () => {
 
   /** 将新 Provider 持久化到后端，并加入 store */
   async function create(provider: Provider): Promise<Provider> {
-    const created = await createProvider(
-      provider.name,
-      provider.settingsConfig,
-      provider.websiteUrl,
-      provider.category,
-      provider.icon,
-      provider.iconColor,
-      provider.meta
-    )
-    providers.value.push(created)
-    return created
+    useSidebarStore().markSelfWrite('providers')
+    try {
+      const created = await createProvider(
+        provider.name,
+        provider.settingsConfig,
+        provider.websiteUrl,
+        provider.category,
+        provider.icon,
+        provider.iconColor,
+        provider.meta
+      )
+      providers.value.push(created)
+      return created
+    } catch (err) {
+      useSidebarStore().cancelSelfWrite('providers')
+      throw err
+    }
   }
 
   async function update(id: string, updates: {
@@ -154,6 +167,7 @@ export const useProvidersStore = defineStore('providers', () => {
     notes?: string
     meta?: Partial<ProviderMeta>
   }): Promise<Provider> {
+    useSidebarStore().markSelfWrite('providers')
     try {
       const provider = await updateProvider(
         id,
@@ -170,12 +184,14 @@ export const useProvidersStore = defineStore('providers', () => {
 
       return provider
     } catch (err) {
+      useSidebarStore().cancelSelfWrite('providers')
       console.error('Failed to update provider:', err)
       throw err
     }
   }
 
   async function remove(id: string) {
+    useSidebarStore().markSelfWrite('providers')
     try {
       await deleteProvider(id)
       const index = providers.value.findIndex(p => p.id === id)
@@ -186,12 +202,14 @@ export const useProvidersStore = defineStore('providers', () => {
         activeProviderId.value = null
       }
     } catch (err) {
+      useSidebarStore().cancelSelfWrite('providers')
       console.error('Failed to delete provider:', err)
       throw err
     }
   }
 
   async function reorder(newOrder: string[]) {
+    useSidebarStore().markSelfWrite('providers')
     try {
       await updateProviderSortOrder(newOrder)
 
@@ -211,31 +229,36 @@ export const useProvidersStore = defineStore('providers', () => {
       }
       providers.value = reordered
     } catch (err) {
+      useSidebarStore().cancelSelfWrite('providers')
       console.error('Failed to reorder providers:', err)
     }
   }
 
   async function updateCommon(settings: Record<string, any>) {
+    useSidebarStore().markSelfWrite('providers')
     try {
       await updateCommonConfig(true, settings)
-      commonConfig.value = { enabled: true, settings }
-      // 后端只保存默认层，不改写 Provider；重载以获取最新 common/托管路径
-      const config = await getProvidersConfig()
-      providers.value = config.providers
-      appliedSettings.value = config.appliedSettings ?? { providerId: null, paths: [] }
-      // 重新激活当前活跃 Provider，让新的默认值写入 settings.json
-      if (activeProviderId.value) {
-        await activateProvider(activeProviderId.value)
-        // 激活会更新 appliedSettings（托管路径）；再拉一次避免前端状态漂移
-        const latest = await getProvidersConfig()
-        providers.value = latest.providers
-        commonConfig.value = latest.commonConfig
-        appliedSettings.value = latest.appliedSettings ?? { providerId: null, paths: [] }
-        schemaVersion.value = latest.schemaVersion ?? 2
-      }
+      // 后端落盘前会剥离 CC 状态字段（hooks/enabledPlugins 等）：本地镜像
+      // 用同一规则剥离，避免抑制回环后编辑器显示未被剥离的原始输入
+      commonConfig.value = { enabled: true, settings: stripCcStateFields(settings) }
     } catch (err) {
+      useSidebarStore().cancelSelfWrite('providers')
       console.error('Failed to update common config:', err)
       throw err
+    }
+    // 重新激活当前 Provider，让新的默认值写入 settings.json。
+    // 激活返回更新后的 appliedSettings（托管路径），无需全量拉取；
+    // 第二次写命令各登记一次回环抑制
+    if (activeProviderId.value) {
+      useSidebarStore().markSelfWrite('providers')
+      try {
+        const applied = await activateProvider(activeProviderId.value)
+        if (applied) appliedSettings.value = applied
+      } catch (err) {
+        useSidebarStore().cancelSelfWrite('providers')
+        console.error('Failed to re-activate provider after common config update:', err)
+        throw err
+      }
     }
   }
 
@@ -265,6 +288,7 @@ export const useProvidersStore = defineStore('providers', () => {
     providers,
     commonConfig,
     activeProviderId,
+    appliedSettings,
     isLoading,
     hasCcSwitchDb,
     presets,

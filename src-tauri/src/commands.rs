@@ -901,10 +901,13 @@ pub async fn save_providers_config(config: ProvidersConfig) -> Result<(), String
     crate::providers::save_providers_config(&config).map_err(|e| e.to_string())
 }
 
-/// 激活 Provider（state-changed 广播：providers section，#[cc_command] 自动）
+/// 激活 Provider（state-changed 广播：providers section，#[cc_command] 自动）。
+/// 返回更新后的 appliedSettings：发起端经回环抑制跳过全量刷新，用返回值精确同步
 #[cc_command(write = "providers")]
 #[tauri::command]
-pub async fn activate_provider(provider_id: String) -> Result<(), String> {
+pub async fn activate_provider(
+    provider_id: String,
+) -> Result<crate::providers::AppliedSettings, String> {
     crate::providers::activate_provider(&provider_id).map_err(|e| e.to_string())
 }
 

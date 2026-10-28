@@ -125,7 +125,7 @@ npm run release -- --bump patch --notes "### Features\n- Add feature"
 
 - 脚本自动完成：版本号 → CHANGELOG → 提交推送 → 标签 → CI → Release → OSS；失败后**重跑同一完整命令自动续跑**（不会二次 bump）
 - **`--bump major/minor` 只在用户明确指定时使用**；`--notes` 必填且必须用中文
-- **relay 二进制不内嵌 Web UI**（`web-assets` 以 `--no-default-features` 构建，UI 与 relay 部署完全独立）：生产 relay 必须配置 `CC_BOX_RELAY_WEB_DIR=/opt/cc-box/web`，前端（src/）改动只需 `npm run build` + `scp -r dist/* root@orczh.top:/opt/cc-box/web/`，免重编、免重启；只有 relay 源码/服务逻辑（remote/relay/、web-assets 代码）改动才跑 `npm run deploy:relay`（不再构建前端；先桌面后 relay）。桌面安装包保留内嵌 UI（默认 feature）
+- **relay 二进制不内嵌 Web UI**（`web-assets` 以 `--no-default-features` 构建，UI 与 relay 部署完全独立）：生产 relay 必须配置 `CC_BOX_RELAY_WEB_DIR=/opt/cc-box/web`，前端（src/）改动只需 `npm run deploy:web`（构建 → staging → md5 校验 → 原子切换 → 线上校验，完整镜像替换、自动清理旧 bundle；勿直接用 `scp -r dist/*` 覆盖，否则历史 `index-*.js` 会永久堆叠），免重编、免重启；只有 relay 源码/服务逻辑（remote/relay/、web-assets 代码）改动才跑 `npm run deploy:relay`（不再构建前端；先桌面后 relay）。桌面安装包保留内嵌 UI（默认 feature）
 - 详细参数、断点续跑与远程组件发布清单 → [docs/release-process.md](docs/release-process.md)
 
 ## 详细文档
@@ -164,7 +164,7 @@ npm run release -- --bump patch --notes "### Features\n- Add feature"
 - **远程文件下载走票据直链（所有浏览器统一）**：`file_download_ticket` 签发一次性票据 → 直连 `GET /dl/<ticket>` 流式返回、中继 `/?dl=<device>.<ticket>` 票据页（受限 WS 只允许 `file_download_ticket_chunk`/`ping`）。票据 **不绑连接**（系统浏览器/下载器接管后 WS 必断，不能被 `cleanup_conn` 回收）、128bit、TTL 10 分钟、256 次；旧桌面/旧 relay 经 `command not allowed` 与 HEAD 探测自动降级 Blob。relay 零改动（只按 token 前缀路由），详见 [remote/docs/protocol.md](remote/docs/protocol.md)「一次性下载票据」
 - **避免重复实现**：同一逻辑只留一份（如 `spawn_pty_core`、`apply_hook_event`）；两端各自需要的状态靠事件同步（`session-renamed`、`hook-status`），不靠复制代码
 - **离散操作必广播**：用户离散操作（建/关/重命名会话）经 Rust 广播事件让对端走同一个原生函数；远程安全守卫（白名单/并发上限/独占）作为前置检查包住共用核心，不因统一而放宽
-- **用户级资源开关（skills/agents/mcp/plugins）**：后端单点 `store.rs` 的 `set_*_enabled`（桌面/远程同一函数）。skill/agent 禁用=移入 `~/.cc-box/disabled/<category>`，必须 **symlink 感知**（相对链接按目标位置重算、存在性用 `symlink_metadata`、disabled 扫描列出断链以便恢复）；前端 `state-changed` 刷新必须**静默**（`loadXxx(cwd, { silent: true })`，不切 loading 分支，否则整列表卸载重建）；**本端写回环必须抑制**（`markSelfWrite` 登记 → `applyStateSection` 消费并跳过该 section，条目原地响应；plugin 仍级联子项），后端列表按名称**稳定排序**（顺序与 enabled 解耦）；开关按 `(sourceType=user, name)` 定位，禁止裸 name
+- **用户级资源开关（skills/agents/mcp/plugins）**：后端单点 `store.rs` 的 `set_*_enabled`（桌面/远程同一函数）。skill/agent 禁用=移入 `~/.cc-box/disabled/<category>`，必须 **symlink 感知**（相对链接按目标位置重算、存在性用 `symlink_metadata`、disabled 扫描列出断链以便恢复）；前端 `state-changed` 刷新必须**静默**（`loadXxx(cwd, { silent: true })`，不切 loading 分支，否则整列表卸载重建）；**本端写回环必须抑制**（`markSelfWrite` 登记 → `applyStateSection` 消费并跳过该 section，条目原地响应；plugin 仍级联子项），后端列表按名称**稳定排序**（顺序与 enabled 解耦）；开关按 `(sourceType=user, name)` 定位，禁止裸 name。providers 系写命令同样登记抑制（activate/delete/create/update/reorder/updateCommon），激活返回更新后的 `appliedSettings` 供发起端精确同步、免全量刷新
 - 每次修改后：通用规则速查更新到 CLAUDE.md，定向细节更新到 docs/development.md 或对应正本文档
 - Rust 结构体返回前端时统一使用 `#[serde(rename_all = "camelCase")]`
 - **生产构建安全**：`npm run build` 末尾自动跑 `scripts/verify-dist-safety.ts` 扫描 dist 坏产物；`scripts/lib/patch-xterm-enum.ts` 修补 xterm 死枚举 IIFE 的 esbuild 压缩缺陷（终端写队列永久卡死的根因）。**该类问题 dev 不复现**，升级 xterm/esbuild/Vite 后必须跑生产构建；整个构建零命中告警时复核补丁 → [docs/development.md](docs/development.md)「生产构建安全」
@@ -201,7 +201,7 @@ UI 已浏览器化（一套 UI 走桌面 Tauri / 宽屏浏览器 / 手机浏览�
 - **远程快捷动作**：托盘「远程连接」显示第一个可控制窗口并打开面板（无窗口先新建）；菜单顺序为 远程连接 → 刷新远程密钥 → 关闭/开启远程连接。**有更新时**：Broker 每 2h 检查（启动等 30s），菜单标题下出现「更新到 vX.Y.Z」且托盘图标叠红点；点击＝显示窗口并跳转 设置→更新（下载/安装/失败恢复仍在 GUI 更新页）。**破坏性操作统一用原生确认对话框**：关闭远程连接、刷新远程密钥、退出 CC-Box；窗口单击显示/新建/开启远程/自启动/更新不确认。
 - **开机自启动**：仅 Broker（不开窗口）；入口在**设置 → 启动**与托盘勾选项，不在远程面板；Windows Run / macOS LaunchAgent / Linux XDG autostart，命令带 `--broker --autostart`；无托盘环境用 `cc-box --quit-broker`。
 - **IPC**（`gateway_proto.rs` / `broker/ipc.rs`）：Windows Named Pipe（显式 DACL）/ Unix UDS（0700+0600+peer UID）；v2 首帧 `member.hello`（含 pid/windowTitle）+ `broker.secret`；成员上行 `window.title`/`state.changed`；管理操作独立 `admin` 首帧。旧版 GUI 仍走 `/internal/gw-ws` + `gateway.secret`（v1），无 pid/窗口指令。
-- **状态同步**：成员本地写命令的 `state-changed` 经 `state.changed` 上行，Broker 重分配设备级 revision 后扇出所有 v2 成员与手机（窗口 A 修改刷新 B/C）；`PtyInput/PtyResize` 只校验该会话 active 归属、无控制面副作用（必须已有 attach）；PTY 退出由成员上行 `session.remove`，Broker 只广播一次 `session.exit`。
+- **状态同步**：成员本地写命令的 `state-changed` 经 `state.changed` 上行，Broker 重分配设备级 revision 后扇出其他 v2 成员与手机（窗口 A 修改刷新 B/C）；**发起成员不回发**（其本端已有 Tauri 本地通知 + 写回环抑制，二次回环会击穿抑制触发全量刷新——隐藏项目列表闪动回归），**成员经 Broker 时不再本地广播手机**（本地 revision + 设备级 revision 双发会让手机判 revision 跳变触发 state-resync-needed 全量重拉）；`PtyInput/PtyResize` 只校验该会话 active 归属、无控制面副作用（必须已有 attach）；PTY 退出由成员上行 `session.remove`，Broker 只广播一次 `session.exit`。
 - **退出/更新**：Quit/PrepareForUpdate 先写回 `admin.result` 再退出；更新安装失败调用 `resume_broker_connection` 清除 update 标记/抑制并恢复；gateway.lock 心跳校验 owner + 原子写，解析失败按 mtime 判 stale；IPC server 创建失败直接退出释放 broker.lock。
 - **客户端细节**：`tailSeq` 基线 claim/重 attach 时只抬高不降低；Linux AppImage 拉起 Broker 优先 `$APPIMAGE`；设置页开机自启动每 5s 校准。
 - **单一有序队列**：每成员/连接一条队列；控制面与 `PtyInput` 可靠投递（`send().await`，5s 超时断开重同步），**绝不 try_send 静默丢输入**；`PtyOutput` 可丢但带 `seq`，客户端检测缺口并提示。
@@ -209,6 +209,12 @@ UI 已浏览器化（一套 UI 走桌面 Tauri / 宽屏浏览器 / 手机浏览�
 - **生命周期**：`broker.state.json` 区分 `user_quit`（退出 CC-Box，持久抑制；手动 GUI/`--autostart` 清除）、`update_in_progress`（安装前退出，版本变化后解除）；`remote.enabled=false` 不是生命周期状态（Broker 继续运行，仅停 LAN/relay）。旧 `idle_exit` 标记仅兼容读取。
 - **所有窗口内容一致**：远程面板一律读 Broker 镜像，不区分宿主角色、不显示在线窗口数量；三个操作（更新连接码/刷新密钥/停止远程）与开机自启动都经 Broker 执行。
 - 正本 → [remote/docs/protocol.md](remote/docs/protocol.md)「设备级 Broker IPC」；实施细节 → [remote/docs/multi-instance-gateway.md](remote/docs/multi-instance-gateway.md)
+
+### 设备列表连通性（速查）
+
+手机设备列表（TokenGate / 首页切换弹窗）打开时，对每个**非当前**设备做一次真实 WS `hello` 探测（复用 relay/LAN 同一 `/ws` 协议，不改后端），显示在线/离线/令牌失效/无法连接：`hello.ok` → 在线、`hello.error`（非 busy）→ 令牌失效、`device.status online:false` → 离线、超时/连接失败 → 不可达。探测连接拿到结论立即关闭，不重连、不写存储；当前设备沿用主连接 `connState`。不可达条目点击被拦截并在行内说明原因，配对可直接移除；HTTPS 页面无法探测 HTTP LAN 设备（混合内容）标「无法检测」。主 UI 已就绪后连接被拒（denied）时叠加 TokenGate 覆盖层（`:auto-boot="false"`，不销毁主 UI），提供改选设备/重新输入 token。
+
+实现：`src/api/remote-probe.ts`（单次探测）+ `src/composables/useDeviceProbe.ts`（编排，key = `id|token`）；测试见 `tests/api/remote-probe.test.ts`、`tests/composables/useDeviceProbe.test.ts`。
 
 ### 响应式适配（速查，手机 = 视口 ≤768px 且触屏）
 

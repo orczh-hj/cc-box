@@ -351,19 +351,26 @@ impl RemoteState {
     pub fn emit_state_changed(&self, section: StateSection) {
         let name = crate::events::names::STATE_CHANGED;
         let section = section.as_str();
+        // 成员模式（uplink 已注册）：手机由 Broker 以设备级 revision 统一扇出，
+        // 本地再广播会对手机双发——先收成员本地 revision 再收设备级 revision，
+        // 跳变触发前端 state-resync-needed 全量重拉。独立/中继模式 UPLINK 为
+        // None，本地广播是手机的唯一通道，照常执行。
+        let via_broker = UPLINK.lock().is_some();
         let rev = {
             let mut inner = self.inner.lock();
             inner.revision += 1;
             let rev = inner.revision;
-            let msg = ServerMessage::RpcEvent {
-                name: name.to_string(),
-                payload: serde_json::json!({ "id": section, "data": rev.to_string() }),
-            };
-            for e in inner.conns.values() {
-                if e.download_scope.is_some() {
-                    continue; // 票据受限连接不接收状态广播
+            if !via_broker {
+                let msg = ServerMessage::RpcEvent {
+                    name: name.to_string(),
+                    payload: serde_json::json!({ "id": section, "data": rev.to_string() }),
+                };
+                for e in inner.conns.values() {
+                    if e.download_scope.is_some() {
+                        continue; // 票据受限连接不接收状态广播
+                    }
+                    let _ = e.tx.try_send(msg.clone());
                 }
-                let _ = e.tx.try_send(msg.clone());
             }
             rev
         };

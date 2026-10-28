@@ -172,6 +172,94 @@ describe('providersByCategory', () => {
   })
 })
 
+// ---------- 本端写回环抑制（providers section） ----------
+
+describe('providers 写命令回环抑制', () => {
+  // activate 成功：登记回环抑制（广播回来时状态中心跳过全量刷新），
+  // appliedSettings 用命令返回值精确更新（后端激活会改写托管路径）
+  it('Providers_Activate_MarksSelfWrite_001', async () => {
+    const { activateProvider } = await import('@/api/provider')
+    const applied = { providerId: 'p1', paths: ['/env/ANTHROPIC_BASE_URL'] }
+    vi.mocked(activateProvider).mockResolvedValue(applied)
+
+    const { useSidebarStore } = await import('@/stores/sidebar')
+    const sidebar = useSidebarStore()
+    const store = useProvidersStore()
+
+    await store.activate('p1')
+
+    expect(store.activeProviderId).toBe('p1')
+    expect(store.appliedSettings).toEqual(applied)
+    expect(sidebar.consumeSelfWrite('providers')).toBe(true)
+  })
+
+  // activate 失败：撤销登记（不会有对应广播，避免吞掉其他端事件）
+  it('Providers_Activate_FailureCancels_002', async () => {
+    const { activateProvider } = await import('@/api/provider')
+    vi.mocked(activateProvider).mockRejectedValue(new Error('not found'))
+
+    const { useSidebarStore } = await import('@/stores/sidebar')
+    const sidebar = useSidebarStore()
+    const store = useProvidersStore()
+
+    await expect(store.activate('p1')).rejects.toThrow('not found')
+    expect(sidebar.consumeSelfWrite('providers')).toBe(false)
+  })
+
+  // remove 成功：登记回环抑制
+  it('Providers_Remove_MarksSelfWrite_003', async () => {
+    const { deleteProvider } = await import('@/api/provider')
+    vi.mocked(deleteProvider).mockResolvedValue(undefined)
+
+    const { useSidebarStore } = await import('@/stores/sidebar')
+    const sidebar = useSidebarStore()
+    const store = useProvidersStore()
+    store.providers = [makeProvider('p1')]
+
+    await store.remove('p1')
+    expect(store.providers).toHaveLength(0)
+    expect(sidebar.consumeSelfWrite('providers')).toBe(true)
+  })
+
+  // remove 失败：撤销登记
+  it('Providers_Remove_FailureCancels_004', async () => {
+    const { deleteProvider } = await import('@/api/provider')
+    vi.mocked(deleteProvider).mockRejectedValue(new Error('io error'))
+
+    const { useSidebarStore } = await import('@/stores/sidebar')
+    const sidebar = useSidebarStore()
+    const store = useProvidersStore()
+    store.providers = [makeProvider('p1')]
+
+    await expect(store.remove('p1')).rejects.toThrow('io error')
+    expect(store.providers).toHaveLength(1)
+    expect(sidebar.consumeSelfWrite('providers')).toBe(false)
+  })
+
+  // updateCommon：重激活用返回值更新 appliedSettings，不再两次全量拉取；
+  // 两次写命令（update_common_config + 重激活）各登记一次回环抑制
+  it('Providers_UpdateCommon_NoFullReload_005', async () => {
+    const { updateCommonConfig, activateProvider, getProvidersConfig } = await import('@/api/provider')
+    vi.mocked(updateCommonConfig).mockResolvedValue(undefined)
+    const applied = { providerId: 'p1', paths: ['/x'] }
+    vi.mocked(activateProvider).mockResolvedValue(applied)
+
+    const { useSidebarStore } = await import('@/stores/sidebar')
+    const sidebar = useSidebarStore()
+    const store = useProvidersStore()
+    store.activeProviderId = 'p1'
+
+    // settings 里混入 CC 状态字段：本地镜像必须与后端落盘同规则剥离
+    await store.updateCommon({ env: { ANTHROPIC_BASE_URL: 'https://x' }, hooks: { k: 1 } })
+
+    expect(getProvidersConfig).not.toHaveBeenCalled()
+    expect(store.appliedSettings).toEqual(applied)
+    expect(store.commonConfig.settings).toEqual({ env: { ANTHROPIC_BASE_URL: 'https://x' } })
+    expect(sidebar.consumeSelfWrite('providers')).toBe(true)
+    expect(sidebar.consumeSelfWrite('providers')).toBe(true)
+  })
+})
+
 // ---------- testConnection ----------
 
 describe('testConnection', () => {

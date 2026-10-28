@@ -711,27 +711,31 @@ async fn Gateway_WindowRosterAndCommand_15() {
     cleanup(&[inst], &[]);
 }
 
-/// 成员 state-changed 上行后，Broker 必须扇出给所有成员与手机
+/// 成员 state-changed 上行后，Broker 扇出给**其他**成员与手机；
+/// 不得回发发起成员——发起端已有本地 Tauri 通知 + 本端写回环抑制，
+/// 二次回环会击穿抑制，触发发起端全量刷新（桌面隐藏项目列表闪动回归）
 #[tokio::test]
 async fn Gateway_StateChangedFanout_18() {
     let _lock = super::REMOTE_SERVER_TEST_LOCK.lock();
     gateway::test_reset();
-    let (mut down_rx, inst) = register_mock_member("state", &[]).await;
+    let (mut origin_rx, origin) = register_mock_member("state", &[]).await;
+    let (mut peer_rx, peer) = register_mock_member("state-peer", &[]).await;
 
     let (tx, mut rx) = mpsc::channel(16);
     REMOTE_STATE.add_conn(31, tx, false);
 
     gateway::handle_member_up(
-        &inst,
+        &origin,
         GwUp::StateChanged {
             section: "providers".to_string(),
         },
     )
     .await;
 
+    // 其他成员照常收到扇出
     let member_msg = tokio::time::timeout(
         std::time::Duration::from_millis(500),
-        down_rx.recv(),
+        peer_rx.recv(),
     )
     .await
     .expect("desktop event expected")
@@ -750,6 +754,19 @@ async fn Gateway_StateChangedFanout_18() {
         other => panic!("unexpected member frame: {:?}", other),
     }
 
+    // 发起成员不得回发（回环抑制只登记一次，二次事件即全量刷新）
+    match tokio::time::timeout(
+        std::time::Duration::from_millis(150),
+        origin_rx.recv(),
+    )
+    .await
+    {
+        Err(_) | Ok(None) => {} // 超时/关闭 = 未回发，符合预期
+        Ok(Some(frame)) => {
+            panic!("origin member must not receive its own state-changed: {:?}", frame)
+        }
+    }
+
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(500);
     let mut saw_state = false;
     while !saw_state {
@@ -765,7 +782,7 @@ async fn Gateway_StateChangedFanout_18() {
     }
 
     REMOTE_STATE.remove_conn(31);
-    cleanup(&[inst], &[]);
+    cleanup(&[origin, peer], &[]);
 }
 
 /// 裸 pty.input 只被原样转发（无任何控制面副作用；未 attach 时成员端丢弃输入）
