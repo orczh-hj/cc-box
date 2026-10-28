@@ -90,7 +90,7 @@ Events：
 
 ### DeviceSwitcherDialog.vue / DeviceList.vue — 多设备切换（浏览器远程模式专属）
 
-`DeviceSwitcherDialog` 全局挂载于 App.vue，只由**首页**（ProjectSelectView / 无项目时的 WelcomeView）右上角设备按钮打开（`useDeviceSwitcher` 单例状态）；终端页 IconBar 不放设备入口，避免手机底栏拥挤。`DeviceList` 复用同一列表 UI：名称、LAN/中继、令牌无效、当前设备高亮、删除；TokenGate 也使用它。选择设备调用 `remoteTransport.activateDesktop`（同 origin 原地重连，跨 origin 跳转）。切换成功后 `remote-connected` 携带 `deviceChanged=true`，App 调用 `sessionStore.resetRemoteTabs()` 丢弃上一台设备的 Tabs/历史缓存（不 kill 远端 PTY）。
+`DeviceSwitcherDialog` 全局挂载于 App.vue，只由**首页**（ProjectSelectView / 无项目时的 WelcomeView）右上角设备按钮打开（`useDeviceSwitcher` 单例状态）；终端页 IconBar 不放设备入口，避免手机底栏拥挤。`DeviceList` 复用同一列表 UI：名称、LAN/中继、令牌无效、当前设备高亮、移除配对（当前设备不显示移除按钮；其他设备 × 需二次确认）；TokenGate 也使用它。选择设备调用 `remoteTransport.activateDesktop`（同 origin 原地重连，跨 origin 跳转）。切换成功后 `remote-connected` 携带 `deviceChanged=true`，App 调用 `sessionStore.resetRemoteTabs()` 丢弃上一台设备的 Tabs/历史缓存（不 kill 远端 PTY）。
 
 ### FilesPanel.vue — 文件传输面板（浏览器远程模式专属，IconBar `v-if="!isTauriEnv"` 守卫）
 

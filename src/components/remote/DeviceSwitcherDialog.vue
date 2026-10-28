@@ -13,6 +13,7 @@
             @select="select"
             @remove="remove"
           />
+          <p v-if="desktops.length === 1" class="switcher-hint">{{ t('deviceSwitchSameOriginHint') }}</p>
           <button class="switcher-close" @click="close">{{ t('close') }}</button>
         </div>
       </div>

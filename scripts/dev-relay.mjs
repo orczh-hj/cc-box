@@ -5,26 +5,41 @@
  * CC_BOX_RELAY_URL=<自动探测的局域网IP>:8800，勿用 127.0.0.1——手机打不开
  * 配对 URL）。手机访问 http://<局域网IP>:8800。
  *
+ * 多设备联调：设备列表存在浏览器 localStorage，按页面 origin 隔离。
+ * 两台电脑各自跑 dev:relay 会出现两个 origin，手机永远只看到当前一台。
+ * 让第二台电脑连接第一台的 relay（不启动本地 relay）：
+ *   CC_BOX_RELAY_URL=192.168.5.121:8800 npm run dev:relay
+ * 然后手机只打开第一台的 relay 页面，分别配对两台电脑即可互相切换。
+ *
  * 任一子进程退出即全部退出；Ctrl+C 统一杀进程树（Windows taskkill /T）。
  */
 import { execSync, spawn } from 'node:child_process'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { lanIp } from './lib/lan-ip.mjs'
+import { resolveRelayTarget } from './lib/relay-target.mjs'
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const PORT = 8800
 const IS_WIN = process.platform === 'win32'
 
+// CC_BOX_RELAY_URL：显式指定共享 relay（多设备联调）。设置后不启动本地 relay。
+const relayOverride = process.env.CC_BOX_RELAY_URL?.trim()
 // CC_BOX_RELAY_IP 可覆盖自动探测（多网卡/虚拟网卡干扰时手工指定）
-const ip = process.env.CC_BOX_RELAY_IP?.trim() || lanIp()
-if (!ip) {
+const ip = relayOverride ? '' : (process.env.CC_BOX_RELAY_IP?.trim() || lanIp())
+const target = resolveRelayTarget({ override: relayOverride, ip, port: PORT })
+if (!target.relayUrl) {
   console.error('[dev-relay] 未探测到局域网 IPv4 地址（请检查网络连接），中止')
   process.exit(1)
 }
 
-console.log(`[dev-relay] 局域网 IP: ${ip}`)
-console.log(`[dev-relay] 手机访问: http://${ip}:${PORT}（扫码或输入地址）`)
+if (target.shared) {
+  console.log(`[dev-relay] 共享 relay: ${target.relayUrl}（不启动本地 relay）`)
+  console.log(`[dev-relay] 手机访问: ${target.phoneUrl}`)
+} else {
+  console.log(`[dev-relay] 局域网 IP: ${ip}`)
+  console.log(`[dev-relay] 手机访问: ${target.phoneUrl}（扫码或输入地址）`)
+}
 
 let exiting = false
 
@@ -75,28 +90,33 @@ function start(name, cmd, args, opts) {
   return p
 }
 
-const procs = [
-  // BIND 只接受纯 IP（端口由 CC_BOX_RELAY_PORT 控制，默认 8800）。
-  // CARGO_TARGET_DIR 指到不被 git 跟踪的独立目录：remote/relay/target 下
-  // 的 debug 产物历史上被误跟踪，dev 构建会弄脏工作区。
-  // WEB_DIR：relay 以 --no-default-features 构建（无内嵌 UI），只服务磁盘
-  // 目录——不注入则手机打开配对页得到纯文字 "not found"。指到仓库 dist
-  // （改前端后需 npm run build，手机刷新即生效）
-  start('relay', 'cargo', ['run'], {
-    cwd: path.join(ROOT, 'remote', 'relay'),
-    env: {
-      ...process.env,
-      CC_BOX_RELAY_BIND: '0.0.0.0',
-      CC_BOX_RELAY_PORT: String(PORT),
-      CC_BOX_RELAY_WEB_DIR: path.join(ROOT, 'dist'),
-      CARGO_TARGET_DIR: path.join(ROOT, 'remote', 'relay', 'target-dev'),
-    },
-  }),
+const procs = []
+if (!target.shared) {
+  procs.push(
+    // BIND 只接受纯 IP（端口由 CC_BOX_RELAY_PORT 控制，默认 8800）。
+    // CARGO_TARGET_DIR 指到不被 git 跟踪的独立目录：remote/relay/target 下
+    // 的 debug 产物历史上被误跟踪，dev 构建会弄脏工作区。
+    // WEB_DIR：relay 以 --no-default-features 构建（无内嵌 UI），只服务磁盘
+    // 目录——不注入则手机打开配对页得到纯文字 "not found"。指到仓库 dist
+    // （改前端后需 npm run build，手机刷新即生效）
+    start('relay', 'cargo', ['run'], {
+      cwd: path.join(ROOT, 'remote', 'relay'),
+      env: {
+        ...process.env,
+        CC_BOX_RELAY_BIND: '0.0.0.0',
+        CC_BOX_RELAY_PORT: String(PORT),
+        CC_BOX_RELAY_WEB_DIR: path.join(ROOT, 'dist'),
+        CARGO_TARGET_DIR: path.join(ROOT, 'remote', 'relay', 'target-dev'),
+      },
+    }),
+  )
+}
+procs.push(
   start('app', 'npm', ['run', 'tauri:dev'], {
     cwd: ROOT,
-    env: { ...process.env, CC_BOX_RELAY_URL: `${ip}:${PORT}` },
+    env: { ...process.env, CC_BOX_RELAY_URL: target.relayUrl },
   }),
-]
+)
 
 process.on('SIGINT', () => shutdown(0))
 process.on('SIGTERM', () => shutdown(0))

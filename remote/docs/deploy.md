@@ -206,6 +206,14 @@ npm run dev:relay
 #   CC_BOX_RELAY_URL=192.168.5.105:8800 npm run tauri:dev
 ```
 
+**多设备联调**：手机设备列表存 localStorage，按页面 origin 隔离。两台电脑各跑 `dev:relay` = 两个 origin，手机只能看到当前一台。第二台电脑改为连接第一台的 relay：
+
+```bash
+CC_BOX_RELAY_URL=<第一台IP>:8800 npm run dev:relay   # 设置后不启动本地 relay
+```
+
+手机只打开第一台的 relay 页面，分别配对两台电脑即可在首页切换设备。
+
 要点：
 
 - **远程面板是显式开关**：打开面板只查状态，点「开启远程访问」才启动（安全阻断，停止后重启软件不会自动恢复）

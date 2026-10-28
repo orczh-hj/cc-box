@@ -47,6 +47,14 @@ npm run dev:relay
 
 一条命令完成（`scripts/dev-relay.mjs`）：自动探测局域网 IP → 启动本地 relay（`0.0.0.0:8800`，手机可达）+ 桌面 tauri dev（注入 `CC_BOX_RELAY_URL=<局域网IP>:8800`，勿用 127.0.0.1——手机打不开配对 URL）；任一进程退出即全部退出。手机扫桌面面板出的中继配对码（走本地 relay）或局域码（8747 直连）均可验证。探测按接口名分层（`scripts/lib/lan-ip.mjs`）：`en*` 物理网卡优先，`feth`/`utun`/`bridge`/`vmenet` 等虚拟接口仅在无其他候选时兜底（虚拟网卡常带 `192.168.x.x` 且排在前面，选中会让手机配对 URL 不可达）；多网卡仍有偏差时用 `CC_BOX_RELAY_IP=<IP> npm run dev:relay` 手工指定。详细环境变量与注意事项 → [remote/docs/deploy.md](../remote/docs/deploy.md)「本地测试（开发环境）」。
 
+**多设备联调**：设备凭证存在浏览器 localStorage，按页面 **origin** 隔离——两台电脑各跑 `dev:relay` 会产生两个 origin，手机上永远只看到当前一台。让第二台电脑连接第一台的 relay（不启动本地 relay）：
+
+```bash
+CC_BOX_RELAY_URL=<第一台IP>:8800 npm run dev:relay
+```
+
+手机只打开第一台的 relay 页面，分别配对两台电脑，之后即可在首页设备列表切换。LAN 直连（各设备自己的 IP）同样跨 origin，不能共享列表。
+
 ## 新增功能检查清单（完整版）
 
 UI 已浏览器化（一套 UI 走桌面 Tauri / 宽屏浏览器 / 手机浏览器），新功能必须登记到对应单一注册链，防两端漂移：

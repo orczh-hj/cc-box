@@ -109,7 +109,7 @@ npm run tauri:build        # 生产构建
 
 改 `remote/`（协议/relay）或远程相关前端/Rust 后，**先在本地跑通中继全链路再部署**。命令与注意事项 → [docs/development.md](docs/development.md)「远程功能本地全链路测试」、[remote/docs/deploy.md](remote/docs/deploy.md)「本地测试（开发环境）」。
 
-**本地中继测试标准启动：一条命令 `npm run dev:relay`（脚本自动探测局域网 IP、拉起 relay + tauri dev；手机访问 `http://<本机IP>:8800`，任一进程退出全部退出）。**
+**本地中继测试标准启动：一条命令 `npm run dev:relay`（脚本自动探测局域网 IP、拉起 relay + tauri dev；手机访问 `http://<本机IP>:8800`，任一进程退出全部退出）。** 多设备联调必须共用同一个 relay（设备凭证按页面 origin 隔离）：第二台机器用 `CC_BOX_RELAY_URL=<第一台IP>:8800 npm run dev:relay`（不启动本地 relay），手机只打开第一台的 relay 页面配对两台电脑。
 
 ## 环境与仓库（速查）
 
