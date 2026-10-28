@@ -36,9 +36,6 @@ describe('checkForUpdates 返回值', () => {
     })
     const result = await checkForUpdates()
     expect(result.hasUpdate).toBe(true)
-    expect(result.version).toBe('0.9.0')
-    expect(result.currentVersion).toBe('0.8.0')
-    expect(result.releaseNotes).toBe('### Features\n- New feature')
   })
 
   // update.body 为 undefined 时，releaseNotes 降级为空字符串

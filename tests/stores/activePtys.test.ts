@@ -26,19 +26,6 @@ describe('hasActivePtys 检测（runningTabIds）', () => {
     setActivePinia(createPinia())
   })
 
-  // 无 tab 时返回 false
-  it('ActivePtys_NoTabs_001', () => {
-    const store = useSessionStore()
-    expect(store.runningTabIds.length > 0).toBe(false)
-  })
-
-  // 有 tab 但未启动 PTY 时返回 false
-  it('ActivePtys_NoPtyId_001', () => {
-    const store = useSessionStore()
-    store.createTab('/project')
-    expect(store.runningTabIds.length > 0).toBe(false)
-  })
-
   // 启动 PTY 后返回 true
   it('ActivePtys_HasPtyId_001', () => {
     const store = useSessionStore()

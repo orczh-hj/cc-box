@@ -85,23 +85,6 @@ fn DecodeOutput_FourByteUtf8_001() {
     assert_eq!(result, "🎉");
 }
 
-// ---- configure_command / new_command ----
-
-// new_command 返回的 Command 包含正确的 program
-#[test]
-fn NewCommand_Program_001() {
-    let cmd = new_command("echo");
-    assert!(format!("{:?}", cmd).contains("echo"));
-}
-
-// configure_command 不改变 Command 的 program
-#[test]
-fn ConfigureCmd_Program_001() {
-    let mut cmd = std::process::Command::new("echo");
-    configure_command(&mut cmd);
-    assert!(format!("{:?}", cmd).contains("echo"));
-}
-
 // ---- is_runnable_cli ----
 
 // 当前测试二进制是可运行的普通文件
@@ -263,21 +246,6 @@ fn GetPlatformId_Prefix_001() {
     );
 }
 
-// 多次调用返回相同结果
-#[test]
-fn GetPlatformId_Consistent_001() {
-    assert_eq!(get_platform_id(), get_platform_id());
-}
-
-// ---- get_default_shell ----
-
-// 返回非空程序名
-#[test]
-fn GetDefaultShell_Program_001() {
-    let (program, _) = get_default_shell();
-    assert!(!program.is_empty());
-}
-
 // ---- get_claude_shell ----
 
 // 无 git_bash_path 时 Windows 返回 powershell；Unix 不再 shell 中转（空返回）
@@ -311,20 +279,4 @@ fn GetClaudeShell_WithGitBash_001() {
         assert_eq!(program, "");
         assert!(args.is_empty());
     }
-}
-
-// ---- refresh_path ----
-
-// refresh_path 不 panic
-#[test]
-fn RefreshPath_NoPanic_001() {
-    refresh_path();
-}
-
-// ---- open_in_file_manager ----
-
-// 调用不 panic（不验证结果，因为依赖系统环境）
-#[test]
-fn OpenFileManager_NoPanic_001() {
-    let _ = open_in_file_manager("/nonexistent/path/xyz123");
 }

@@ -222,29 +222,6 @@ describe('setLanguage', () => {
   })
 })
 
-describe('detectSystemLocale', () => {
-  // navigator.language 为 'zh-CN' 时返回 'zh'
-  it('DetectLocale_ZhCN_001', () => {
-    const original = navigator.language
-    Object.defineProperty(navigator, 'language', { value: 'zh-CN', configurable: true })
-    const store = useAppStore()
-    // detectSystemLocale 是内部函数，通过 loadAppConfig 间接触发
-    // 直接验证初始 language 默认值逻辑
-    const lang = navigator.language.startsWith('zh') ? 'zh' : 'en'
-    expect(lang).toBe('zh')
-    Object.defineProperty(navigator, 'language', { value: original, configurable: true })
-  })
-
-  // navigator.language 为 'en-US' 时返回 'en'
-  it('DetectLocale_EnUS_001', () => {
-    const original = navigator.language
-    Object.defineProperty(navigator, 'language', { value: 'en-US', configurable: true })
-    const lang = navigator.language.startsWith('zh') ? 'zh' : 'en'
-    expect(lang).toBe('en')
-    Object.defineProperty(navigator, 'language', { value: original, configurable: true })
-  })
-})
-
 describe('mergeRecentSession', () => {
   const session = (id: string, over: Partial<SessionInfo> = {}): SessionInfo => ({
     sessionId: id,

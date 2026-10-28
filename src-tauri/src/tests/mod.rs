@@ -13,8 +13,6 @@ mod pty_decoder;
 #[cfg(test)]
 mod mcp;
 #[cfg(test)]
-mod env;
-#[cfg(test)]
 mod installer;
 #[cfg(test)]
 mod platform;

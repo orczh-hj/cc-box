@@ -228,6 +228,7 @@ UI 已浏览器化（一套 UI 走桌面 Tauri / 宽屏浏览器 / 手机浏览�
 ## 测试要求
 
 - **开发必须搭配测试**：新增功能、修改逻辑、修复 bug 时同步编写或更新测试；**bug 修复必须先写测试复现**，确认失败后再修复
+- **断言必须有独立真值来源**：期望值来自手算字面量、已知输入输出对或协议规范；禁止自闭环断言——期望值按实现同款逻辑算出、mock 返回什么就断言什么、set 后 get 回读、空输入不报错、常量/查表复述、序列化 round-trip 等于自身。写前自问「这条断言失败对应哪个真实 bug」，答不上来就不写
 - **自动测试优先**：能用自动测试覆盖的场景必须写成自动测试；手动测试仅记录自动化无法覆盖的场景 → [docs/manual-test-cases.md](docs/manual-test-cases.md)
 - **测试文件独立存放**：前端项目根目录 `tests/`（`npm test`）；后端 `src-tauri/src/tests/`（`cd src-tauri && cargo test`）
 - **测试基础设施**：前端 Vitest + jsdom + `@tauri-apps/api/mocks`（mockIPC）；后端 `#[cfg(test)]` 模块、被测函数 `pub(crate)`；Store 测试 `setActivePinia(createPinia())` + mockIPC

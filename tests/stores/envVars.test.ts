@@ -14,20 +14,6 @@ beforeEach(() => {
   })
 })
 
-describe('DEFAULT_CLAUDE_ENV_VARS', () => {
-  // DEFAULT_CLAUDE_ENV_VARS 常量包含 6 个默认键
-  it('EnvVars_DefaultConst_001', () => {
-    const keys = Object.keys(DEFAULT_CLAUDE_ENV_VARS)
-    expect(keys.length).toBe(6)
-    expect(DEFAULT_CLAUDE_ENV_VARS.LANG).toBe('en_US.UTF-8')
-    expect(DEFAULT_CLAUDE_ENV_VARS.LC_ALL).toBe('en_US.UTF-8')
-    expect(DEFAULT_CLAUDE_ENV_VARS.PYTHONUTF8).toBe('1')
-    expect(DEFAULT_CLAUDE_ENV_VARS.CLAUDE_CODE_SCROLL_SPEED).toBe('5')
-    expect(DEFAULT_CLAUDE_ENV_VARS.PYTHONIOENCODING).toBe('utf-8')
-    expect(DEFAULT_CLAUDE_ENV_VARS.CLAUDE_CODE_NO_FLICKER).toBe('1')
-  })
-})
-
 describe('resetClaudeEnvVars', () => {
   // resetClaudeEnvVars 恢复默认值，保留用户添加的变量
   it('EnvVars_Reset_001', async () => {
@@ -74,26 +60,5 @@ describe('resetClaudeEnvVars', () => {
     expect(store.claudeEnvVars.CLAUDE_CODE_SCROLL_SPEED).toBe(DEFAULT_CLAUDE_ENV_VARS.CLAUDE_CODE_SCROLL_SPEED)
     expect(store.claudeEnvVars.PYTHONIOENCODING).toBe(DEFAULT_CLAUDE_ENV_VARS.PYTHONIOENCODING)
     expect(store.claudeEnvVars.CLAUDE_CODE_NO_FLICKER).toBe(DEFAULT_CLAUDE_ENV_VARS.CLAUDE_CODE_NO_FLICKER)
-  })
-})
-
-describe('setClaudeEnvVars', () => {
-  // setClaudeEnvVars 更新 claudeEnvVars 并持久化到 cc-box config
-  it('EnvVars_Set_001', async () => {
-    const store = useAppStore()
-    const newVars = {
-      LANG: 'en_US.UTF-8',
-      NEW_VAR: 'new_value',
-    }
-    invokeCalls = []
-
-    await store.setClaudeEnvVars(newVars)
-
-    expect(store.claudeEnvVars).toEqual(newVars)
-    // 验证：只调用 update_app_config，不调用 sync_claude_env
-    const updateCall = invokeCalls.find(c => c.cmd === 'update_app_config')
-    expect(updateCall).toBeDefined()
-    const syncCall = invokeCalls.find(c => c.cmd === 'sync_claude_env')
-    expect(syncCall).toBeUndefined()
   })
 })

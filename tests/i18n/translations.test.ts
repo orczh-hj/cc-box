@@ -34,11 +34,4 @@ describe('i18n 翻译文件一致性', () => {
       expect(zhPlaceholders, `zh.${key} placeholders should match en`).toEqual(enPlaceholders)
     }
   })
-
-  // 没有重复 key（对象字面量中后面的会覆盖前面的）
-  it('I18n_NoDuplicateKeys_001', () => {
-    const enSource = JSON.stringify(en)
-    const parsed = JSON.parse(enSource)
-    expect(Object.keys(parsed).length).toBe(getKeys(en).length)
-  })
 })

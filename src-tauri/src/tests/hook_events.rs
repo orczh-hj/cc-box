@@ -351,6 +351,42 @@ fn ExtractDetail_Unknown_001() {
     }
 }
 
+// CLI 上报原始 JSON 文本（含转义引号/换行/伪嵌套 JSON/中文/emoji）解码为原始文本，
+// 字符串字段不做二次解析——锚定 stdin 直转链路的转义还原
+#[test]
+fn ExtractDetail_StopEscapedText_001() {
+    let raw = concat!(
+        r#"{"hook_event_name":"Stop","stop_hook_active":false,"#,
+        r#""last_assistant_message":"第一行\n第二行 \"quoted\" {\"nested\":true} 中文🎉"}"#,
+    );
+    let data: serde_json::Value = serde_json::from_str(raw).unwrap();
+    let detail = extract_detail("Stop", &data);
+    match detail {
+        HookEventDetail::Stop(d) => {
+            assert_eq!(d.stop_hook_active, Some(false));
+            assert_eq!(
+                d.last_assistant_message.as_deref(),
+                Some("第一行\n第二行 \"quoted\" {\"nested\":true} 中文🎉")
+            );
+        }
+        _ => panic!("Expected Stop variant"),
+    }
+}
+
+// UserPromptSubmit 的 prompt 含多字节中文与 emoji，从原始上报文本解码不截断
+#[test]
+fn ExtractDetail_PromptMultibyte_001() {
+    let raw = r#"{"hook_event_name":"UserPromptSubmit","prompt":"重构 store.rs 并验证 🚀 完成"}"#;
+    let data: serde_json::Value = serde_json::from_str(raw).unwrap();
+    let detail = extract_detail("UserPromptSubmit", &data);
+    match detail {
+        HookEventDetail::UserPromptSubmit(d) => {
+            assert_eq!(d.prompt.as_deref(), Some("重构 store.rs 并验证 🚀 完成"));
+        }
+        _ => panic!("Expected UserPromptSubmit variant"),
+    }
+}
+
 // ---- HookPayload::from_raw 测试 ----
 
 // 从 JSON 中提取 hook_event_name 字段
@@ -375,12 +411,4 @@ fn FromRaw_DefaultName_001() {
     let data = json!({"session_id": "sess-xyz"});
     let payload = HookPayload::from_raw(None, data);
     assert_eq!(payload.event_name, "unknown");
-}
-
-// 提取的时间戳为非零值
-#[test]
-fn FromRaw_Timestamp_001() {
-    let data = json!({"hook_event_name": "Stop"});
-    let payload = HookPayload::from_raw(None, data);
-    assert_ne!(payload.timestamp, 0);
 }

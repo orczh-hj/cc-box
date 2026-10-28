@@ -16,7 +16,6 @@ vi.mock('@/api/provider', () => ({
   updateCommonConfig: vi.fn(),
   checkCcSwitchDbExists: vi.fn(),
   importFromCcSwitch: vi.fn(),
-  testProviderConnection: vi.fn(),
 }))
 
 // Mock @/config/providerPresets (large static data, not needed here)
@@ -257,52 +256,5 @@ describe('providers 写命令回环抑制', () => {
     expect(store.commonConfig.settings).toEqual({ env: { ANTHROPIC_BASE_URL: 'https://x' } })
     expect(sidebar.consumeSelfWrite('providers')).toBe(true)
     expect(sidebar.consumeSelfWrite('providers')).toBe(true)
-  })
-})
-
-// ---------- testConnection ----------
-
-describe('testConnection', () => {
-  // 设置 api mock 返回 success=true 时 store 返回成功结果
-  it('ProviderTest_Success_001', async () => {
-    const { testProviderConnection } = await import('@/api/provider')
-    vi.mocked(testProviderConnection).mockResolvedValue({
-      success: true,
-      message: '连接成功（模型: claude-sonnet-4-6）',
-      latencyMs: 520,
-    })
-
-    const store = useProvidersStore()
-    const result = await store.testConnection('p1')
-
-    expect(result.success).toBe(true)
-    expect(result.latencyMs).toBe(520)
-    expect(testProviderConnection).toHaveBeenCalledWith('p1')
-  })
-
-  // 设置 api mock 返回 success=false 时 store 返回失败结果
-  it('ProviderTest_Fail_001', async () => {
-    const { testProviderConnection } = await import('@/api/provider')
-    vi.mocked(testProviderConnection).mockResolvedValue({
-      success: false,
-      message: '未配置 API Key',
-      latencyMs: null,
-    })
-
-    const store = useProvidersStore()
-    const result = await store.testConnection('p2')
-
-    expect(result.success).toBe(false)
-    expect(result.message).toBe('未配置 API Key')
-    expect(testProviderConnection).toHaveBeenCalledWith('p2')
-  })
-
-  // 设置 api mock 抛出异常时 store 向上抛出
-  it('ProviderTest_Throw_001', async () => {
-    const { testProviderConnection } = await import('@/api/provider')
-    vi.mocked(testProviderConnection).mockRejectedValue(new Error('network error'))
-
-    const store = useProvidersStore()
-    await expect(store.testConnection('p3')).rejects.toThrow('network error')
   })
 })

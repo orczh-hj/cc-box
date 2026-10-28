@@ -4,31 +4,6 @@ import { getCategoryLabel, filterPresetsByCategory } from '@/config/providerCate
 import type { ProviderPreset, ProviderCategory } from '@/types/provider'
 
 describe('getCategoryLabel', () => {
-  // official 分类返回英文标签（i18n 在 UI 层处理）
-  it('CategoryLabel_Official_001', () => {
-    expect(getCategoryLabel('official')).toBe('Official')
-  })
-
-  // cn_official 分类返回对应标签
-  it('CategoryLabel_CnOfficial_001', () => {
-    expect(getCategoryLabel('cn_official')).toBe('CN')
-  })
-
-  // cloud_provider 分类返回对应标签
-  it('CategoryLabel_CloudProvider_001', () => {
-    expect(getCategoryLabel('cloud_provider')).toBe('Cloud')
-  })
-
-  // aggregator 分类返回对应标签
-  it('CategoryLabel_Aggregator_001', () => {
-    expect(getCategoryLabel('aggregator')).toBe('Aggregator')
-  })
-
-  // custom 分类返回对应标签
-  it('CategoryLabel_Custom_001', () => {
-    expect(getCategoryLabel('custom')).toBe('Custom')
-  })
-
   // undefined 输入返回空字符串
   it('CategoryLabel_Undefined_001', () => {
     expect(getCategoryLabel(undefined)).toBe('')

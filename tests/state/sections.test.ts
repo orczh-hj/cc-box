@@ -36,7 +36,7 @@ vi.mock('@/api/provider', async (importOriginal) => {
 })
 
 import { useSidebarStore } from '@/stores/sidebar'
-import { applyStateSection, flushPendingSections, registeredSections } from '@/state/sections'
+import { applyStateSection, flushPendingSections } from '@/state/sections'
 
 describe('状态同步中心（sections registry）', () => {
   beforeEach(() => {
@@ -192,13 +192,5 @@ describe('状态同步中心（sections registry）', () => {
   it('ApplyStateSection_IgnoresUnknown_001', () => {
     expect(() => applyStateSection('no-such-section')).not.toThrow()
     expect(mockGetAllSkills).not.toHaveBeenCalled()
-  })
-
-  // 注册表覆盖全部已知 section（state-resync-needed 全量重拉的遍历范围）
-  it('RegisteredSections_全部登记_001', () => {
-    const sections = registeredSections()
-    for (const s of ['skills', 'agents', 'mcp', 'plugins', 'providers', 'config']) {
-      expect(sections).toContain(s)
-    }
   })
 })

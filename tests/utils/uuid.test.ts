@@ -8,14 +8,6 @@ describe('uuid（非安全上下文回退）', () => {
     vi.unstubAllGlobals()
   })
 
-  // 安全上下文：randomUUID 可用时直接使用
-  it('Uuid_SecureContext_001', () => {
-    const spy = vi.fn(() => 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee')
-    vi.stubGlobal('crypto', { randomUUID: spy, getRandomValues: vi.fn() })
-    expect(uuid()).toBe('aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee')
-    expect(spy).toHaveBeenCalledOnce()
-  })
-
   // 非安全上下文（局域网 http://IP）：randomUUID 不存在 → getRandomValues 回退，格式仍为 v4
   it('Uuid_InsecureContextFallback_002', () => {
     const realGetRandomValues = crypto.getRandomValues.bind(crypto)

@@ -1,11 +1,10 @@
 use serde_json::json;
 
 use crate::store::{
-    expand_env_vars, extract_md_description, extract_session_name, find_valid_plugin_path,
-    infer_server_type, merge_json_values, parse_agents_list_output, parse_mcp_server_entry,
-    parse_skill_description, parse_timestamp, resolve_marketplace_plugin_path,
-    search_session_messages_in_dirs, set_agent_enabled_in, set_mcp_server_enabled_in,
-    set_skill_enabled_in, AgentInfo,
+    expand_env_vars, extract_md_description, extract_session_name, infer_server_type,
+    merge_json_values, parse_agents_list_output, parse_mcp_server_entry, parse_skill_description,
+    parse_timestamp, search_session_messages_in_dirs, set_agent_enabled_in,
+    set_mcp_server_enabled_in, set_skill_enabled_in, AgentInfo,
 };
 
 use std::collections::HashMap;
@@ -373,12 +372,11 @@ fn ParseSkill_BodyLongDesc_001() {
 
 // ==================== parse_timestamp ====================
 
-// 有效 ISO 8601 时间戳返回非零毫秒值
+// 有效 ISO 8601 时间戳解析为准确的毫秒值（2024-01-15T10:30:00Z = 1705314600000）
 #[test]
 fn ParseTimestamp_ValidIso_001() {
-    let ts = "2024-01-15T10:30:00Z";
-    let result = parse_timestamp(ts);
-    assert_ne!(result, 0);
+    let result = parse_timestamp("2024-01-15T10:30:00Z");
+    assert_eq!(result, 1705314600000);
 }
 
 // "not-a-date" 返回 0
@@ -482,96 +480,117 @@ fn ExtractSessionName_NoMessages_001() {
     assert_eq!(result, "Unnamed session");
 }
 
-// ==================== find_valid_plugin_path ====================
-// 使用本机真实路径验证完整查找链路
+// ==================== find_valid_plugin_path / resolve_marketplace_plugin_path ====================
+// 全部走临时目录 fixture，不依赖本机 ~/.claude
 
-// frontend-design cache 路径存在，直接返回
-#[test]
-fn FindPlugin_CacheExists_001() {
-    let result = find_valid_plugin_path(
-        "C:\\Users\\orczh\\.claude\\plugins\\cache\\claude-plugins-official\\frontend-design\\104d39be10b7",
-        "frontend-design@claude-plugins-official",
-    );
-    assert!(result.is_some());
-    assert!(result.unwrap().contains("frontend-design"));
+/// 构造 marketplace fixture，返回 (tempdir, .claude 目录, marketplace installLocation)：
+/// root/.claude/plugins/known_marketplaces.json → {"test-mp": {"installLocation": <mp>}}
+/// <mp>/.claude-plugin/marketplace.json → local-plugin(字符串 source) + obj-plugin(对象 source)
+/// <mp>/plugins/local-plugin、<mp>/plugins/obj-plugin、root/cache-dir/plugin-cache 目录存在
+fn build_marketplace_fixture() -> (
+    tempfile::TempDir,
+    std::path::PathBuf,
+    std::path::PathBuf,
+) {
+    let root = tempfile::tempdir().unwrap();
+    let claude_dir = root.path().join(".claude");
+    let mp_dir = root.path().join("mp");
+    std::fs::create_dir_all(claude_dir.join("plugins")).unwrap();
+    std::fs::create_dir_all(mp_dir.join(".claude-plugin")).unwrap();
+    std::fs::create_dir_all(mp_dir.join("plugins").join("local-plugin")).unwrap();
+    std::fs::create_dir_all(mp_dir.join("plugins").join("obj-plugin")).unwrap();
+    std::fs::create_dir_all(root.path().join("cache-dir").join("plugin-cache")).unwrap();
+
+    let marketplace_json = serde_json::json!({
+        "plugins": [
+            { "name": "local-plugin", "source": "./plugins/local-plugin" },
+            { "name": "obj-plugin", "source": { "source": "./plugins/obj-plugin" } }
+        ]
+    });
+    std::fs::write(
+        mp_dir.join(".claude-plugin").join("marketplace.json"),
+        marketplace_json.to_string(),
+    )
+    .unwrap();
+
+    let known = serde_json::json!({
+        "test-mp": { "installLocation": mp_dir.to_string_lossy() }
+    });
+    std::fs::write(
+        claude_dir.join("plugins").join("known_marketplaces.json"),
+        known.to_string(),
+    )
+    .unwrap();
+
+    (root, claude_dir, mp_dir)
 }
 
-// paper-tool cache 路径不存在，回退到 marketplace source 找到真实路径
+// Step 1：cache 路径存在时原样返回，不查 marketplace
 #[test]
-fn FindPlugin_CacheMissingFallsBackToMarketplace_001() {
-    let result = find_valid_plugin_path(
-        "C:\\Users\\orczh\\.claude\\plugins\\cache\\orczh\\paper-tool\\2.4.1",
-        "paper-tool@orczh",
-    );
-    assert!(result.is_some());
-    let path = result.unwrap();
-    assert!(path.contains("paper-tool"));
-    // 路径存在且包含 plugin.json
-    assert!(std::path::Path::new(&path).join(".claude-plugin").join("plugin.json").exists());
+fn FindPlugin_Step1CacheExists_001() {
+    let (root, claude_dir, _mp) = build_marketplace_fixture();
+    let cache = root.path().join("cache-dir").join("plugin-cache");
+    let result =
+        crate::store::find_valid_plugin_path_in(cache.to_str().unwrap(), "local-plugin@test-mp", &claude_dir);
+    assert_eq!(result.unwrap(), cache.to_string_lossy());
 }
 
-// pyright-lsp cache 路径存在
+// Step 2：cache 不存在时回退 marketplace，source 为字符串形式解析成功
+// （join 不归一化 "./" 段是真实行为：返回原样拼接路径，路径仍真实存在）
 #[test]
-fn FindPlugin_PyrightCacheExists_001() {
-    let result = find_valid_plugin_path(
-        "C:\\Users\\orczh\\.claude\\plugins\\cache\\claude-plugins-official\\pyright-lsp\\1.0.0",
-        "pyright-lsp@claude-plugins-official",
+fn FindPlugin_Step2StringSource_001() {
+    let (_root, claude_dir, mp) = build_marketplace_fixture();
+    let result = crate::store::find_valid_plugin_path_in(
+        "Z:\\nonexistent\\cache\\local-plugin",
+        "local-plugin@test-mp",
+        &claude_dir,
     );
-    assert!(result.is_some());
+    let expected = mp.join("./plugins/local-plugin");
+    let got = result.unwrap();
+    assert_eq!(got, expected.to_string_lossy());
+    assert!(std::path::Path::new(&got).exists());
 }
 
-// claude-scientific-writer cache 路径存在
+// Step 2：cache 不存在时回退 marketplace，source 为对象形式同样解析成功
 #[test]
-fn FindPlugin_ScientificWriterCacheExists_001() {
-    let result = find_valid_plugin_path(
-        "C:\\Users\\orczh\\.claude\\plugins\\cache\\claude-scientific-writer\\claude-scientific-writer\\5bf6b597e2af",
-        "claude-scientific-writer@claude-scientific-writer",
+fn FindPlugin_Step2ObjectSource_001() {
+    let (_root, claude_dir, mp) = build_marketplace_fixture();
+    let result = crate::store::find_valid_plugin_path_in(
+        "Z:\\nonexistent\\cache\\obj-plugin",
+        "obj-plugin@test-mp",
+        &claude_dir,
     );
-    assert!(result.is_some());
+    let expected = mp.join("./plugins/obj-plugin");
+    let got = result.unwrap();
+    assert_eq!(got, expected.to_string_lossy());
+    assert!(std::path::Path::new(&got).exists());
 }
 
-// 不存在的路径 + 无效 marketplace name 返回 None
+// cache 不存在且 plugin 不在 marketplace 中时返回 None
 #[test]
-fn FindPlugin_InvalidId_001() {
-    let result = find_valid_plugin_path(
-        "C:\\nonexistent\\path",
-        "fake-plugin@fake-marketplace",
+fn FindPlugin_NoFallback_001() {
+    let (_root, claude_dir, _mp) = build_marketplace_fixture();
+    let result = crate::store::find_valid_plugin_path_in(
+        "Z:\\nonexistent\\cache\\ghost",
+        "ghost@test-mp",
+        &claude_dir,
     );
     assert!(result.is_none());
 }
 
-// ==================== resolve_marketplace_plugin_path ====================
-
-// 通过 known_marketplaces.json 解析 paper-tool@orczh 的真实路径
-#[test]
-fn ResolveMarketplace_LocalDirectory_001() {
-    let result = resolve_marketplace_plugin_path("paper-tool@orczh");
-    assert!(result.is_some());
-    let path = result.unwrap();
-    assert!(std::path::Path::new(&path).exists());
-    assert!(std::path::Path::new(&path).join(".claude-plugin").join("plugin.json").exists());
-}
-
-// 通过 github marketplace 解析 frontend-design@claude-plugins-official
-#[test]
-fn ResolveMarketplace_GithubMarketplace_001() {
-    let result = resolve_marketplace_plugin_path("frontend-design@claude-plugins-official");
-    assert!(result.is_some());
-    let path = result.unwrap();
-    assert!(std::path::Path::new(&path).exists());
-}
-
-// 无效 marketplace name 返回 None
-#[test]
-fn ResolveMarketplace_UnknownMarketplace_001() {
-    let result = resolve_marketplace_plugin_path("plugin@nonexistent-marketplace");
-    assert!(result.is_none());
-}
-
-// 格式错误的 plugin_id（无 @ 分隔）返回 None
+// plugin_id 无 @ 分隔时返回 None（known_marketplaces.json 存在，真正走到格式校验分支）
 #[test]
 fn ResolveMarketplace_BadFormat_001() {
-    let result = resolve_marketplace_plugin_path("no-at-sign");
+    let (_root, claude_dir, _mp) = build_marketplace_fixture();
+    let result = crate::store::resolve_marketplace_plugin_path_in(&claude_dir, "no-at-sign");
+    assert!(result.is_none());
+}
+
+// known_marketplaces.json 缺失时返回 None
+#[test]
+fn ResolveMarketplace_NoKnownFile_001() {
+    let empty = tempfile::tempdir().unwrap();
+    let result = crate::store::resolve_marketplace_plugin_path_in(empty.path(), "local-plugin@test-mp");
     assert!(result.is_none());
 }
 

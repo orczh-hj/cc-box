@@ -6,59 +6,14 @@ vi.mock('@tauri-apps/api/core', () => ({
   invoke: (...args: unknown[]) => mockInvoke(...args),
 }))
 
-import {
-  setSkillEnabled,
-  setAgentEnabled,
-  setMcpServerEnabled,
-  setPluginEnabled,
-} from '@/api/tauri'
+import { setSkillEnabled, setPluginEnabled } from '@/api/tauri'
 
-describe('setSkillEnabled / setAgentEnabled / setMcpServerEnabled / setPluginEnabled', () => {
+describe('setEnabled 系列 IPC 契约', () => {
   beforeEach(() => {
     mockInvoke.mockReset()
   })
 
-  // setSkillEnabled('deploy', false) → invoke('set_skill_enabled', { name: 'deploy', enabled: false })
-  it('SetSkillEnabled_Disable_001', async () => {
-    mockInvoke.mockResolvedValue(undefined)
-    await setSkillEnabled('deploy', false)
-    expect(mockInvoke).toHaveBeenCalledWith('set_skill_enabled', {
-      name: 'deploy',
-      enabled: false,
-    })
-  })
-
-  // setSkillEnabled('deploy', true) → 正确参数
-  it('SetSkillEnabled_Enable_001', async () => {
-    mockInvoke.mockResolvedValue(undefined)
-    await setSkillEnabled('deploy', true)
-    expect(mockInvoke).toHaveBeenCalledWith('set_skill_enabled', {
-      name: 'deploy',
-      enabled: true,
-    })
-  })
-
-  // setAgentEnabled → 命令名 set_agent_enabled
-  it('SetAgentEnabled_Call_001', async () => {
-    mockInvoke.mockResolvedValue(undefined)
-    await setAgentEnabled('reviewer', false)
-    expect(mockInvoke).toHaveBeenCalledWith('set_agent_enabled', {
-      name: 'reviewer',
-      enabled: false,
-    })
-  })
-
-  // setMcpServerEnabled → 命令名 set_mcp_server_enabled
-  it('SetMcpServerEnabled_Call_001', async () => {
-    mockInvoke.mockResolvedValue(undefined)
-    await setMcpServerEnabled('zread', true)
-    expect(mockInvoke).toHaveBeenCalledWith('set_mcp_server_enabled', {
-      name: 'zread',
-      enabled: true,
-    })
-  })
-
-  // setPluginEnabled → 命令名 set_plugin_enabled，参数名 pluginId（camelCase）
+  // setPluginEnabled → 命令名 set_plugin_enabled，参数名 pluginId（camelCase，与默认 snake_case 不同）
   it('SetPluginEnabled_Call_001', async () => {
     mockInvoke.mockResolvedValue(undefined)
     await setPluginEnabled('paper-tool@orczh', false)

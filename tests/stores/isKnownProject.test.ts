@@ -58,7 +58,7 @@ describe('isKnownProject', () => {
     expect(store.isKnownProject('C:/Users/dev/project')).toBe(false)
   })
 
-  // 路径末尾有斜杠时仍匹配
+  // 路径末尾有斜杠时不匹配（尾斜杠是真实差异）
   it('IsKnown_TrailingSlash_001', () => {
     const store = useAppStore()
     store.cachedProjects = [{ path: 'C:/Users/dev/project', name: 'project' }]

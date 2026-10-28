@@ -114,7 +114,6 @@ fn upload_full(env: &FtEnv, conn: u64, name: &str, data: &[u8]) -> Result<String
 
 #[test]
 #[cfg(windows)]
-#[test]
 fn FileTransfer_DisplayPath_StripsVerbatim_1() {
     // canonicalize 的 verbatim 前缀剥离（UNC 保留双反斜杠形式）
     assert_eq!(
@@ -131,6 +130,7 @@ fn FileTransfer_DisplayPath_StripsVerbatim_1() {
     );
 }
 
+#[test]
 fn FileTransfer_SanitizeFileName_1() {
     use file_transfer::sanitize_file_name as s;
     // 合法：中文、空格、多点、Unicode

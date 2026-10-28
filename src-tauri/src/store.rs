@@ -2827,6 +2827,16 @@ pub fn get_all_plugins(project_path: &str) -> Result<Vec<PluginInfo>> {
 /// 即使在 cache-only 模式下也是直接从 marketplaceInstallLocation + source 解析，
 /// 不依赖 installPath。只有 source 为对象（npm/github/url）的插件才依赖 installPath。
 pub(crate) fn find_valid_plugin_path(original_path: &str, plugin_id: &str) -> Option<String> {
+    let home = dirs::home_dir()?;
+    find_valid_plugin_path_in(original_path, plugin_id, &home.join(".claude"))
+}
+
+/// find_valid_plugin_path 的可注入版本：base_dir 为 .claude 目录（测试用临时目录替换）
+pub(crate) fn find_valid_plugin_path_in(
+    original_path: &str,
+    plugin_id: &str,
+    base_dir: &Path,
+) -> Option<String> {
     // Step 1: cache 路径存在
     let original = PathBuf::from(original_path);
     if original.exists() {
@@ -2834,14 +2844,22 @@ pub(crate) fn find_valid_plugin_path(original_path: &str, plugin_id: &str) -> Op
     }
 
     // Step 2: 回退到 marketplace source 路径
-    resolve_marketplace_plugin_path(plugin_id)
+    resolve_marketplace_plugin_path_in(base_dir, plugin_id)
 }
 
 /// 从 known_marketplaces.json + marketplace.json 解析 plugin 的实际路径
 /// plugin_id 格式: "paper-tool@orczh" → 找 orczh marketplace → 找 paper-tool 的 source
 pub(crate) fn resolve_marketplace_plugin_path(plugin_id: &str) -> Option<String> {
     let home = dirs::home_dir()?;
-    let marketplaces_file = home.join(".claude").join("plugins").join("known_marketplaces.json");
+    resolve_marketplace_plugin_path_in(&home.join(".claude"), plugin_id)
+}
+
+/// resolve_marketplace_plugin_path 的可注入版本：base_dir 为 .claude 目录（测试用临时目录替换）
+pub(crate) fn resolve_marketplace_plugin_path_in(
+    base_dir: &Path,
+    plugin_id: &str,
+) -> Option<String> {
+    let marketplaces_file = base_dir.join("plugins").join("known_marketplaces.json");
 
     if !marketplaces_file.exists() {
         return None;
