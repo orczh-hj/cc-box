@@ -856,7 +856,8 @@ pub fn set_native_edit_menu(window: tauri::WebviewWindow, active: bool) -> Resul
         return Err("native edit menus not initialized".into());
     };
     window
-        .set_menu(Some(if active { edit } else { plain }.clone()))
+        .set_menu(if active { edit } else { plain }.clone())
+        .map(|_| ())
         .map_err(|e| e.to_string())
 }
 
