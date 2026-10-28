@@ -41,7 +41,8 @@
     "test:watch": "vitest",
     "dev:relay": "node scripts/dev-relay.mjs",
     "sync:presets": "tsx scripts/sync-provider-presets.mts",
-    "deploy:relay": "node scripts/deploy-relay.mjs"
+    "deploy:relay": "node scripts/deploy-relay.mjs",
+    "deploy:web": "node scripts/deploy-web.mjs"
   },
   "dependencies": {
     "@codemirror/lang-json": "^6.0.2",
