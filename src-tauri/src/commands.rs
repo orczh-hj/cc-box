@@ -848,17 +848,43 @@ pub fn update_window_title(title: String) {
 }
 
 /// macOS：焦点进入输入框时挂原生 Edit 菜单（Cmd+C/V/X/A/Z 原生响应），
-/// 终端持焦时切空菜单（菜单 key equivalent 会拦截按键，xterm 处理须让路）
+/// 终端持焦时切空菜单（菜单 key equivalent 会拦截按键，xterm 处理须让路）。
+/// 每次现建菜单实例：Menu clone 共享底层原生对象，被 app/window 挂载过的实例
+/// 复挂会触发 attach 冲突静默失败（输入框编辑键全失效的根因），焦点切换
+/// 频繁但菜单构建开销可忽略
 #[cfg(target_os = "macos")]
 #[tauri::command]
-pub fn set_native_edit_menu(window: tauri::WebviewWindow, active: bool) -> Result<(), String> {
-    let Some((edit, plain)) = crate::NATIVE_EDIT_MENUS.get() else {
-        return Err("native edit menus not initialized".into());
-    };
-    window
-        .set_menu(if active { edit } else { plain }.clone())
-        .map(|_| ())
-        .map_err(|e| e.to_string())
+pub fn set_native_edit_menu(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    active: bool,
+) -> Result<(), String> {
+    use tauri::menu::{MenuBuilder, MenuItemBuilder};
+    let menu = if active {
+        MenuBuilder::new(&app)
+            .undo()
+            .redo()
+            .separator()
+            .cut()
+            .copy()
+            .paste()
+            .select_all()
+            .build()
+    } else {
+        // 空菜单里的禁用占位项（无 key equivalent，不拦截任何按键），
+        // 避免终端持焦时菜单栏完全空白
+        let placeholder = MenuItemBuilder::with_id("cc-box-placeholder", "CC-Box")
+            .enabled(false)
+            .build(&app)?;
+        MenuBuilder::new(&app).item(&placeholder).build()
+    }
+    .map_err(|e| e.to_string())?;
+    let result = window.set_menu(menu).map(|_| ()).map_err(|e| e.to_string());
+    match &result {
+        Ok(()) => log::info!("[menu] native edit menu active={}", active),
+        Err(e) => log::warn!("[menu] set_native_edit_menu({}) failed: {}", active, e),
+    }
+    result
 }
 
 /// 非 macOS：无原生菜单机制，no-op

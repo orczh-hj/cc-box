@@ -27,15 +27,6 @@ mod tests;
 
 use tauri::Manager;
 use tauri::Emitter;
-#[cfg(target_os = "macos")]
-use tauri::menu::MenuBuilder;
-
-/// macOS 原生 Edit 菜单与空菜单（输入框编辑快捷键切换用，setup 构建一次）
-#[cfg(target_os = "macos")]
-pub(crate) static NATIVE_EDIT_MENUS: OnceLock<(
-    tauri::menu::Menu<tauri::Wry>,
-    tauri::menu::Menu<tauri::Wry>,
-)> = OnceLock::new();
 
 /// 全局缓存环境检查结果（setup 前执行，仅一次）
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -281,32 +272,6 @@ pub fn run(initial_dir: Option<String>, new_window: bool) {
             // 放在启动阶段，保证读命令（含远程只读 RPC）不产生隐式写盘。
             if let Err(e) = providers::ensure_providers_schema() {
                 log::error!("[providers] schema migration failed: {}", e);
-            }
-
-            // macOS: 原生 Edit 菜单——输入框 Cmd+C/V/X/A/Z 经系统 paste:/copy:
-            // selector 原生响应（WKWebView 中粘贴没有 keydown 默认行为，无菜单即失效）。
-            // 菜单 key equivalent 会在按键到达 WebView 前被系统拦截，终端持焦时前端调
-            // set_native_edit_menu(false) 切到空菜单，xterm 按键处理完全不受影响
-            #[cfg(target_os = "macos")]
-            {
-                let edit = MenuBuilder::new(app)
-                    .undo()
-                    .redo()
-                    .separator()
-                    .cut()
-                    .copy()
-                    .paste()
-                    .select_all()
-                    .build()?;
-                // 空菜单里的禁用占位项（无 key equivalent，不拦截任何按键），
-                // 避免终端持焦时菜单栏完全空白
-                use tauri::menu::MenuItemBuilder;
-                let placeholder = MenuItemBuilder::with_id("cc-box-placeholder", "CC-Box")
-                    .enabled(false)
-                    .build(app)?;
-                let plain = MenuBuilder::new(app).item(&placeholder).build()?;
-                let _ = app.set_menu(edit.clone());
-                let _ = NATIVE_EDIT_MENUS.set((edit, plain));
             }
 
             pty::init_pty_manager(app.handle().clone());

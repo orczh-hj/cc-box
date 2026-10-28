@@ -3,7 +3,7 @@ import { LogicalSize, LogicalPosition } from '@tauri-apps/api/dpi'
 import { useAppStore } from '@/stores/app'
 import { useSessionStore } from '@/stores/session'
 import { useSidebarStore } from '@/stores/sidebar'
-import { ptyKillAll, spawnNewInstance, setNativeEditMenu } from '@/api/tauri'
+import { ptyKillAll, spawnNewInstance, setNativeEditMenu, logMessage } from '@/api/tauri'
 import { isTauriEnv } from '@/api/platform'
 import { nativeEditMenuSupported, suppressNativeEditMenu } from '@/utils/mac-edit-keys'
 
@@ -250,7 +250,9 @@ export function useAppShortcuts() {
         const active = !suppressNativeEditMenu(e.target)
         if (active === lastActive) return
         lastActive = active
-        setNativeEditMenu(active).catch((err) => console.error('setNativeEditMenu failed:', err))
+        setNativeEditMenu(active).catch((err) => {
+          void logMessage('error', `[menu] setNativeEditMenu(${active}) failed: ${String(err)}`)
+        })
       }
       window.addEventListener('focusin', handleFocusIn, true)
       cleanups.push(() => window.removeEventListener('focusin', handleFocusIn, true))
