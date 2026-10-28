@@ -83,6 +83,8 @@ class RemoteTransportImpl implements Transport {
 
   /** 认证/连接状态（TokenGate 与主 UI 的挂载时机依据） */
   onConnState: (state: RemoteConnState) => void = () => {}
+  /** 连接状态订阅：主 UI 与弹窗需要同时感知 denied/connected */
+  private connStateListeners = new Set<(state: RemoteConnState) => void>()
 
   /** 设备列表变化通知（add/touch 时触发，TokenGate 重读列表刷新） */
   onDesktopsChanged: () => void = () => {}
@@ -262,9 +264,17 @@ class RemoteTransportImpl implements Transport {
     }
   }
 
+  subscribeConnState(cb: (state: RemoteConnState) => void): Unlisten {
+    this.connStateListeners.add(cb)
+    return () => {
+      this.connStateListeners.delete(cb)
+    }
+  }
+
   private setConnState(s: RemoteConnState) {
     this._connState = s
     this.onConnState(s)
+    for (const cb of this.connStateListeners) cb(s)
   }
 
   /** 主动关闭当前连接（切换设备）：清定时器 + 摘除回调，避免旧连接

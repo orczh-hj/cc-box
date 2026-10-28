@@ -128,6 +128,15 @@
   <!-- 全局通知宿主（useToast 的唯一渲染点） -->
   <ToastHost />
 </div>
+
+<!-- 浏览器模式：已进入主 UI 后连接被拒（token 失效/被刷新）→ 叠加设备选择覆盖层。
+     不销毁主 UI，避免启动链重复注册；连上后自动收起。 -->
+<TokenGate
+  v-if="!isTauriEnv && remoteReady && remoteAuthLost"
+  :auto-boot="false"
+  :initial-denied="true"
+  @connected="remoteAuthLost = false"
+/>
 </template>
 
 <script setup lang="ts">
@@ -193,6 +202,9 @@ const currentView = ref<ViewType>('welcome')
 const showDirPicker = ref(false)
 /** 浏览器模式：远程 WS 认证完成（TokenGate 触发），主 UI 启动链的门控 */
 const remoteReady = ref(false)
+/** 浏览器模式：已进入主 UI 后连接被拒（token 失效），叠加设备选择覆盖层 */
+const remoteAuthLost = ref(false)
+let unlistenRemoteAuth: (() => void) | null = null
 /** 票据模式（?dl=）：URL 在模块加载时已解析，首屏即确定，不启动主 UI */
 const ticketMode = remoteTransport.downloadTicket !== null
 const terminalViewRef = ref()
@@ -308,6 +320,13 @@ let unlistenRestart: (() => void) | null = null
 const shortcutUnlisteners: (() => void)[] = []
 
 onMounted(async () => {
+  // 浏览器模式：连接被拒时不再停留在不可用的主 UI（旧 token 失效/桌面刷新密钥）
+  if (!isTauriEnv) {
+    unlistenRemoteAuth = remoteTransport.subscribeConnState((s) => {
+      if (s === 'denied' && remoteReady.value) remoteAuthLost.value = true
+      else if (s === 'connected') remoteAuthLost.value = false
+    })
+  }
   // 桌面：托盘“远程连接”/新建窗口模式事件尽早订阅（500ms 后 Rust 才 emit）
   if (isTauriEnv) {
     try {
@@ -433,6 +452,7 @@ async function startApp() {
 }
 
 onUnmounted(() => {
+  unlistenRemoteAuth?.()
   unlistenVvResize?.()
   unlistenRemoteSessions?.()
   unlistenRemoteConn?.()

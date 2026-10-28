@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
 import DeviceList from '@/components/remote/DeviceList.vue'
+import type { ProbeStatus } from '@/api/remote-probe'
 
 vi.mock('vue-i18n', () => ({ useI18n: () => ({ t: (key: string) => key }) }))
 
@@ -111,5 +112,75 @@ describe('DeviceList 移除配对', () => {
 
     await rows[1].trigger('keydown', { key: ' ' })
     expect(wrapper.emitted('select')?.[1]).toEqual(['b#2'])
+  })
+})
+
+describe('DeviceList 连通性状态', () => {
+  function mountWithStatuses(statuses: Record<string, ProbeStatus>) {
+    return mount(DeviceList, {
+      props: { desktops, activeId: 'a#1', connState: 'connected', statuses },
+    })
+  }
+
+  // 非当前设备按探测结果展示状态标签
+  it('DeviceList_ProbeStatusTag_009', () => {
+    const wrapper = mountWithStatuses({ 'b#2|t2': 'auth-failed' })
+    const row = wrapper.findAll('.device-item')[1]
+    expect(row.find('.tag.status-auth-failed').text()).toBe('deviceStatusAuthFailed')
+  })
+
+  // 探测不可达：点击不切换，行内展开原因，删除入口仍可用
+  it('DeviceList_UnreachableClickBlocked_010', async () => {
+    const wrapper = mountWithStatuses({ 'b#2|t2': 'offline' })
+    const row = wrapper.findAll('.device-item')[1]
+
+    await row.trigger('click')
+    expect(wrapper.emitted('select')).toBeUndefined()
+    expect(row.find('.device-blocked').text()).toBe('deviceBlockedOffline')
+    expect(row.classes()).toContain('blocked')
+    expect(row.find('.device-remove').exists()).toBe(true)
+  })
+
+  // 在线设备正常切换
+  it('DeviceList_OnlineClickSelects_011', async () => {
+    const wrapper = mountWithStatuses({ 'b#2|t2': 'online' })
+    await wrapper.findAll('.device-item')[1].trigger('click')
+    expect(wrapper.emitted('select')?.[0]).toEqual(['b#2'])
+  })
+
+  // 「重新检测」向上抛出，由调用方重新探测
+  it('DeviceList_RecheckEmits_012', async () => {
+    const wrapper = mountWithStatuses({})
+    await wrapper.find('.device-recheck').trigger('click')
+    expect(wrapper.emitted('recheck')).toHaveLength(1)
+  })
+
+  // 当前设备始终以主连接状态为准，探测结果不覆盖
+  it('DeviceList_ActiveUsesConnState_013', () => {
+    const wrapper = mount(DeviceList, {
+      props: {
+        desktops,
+        activeId: 'a#1',
+        connState: 'denied',
+        statuses: { 'a#1|t1': 'online' },
+      },
+    })
+    expect(wrapper.findAll('.device-item')[0].find('.tag.status-auth-failed').exists()).toBe(true)
+  })
+
+  // 重新检测（checking）期间保持拦截提示：复测仍不可达时不需要再点一次
+  it('DeviceList_RecheckKeepsBlockedHint_014', async () => {
+    const wrapper = mountWithStatuses({ 'b#2|t2': 'offline' })
+    const row = wrapper.findAll('.device-item')[1]
+
+    await row.trigger('click')
+    expect(row.find('.device-blocked').exists()).toBe(true)
+
+    await wrapper.setProps({ statuses: { 'b#2|t2': 'checking' } })
+    expect(wrapper.findAll('.device-item')[1].find('.device-blocked').exists()).toBe(true)
+
+    // 复测恢复在线 → 收起
+    await wrapper.setProps({ statuses: { 'b#2|t2': 'online' } })
+    expect(wrapper.findAll('.device-item')[1].find('.device-blocked').exists()).toBe(false)
   })
 })

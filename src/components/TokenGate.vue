@@ -16,8 +16,10 @@
         :desktops="desktops"
         :active-id="activeId"
         :conn-state="connState"
+        :statuses="statuses"
         @select="activate"
         @remove="remove"
+        @recheck="recheck(desktops, activeId)"
       />
 
       <!-- 需要输入 token（closed 无 token / denied 且无可用列表） -->
@@ -40,22 +42,34 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { remoteTransport } from '@/api/remote-transport'
 import { listDesktops, removeDesktop, type StoredDesktop } from '@/api/remote-desktops'
 import DeviceList from '@/components/remote/DeviceList.vue'
+import { useDeviceProbe } from '@/composables/useDeviceProbe'
+
+/** autoBoot=false：作为主 UI 之上的连接失效覆盖层复用，不主动重连
+ *  initialDenied：覆盖层进入时即展示「令牌失效」提示 */
+const props = withDefaults(defineProps<{
+  autoBoot?: boolean
+  initialDenied?: boolean
+}>(), {
+  autoBoot: true,
+  initialDenied: false,
+})
 
 const emit = defineEmits<{ connected: [] }>()
 
 const tokenInput = ref('')
-const busy = ref(true)
-const wasDenied = ref(false)
+const busy = ref(props.autoBoot)
+const wasDenied = ref(props.initialDenied)
 const connState = ref<'connecting' | 'authenticating' | 'connected' | 'reconnecting' | 'denied' | 'closed'>('closed')
 
 // ==================== 已保存设备列表 ====================
 
 const desktops = ref<StoredDesktop[]>([])
 const activeId = ref<string | null>(remoteTransport.activeDesktopId)
+const { statuses, probeAll, recheck } = useDeviceProbe()
 
 function refreshDesktops(): void {
   desktops.value = listDesktops()
@@ -63,6 +77,13 @@ function refreshDesktops(): void {
   // 保证激活高亮与 busy 设备名跟随
   activeId.value = remoteTransport.activeDesktopId
 }
+
+// 列表或当前设备变化即重探（当前设备由主连接 connState 展示，不重复建连）
+watch(
+  [() => desktops.value.map(d => `${d.id}|${d.token}`).join(','), activeId],
+  () => probeAll(desktops.value, activeId.value),
+  { immediate: true },
+)
 
 const stateText = computed(() => {
   switch (connState.value) {
@@ -115,7 +136,11 @@ onMounted(async () => {
       busy.value = false
     }
   }
-  await remoteTransport.boot()
+  if (props.autoBoot) {
+    await remoteTransport.boot()
+  } else {
+    busy.value = false
+  }
 })
 
 function connect() {

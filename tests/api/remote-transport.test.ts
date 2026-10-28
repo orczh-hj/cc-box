@@ -387,3 +387,29 @@ describe('remote-transport 会话剥离分发（同类问题回归）', () => {
     expect(got).toEqual([{ id: 'p9', reason: 'instance disconnected' }])
   })
 })
+
+describe('remote-transport 连接状态订阅', () => {
+  beforeEach(() => {
+    FakeWebSocket.instances = []
+    FakeWebSocket.SENT = []
+  })
+
+  // 主 UI 需在 TokenGate 之外独立感知 denied/connected；取消订阅后不再回调
+  it('RemoteTransport_SubscribeConnState_012', () => {
+    const states: string[] = []
+    const un = remoteTransport.subscribeConnState((s) => states.push(s))
+
+    remoteTransport.connectWithToken('state-token')
+    const ws = lastWs()
+    ws.serverOpen()
+    expect(states).toContain('authenticating')
+
+    ws.serverSend({ type: 'hello.ok', ver: 1, deviceName: 'D', connId: 1, revision: 1 })
+    expect(states).toContain('connected')
+
+    un()
+    const count = states.length
+    ws.serverSend({ type: 'hello.error', error: 'invalid token' })
+    expect(states.length).toBe(count)
+  })
+})
