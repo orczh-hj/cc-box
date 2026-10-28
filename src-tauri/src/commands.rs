@@ -875,7 +875,8 @@ pub fn set_native_edit_menu(
         // 避免终端持焦时菜单栏完全空白
         let placeholder = MenuItemBuilder::with_id("cc-box-placeholder", "CC-Box")
             .enabled(false)
-            .build(&app)?;
+            .build(&app)
+            .map_err(|e| e.to_string())?;
         MenuBuilder::new(&app).item(&placeholder).build()
     }
     .map_err(|e| e.to_string())?;
