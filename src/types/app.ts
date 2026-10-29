@@ -3,10 +3,13 @@
 export interface CheckResult {
   name: string
   passed: boolean
+  /** 稳定结论码（i18n 渲染键；旧版后端可能缺失，展示时回退 message） */
+  code?: string
   message: string
   detectedPath?: string
   /** 来源标记："configured"（用户配置）| "path"（PATH 检测） */
   source?: 'configured' | 'path'
+  /** 动作 i18n 键（旧后端为英文展示文本） */
   action?: string
   url?: string
 }

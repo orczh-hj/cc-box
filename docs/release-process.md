@@ -151,6 +151,33 @@ cp scripts/oss-config.example.json scripts/oss-config.json
 # 编辑填入阿里云 AccessKey
 ```
 
+## 产品官网（ccbox.orczh.top）
+
+官网源码在 `website/`（独立 Vite 站点，见根 CLAUDE.md「产品官网」速查），部署在同一 OSS bucket 根路径，与版本发布互不依赖（页面动态 fetch `/cc-box/latest.json`，发版后官网自动更新）。速查见 CLAUDE.md，此处只记录 **OSS 侧配置与证书**。
+
+### OSS 控制台配置（一次性，已生效）
+
+| 项 | 值 | 说明 |
+|---|---|---|
+| 静态页面 → 默认首页 | `index.html` | 根路径 `/` 直接出主页 |
+| 静态页面 → 子目录首页 | 不开通 | `cc-box/`、`deps/` 是更新通道不是网站 |
+| 默认 404 页 | `index.html`，响应码 **404** | 404 页只影响浏览器外观，状态码语义保留（不影响 updater / 部署校验） |
+| 域名管理 → 自定义域名 | `ccbox.orczh.top` | CNAME → bucket endpoint，DigiCert 免费证书（OSS 托管） |
+
+已知怪癖：OSS 默认域名（`cc-box.oss-cn-beijing.aliyuncs.com`）对网页文件强制 `Content-Disposition: attachment`（浏览器直接下载不渲染），**只有自定义域名能正常访问网页**；默认域名仅可作资源直链（安装包下载）。静态托管默认首页只处理 GET——`HEAD /` 返回 403 属正常，`deploy:site` 的根路径校验用 GET。
+
+### 证书自动续签（跨项目，在 ortab 服务器）
+
+官网证书有效期 3 个月（阿里云个人免费证书，无控制台自动续期），由 **ortab_backend 的 `update_ssl.py`** 自动续签（服务器 `website-tasks.service` 每天凌晨 3 点）：
+
+- **触发**：剩余不足 **7 天**（`RENEW_THRESHOLD_DAYS`）
+- **流程**：API 申请免费证书 → 自动 DNS 验证 → 部署到 OSS bucket 自定义域名 → **复核过期时间刷新**（API 成功但未刷新算失败）
+- **通知**：触发后无论成败邮件通知 `orczh_hj@163.com`（正文含各域名续签前后过期日期）
+- **额度**：个人免费证书 20 张/年，本证书 + `files.orczh.top` + ECS `orczh.top` 三目标每年约消耗 12 张（每张 3 个月 × 3 域名 × 4 次）
+- 细节与变更记录 → `py_project/ortab_backend` 的 `docs/CHANGES.md`（2026-10-29 条目）
+
+手动补跑（服务器上）：`cd /home/ortab && set -a && source .env && set +a && venv/bin/python update_ssl.py oss`
+
 ## 版本号更新位置
 
 三个文件的版本号必须保持一致：

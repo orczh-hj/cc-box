@@ -42,7 +42,10 @@
     "dev:relay": "node scripts/dev-relay.mjs",
     "sync:presets": "tsx scripts/sync-provider-presets.mts",
     "deploy:relay": "node scripts/deploy-relay.mjs",
-    "deploy:web": "node scripts/deploy-web.mjs"
+    "deploy:web": "node scripts/deploy-web.mjs",
+    "dev:site": "vite --config website/vite.config.mts",
+    "build:site": "vite build --config website/vite.config.mts",
+    "deploy:site": "node scripts/deploy-site.mjs"
   },
   "dependencies": {
     "@codemirror/lang-json": "^6.0.2",
@@ -68,6 +71,7 @@
     "@xterm/xterm": "6.1.0-beta.303",
     "lodash-es": "^4.18.1",
     "macos-traffic-lights": "^1.0.1",
+    "marked": "^18.1.2",
     "pinia": "^2.1.7",
     "qrcode": "^1.5.4",
     "v3-infinite-loading": "^1.3.2",

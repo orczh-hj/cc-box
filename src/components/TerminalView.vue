@@ -107,6 +107,7 @@ import { reflowSnapshot } from '@/utils/terminal-reflow'
 import SidebarPanel from './sidebar/SidebarPanel.vue'
 import { useIsMobile } from '@/composables/useMediaQuery'
 import { useRemotePanel } from '@/composables/useRemotePanel'
+import { checkCodeText } from '@/utils/check-i18n'
 
 const emit = defineEmits<{
   back: []
@@ -162,7 +163,7 @@ const cliHealthText = computed(() => {
   const health = cliHealthBar.value
   if (!health) return ''
   return health.status === 'missing'
-    ? `${t('cliUnavailable')}: ${health.message}`
+    ? `${t('cliUnavailable')}: ${checkCodeText(health.code, health.message)}`
     : `${t('cliStartFailed')}: ${health.message}`
 })
 

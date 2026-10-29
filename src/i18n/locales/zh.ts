@@ -194,6 +194,7 @@ export default {
   aboutTitle: '关于',
   aboutDesc: '面向 Claude Code 重度用户的多终端管理器。',
   version: '版本 {version}',
+  officialSite: '官网主页',
   githubRepo: 'GitHub 仓库',
   claudeDocs: 'Claude Code 文档',
 
@@ -532,6 +533,17 @@ export default {
   customPathInvalid: '路径不存在',
   viewDocs: '查看文档',
   envCheckHint: '自动安装会将 Claude CLI 和 Git Bash 下载到用户目录。你也可以在下面对已有的可执行文件指定路径。',
+
+  // 环境检查结论码（对应后端 CheckResult.code / action）
+  checkFoundConfigured: '已找到（用户配置）',
+  checkFoundPath: '已找到（PATH 检测）',
+  checkFoundEnv: '已找到（环境变量）',
+  checkFoundAuto: '已找到（自动检测）',
+  checkClaudeNotRunnable: '配置的 Claude CLI 无法运行，请重新安装或在下方设置有效路径',
+  checkClaudeNotFound: '未找到 Claude CLI，可在下方设置自定义路径',
+  checkGitBashNotFound: '未找到 Git Bash，可在下方设置自定义路径',
+  viewInstallationGuide: '查看安装指南',
+  installGitForWindows: '下载安装 Git for Windows',
 
   // Install stages
   stageFetching: '获取版本信息...',

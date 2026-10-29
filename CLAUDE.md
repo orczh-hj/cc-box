@@ -129,6 +129,16 @@ npm run release -- --bump patch --notes "### Features\n- Add feature"
 - **relay 二进制不内嵌 Web UI**（`web-assets` 以 `--no-default-features` 构建，UI 与 relay 部署完全独立）：生产 relay 必须配置 `CC_BOX_RELAY_WEB_DIR=/opt/cc-box/web`，前端（src/）改动只需 `npm run deploy:web`（构建 → staging → md5 校验 → 原子切换 → 线上校验，完整镜像替换、自动清理旧 bundle；勿直接用 `scp -r dist/*` 覆盖，否则历史 `index-*.js` 会永久堆叠），免重编、免重启；只有 relay 源码/服务逻辑（remote/relay/、web-assets 代码）改动才跑 `npm run deploy:relay`（不再构建前端；先桌面后 relay）。桌面安装包保留内嵌 UI（默认 feature）
 - 详细参数、断点续跑与远程组件发布清单 → [docs/release-process.md](docs/release-process.md)
 
+### 产品官网（速查）
+
+- **官网 = `website/`**（Vue 3 独立 Vite 站点，复用根 node_modules，与主应用 `src/` 零共享、仅浅色主题），部署在 OSS bucket `cc-box` 根路径，**对外地址 `https://ccbox.orczh.top/`**（自定义域名，OSS 托管 DigiCert 免费证书；OSS 默认域名对网页文件强制 `Content-Disposition: attachment` 下载，仅可作资源直链如安装包下载）；多入口：`index.html`（主页）+ `docs.html`（使用文档），bundle 名为 `main-*`/`docs-*`
+- **文档页内容存 `website/content/*.md`**（claude-code.md / cc-box.md，客观清单风格、自包含不外链），经 marked 运行时渲染（`lib/markdown.ts`：h2 生成锚点 id + 提取 TOC，DocsApp 双栏布局 + scrollspy）；客户端渲染导致 hash 定位需挂载后补跳（DocsApp onMounted）
+- 版本号/下载链接**动态 fetch `/cc-box/latest.json`**（同 bucket 同源无 CORS；本地 dev 走 vite proxy，port 4173）——发版后官网自动更新，无需重新部署
+- 命令：`npm run dev:site` / `build:site` / `deploy:site`（构建 → ossutil 上传 assets 先、index.html 后 → HEAD 校验；`--skip-build`、`--clean-assets` 可选）
+- **安全红线**：bucket 根下有更新通道 `cc-box/` 与依赖 `deps/`，绝不 `rm -r oss://cc-box/`；清旧 hash 产物只能 `--clean-assets`（上传前清 `assets/`，勿在上传后手动 rm）
+- 纯逻辑在 `website/src/lib/`（ua/format/latest），测试在 `tests/website/`
+- **官网证书自动续签**：DigiCert 免费证书（3 个月）由 ortab 服务器 `update_ssl.py` 每天 3 点自动续签（剩 7 天触发、复核过期时间刷新、邮件通知）→ [docs/release-process.md](docs/release-process.md)「产品官网」
+
 ## 详细文档
 
 | 文档                                                           | 内容                                                    |
@@ -166,6 +176,7 @@ npm run release -- --bump patch --notes "### Features\n- Add feature"
 - **避免重复实现**：同一逻辑只留一份（如 `spawn_pty_core`、`apply_hook_event`）；两端各自需要的状态靠事件同步（`session-renamed`、`hook-status`），不靠复制代码
 - **macOS 原生编辑快捷键（焦点驱动 Edit 菜单）**：WKWebView 粘贴无 keydown 默认行为，输入框 Cmd+V 依赖原生 Edit 菜单（paste:/copy: selector）；但菜单 key equivalent 会在按键到达 WebView 前被系统拦截，故 `useAppShortcuts` focusin 联动——xterm-helper-textarea 持焦时 `set_native_edit_menu(false)` 切空菜单，其余焦点切回 Edit 菜单。**菜单必须每次现建**（`commands.rs` 内构建）：Menu clone 共享底层原生对象，被挂载过的实例复挂会 attach 冲突静默失败（曾致输入框编辑键全失效）；**终端按键处理永不经菜单**；判定逻辑见 `src/utils/mac-edit-keys.ts`，禁止在前端 JS 模拟编辑键（execCommand 仿真）
 - **离散操作必广播**：用户离散操作（建/关/重命名会话）经 Rust 广播事件让对端走同一个原生函数；远程安全守卫（白名单/并发上限/独占）作为前置检查包住共用核心，不因统一而放宽
+- **面向用户的后端文案走稳定 code**：Rust 结果不内嵌展示文本，返回稳定结论码/i18n 键（如 `CheckResult.code`/`action`），前端按 locale 渲染（`utils/check-i18n.ts`，未知或缺失 code 回退原文，兼容旧桌面后端）；`message` 仅作日志与回退 → [docs/startup-checks.md](docs/startup-checks.md)「检查文案与双语」
 - **用户级资源开关（skills/agents/mcp/plugins）**：后端单点 `store.rs` 的 `set_*_enabled`（桌面/远程同一函数）。skill/agent 禁用=移入 `~/.cc-box/disabled/<category>`，必须 **symlink 感知**（相对链接按目标位置重算、存在性用 `symlink_metadata`、disabled 扫描列出断链以便恢复）；前端 `state-changed` 刷新必须**静默**（`loadXxx(cwd, { silent: true })`，不切 loading 分支，否则整列表卸载重建）；**本端写回环必须抑制**（`markSelfWrite` 登记 → `applyStateSection` 消费并跳过该 section，条目原地响应；plugin 仍级联子项），后端列表按名称**稳定排序**（顺序与 enabled 解耦）；开关按 `(sourceType=user, name)` 定位，禁止裸 name。providers 系写命令同样登记抑制（activate/delete/create/update/reorder/updateCommon），激活返回更新后的 `appliedSettings` 供发起端精确同步、免全量刷新
 - 每次修改后：通用规则速查更新到 CLAUDE.md，定向细节更新到 docs/development.md 或对应正本文档
 - Rust 结构体返回前端时统一使用 `#[serde(rename_all = "camelCase")]`

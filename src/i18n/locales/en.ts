@@ -194,6 +194,7 @@ export default {
   aboutTitle: 'About',
   aboutDesc: 'Multi-terminal manager for Claude Code power users.',
   version: 'Version {version}',
+  officialSite: 'Official Website',
   githubRepo: 'GitHub Repository',
   claudeDocs: 'Claude Code Docs',
 
@@ -532,6 +533,17 @@ export default {
   customPathInvalid: 'Path does not exist',
   viewDocs: 'View Docs',
   envCheckHint: 'Auto Install downloads Claude CLI and Git Bash to the user directory. You can also point to an existing binary below.',
+
+  // Environment check result codes (CheckResult.code / action from backend)
+  checkFoundConfigured: 'Found (configured)',
+  checkFoundPath: 'Found (PATH)',
+  checkFoundEnv: 'Found (environment variable)',
+  checkFoundAuto: 'Found (auto-detected)',
+  checkClaudeNotRunnable: 'Configured Claude CLI is not runnable. Reinstall it or set a valid path below.',
+  checkClaudeNotFound: 'Claude CLI not found. You can set a custom path below.',
+  checkGitBashNotFound: 'Git Bash not found. You can set a custom path below.',
+  viewInstallationGuide: 'View installation guide',
+  installGitForWindows: 'Install Git for Windows',
 
   // Install stages
   stageFetching: 'Fetching version info...',

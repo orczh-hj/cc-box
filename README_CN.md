@@ -35,8 +35,8 @@ CC-Box 本质上是 **Claude Code 的桌面应用**。它保留了原生终端�
 ## 界面截图
 
 <p align="center">
-  <img src="screenshots/projectselect.png" alt="项目选择" width="400">
-  <img src="screenshots/project.png" alt="会话管理" width="400">
+  <img src="screenshots/project-page.png" alt="项目与近期会话" width="400">
+  <img src="screenshots/terminal-sessions.png" alt="多会话终端" width="400">
 </p>
 
 ---

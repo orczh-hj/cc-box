@@ -10,7 +10,6 @@ import {
   getProjects,
   getCheckResults,
   runChecks,
-  getSystemLocale,
   hideProject as hideProjectApi,
   unhideProject as unhideProjectApi,
 } from '@/api/tauri'
@@ -44,14 +43,14 @@ export interface PendingResume {
  */
 export type CliHealth =
   | { status: 'ok'; path: string; source: 'configured' | 'path' }
-  | { status: 'missing'; message: string }
+  | { status: 'missing'; message: string; code?: string }
   | { status: 'failed'; message: string; stage: string }
 
 export const useAppStore = defineStore('app', () => {
   const cwd = ref<string>('')
   const theme = ref<string>('light')
   const fontSize = ref<number>(12)
-  const language = ref<string>('en')
+  const language = ref<string>('zh')
   const alwaysOnTop = ref<boolean>(false)
   const claudeEnvVars = ref<Record<string, string>>({})
 
@@ -102,7 +101,7 @@ export const useAppStore = defineStore('app', () => {
       const config = await getAppConfig()
       theme.value = config.theme || 'light'
       fontSize.value = config.fontSize || 12
-      language.value = config.language || (await detectSystemLocale())
+      language.value = config.language || 'zh'
       i18n.global.locale.value = language.value
       hiddenProjects.value = config.hiddenProjects ?? []
 
@@ -141,6 +140,13 @@ export const useAppStore = defineStore('app', () => {
     }
   }
 
+  // 配置（含界面语言）必须先于环境检查加载：检查失败时 UI 会停在检查遮罩，
+  // 若此时才加载配置，遮罩会以默认 en 渲染
+  async function bootstrap() {
+    await loadAppConfig()
+    await doChecks()
+  }
+
   /** 检查结果 → CLI 运行态（检查与执行共用的唯一状态源） */
   function syncCliHealthFromChecks(results: CheckResult[]) {
     const cli = results.find(c => c.name === 'Claude CLI')
@@ -151,7 +157,7 @@ export const useAppStore = defineStore('app', () => {
           path: cli.detectedPath ?? '',
           source: cli.source === 'configured' ? 'configured' : 'path'
         }
-      : { status: 'missing', message: cli.message }
+      : { status: 'missing', message: cli.message, code: cli.code }
   }
 
   /** spawn 失败反哺：CLI 不可用（执行与检查结论不一致时以执行结果为准） */
@@ -327,19 +333,6 @@ export const useAppStore = defineStore('app', () => {
     updateAppConfig({ fontSize: size })
   }
 
-  /** 通过 Tauri 命令获取系统 locale，回退到 navigator.language */
-  async function detectSystemLocale(): Promise<'en' | 'zh'> {
-    try {
-      const locale = await getSystemLocale()
-      if (locale && locale.toLowerCase().startsWith('zh')) return 'zh'
-      if (locale) return 'en'
-    } catch {
-      // 命令失败时回退到浏览器语言
-    }
-    const browserLang = navigator.language || 'en'
-    return browserLang.toLowerCase().startsWith('zh') ? 'zh' : 'en'
-  }
-
   function setLanguage(lang: string) {
     language.value = lang
     updateAppConfig({ language: lang })
@@ -467,6 +460,7 @@ export const useAppStore = defineStore('app', () => {
     isLoadingProjects,
     hiddenProjects,
     loadAppConfig,
+    bootstrap,
     runChecks: doChecks,
     loadCache,
     resetHomeCache,

@@ -14,6 +14,13 @@
     </div>
 
     <div class="links-group">
+      <a class="about-link" @click="openExternal('https://ccbox.orczh.top/')">
+        <div class="link-content">
+          <span class="link-title">{{ t('officialSite') }}</span>
+          <span class="link-url">ccbox.orczh.top</span>
+        </div>
+        <span class="link-arrow">→</span>
+      </a>
       <a class="about-link" @click="openExternal('https://github.com/orczh-hj/cc-box')">
         <div class="link-content">
           <span class="link-title">{{ t('githubRepo') }}</span>

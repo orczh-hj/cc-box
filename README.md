@@ -35,8 +35,8 @@ CC-Box is essentially a **desktop application for Claude Code**. It wraps the CL
 ## Screenshots
 
 <p align="center">
-  <img src="screenshots/projectselect.png" alt="Project Selection" width="400">
-  <img src="screenshots/project.png" alt="Session Management" width="400">
+  <img src="screenshots/project-page.png" alt="Projects and Recent Sessions" width="400">
+  <img src="screenshots/terminal-sessions.png" alt="Multi-session Terminal" width="400">
 </p>
 
 ---

@@ -115,17 +115,30 @@ describe('cliHealth', () => {
     })
   })
 
-  // 检查失败 → missing + 原始提示（供状态条展示）
+  // 检查失败 → missing + 原始提示 + 结论码（状态条按 code 翻译展示）
   it('CliHealth_FromChecks_Missing_002', async () => {
     mockIPC((cmd) => {
       if (cmd === 'run_checks') {
-        return [{ name: 'Claude CLI', passed: false, message: 'not found' }]
+        return [{ name: 'Claude CLI', passed: false, code: 'checkClaudeNotFound', message: 'not found' }]
       }
       return null
     })
     const store = useAppStore()
     await store.runChecks(true)
-    expect(store.cliHealth).toEqual({ status: 'missing', message: 'not found' })
+    expect(store.cliHealth).toEqual({ status: 'missing', message: 'not found', code: 'checkClaudeNotFound' })
+  })
+
+  // 旧版后端无 code → missing 仅带原始提示（展示层回退原文）
+  it('CliHealth_FromChecks_MissingLegacy_005', async () => {
+    mockIPC((cmd) => {
+      if (cmd === 'run_checks') {
+        return [{ name: 'Claude CLI', passed: false, message: 'Claude CLI not found.' }]
+      }
+      return null
+    })
+    const store = useAppStore()
+    await store.runChecks(true)
+    expect(store.cliHealth).toEqual({ status: 'missing', message: 'Claude CLI not found.' })
   })
 
   // 执行失败反哺 → failed；下次 spawn 成功清除
@@ -349,5 +362,52 @@ describe('resetHomeCache', () => {
     expect(store.cachedRecentSessions).toEqual([])
     expect(store.cacheLoaded).toBe(false)
     expect(store.hasMoreProjects).toBe(true)
+  })
+})
+
+describe('bootstrap 启动顺序', () => {
+  // 环境检查失败时 UI 停在检查遮罩；语言必须已从配置加载，否则遮罩按默认 en 渲染
+  it('Bootstrap_ConfigBeforeChecks_001', async () => {
+    i18n.global.locale.value = 'en'
+    const calls: string[] = []
+    mockIPC((cmd) => {
+      calls.push(cmd)
+      if (cmd === 'get_app_config') {
+        return { language: 'zh', theme: 'dark', fontSize: 12, claudeEnvVars: { FOO: '1' } }
+      }
+      if (cmd === 'get_check_results') {
+        return [{
+          name: 'Claude CLI',
+          passed: false,
+          code: 'checkClaudeNotFound',
+          message: 'Claude CLI not found. You can set a custom path below.',
+        }]
+      }
+      return undefined
+    })
+
+    const store = useAppStore()
+    await store.bootstrap()
+
+    // 配置必须先于检查：检查失败时 UI 只显示遮罩，之后不会再有加载语言的机会
+    expect(calls.indexOf('get_app_config')).toBeLessThan(calls.indexOf('get_check_results'))
+    expect(store.checkFailed).toBe(true)
+    expect(i18n.global.locale.value).toBe('zh')
+    expect(store.theme).toBe('dark')
+  })
+
+  // 配置未指定语言时默认中文（不跟随系统 locale）
+  it('App_DefaultLanguage_001', async () => {
+    i18n.global.locale.value = 'en'
+    mockIPC((cmd) => {
+      if (cmd === 'get_app_config') return { claudeEnvVars: { FOO: '1' } }
+      return undefined
+    })
+
+    const store = useAppStore()
+    await store.loadAppConfig()
+
+    expect(store.language).toBe('zh')
+    expect(i18n.global.locale.value).toBe('zh')
   })
 })

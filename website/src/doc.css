@@ -1,0 +1,297 @@
+/* 文档子页专用样式（仅 docs.html 加载）——作用于 Markdown 渲染输出 */
+/* 只设上下内边距：左右由 .container 提供，避免覆盖手机端边距 */
+.doc-page {
+  padding-top: 48px;
+  padding-bottom: 72px;
+}
+
+/* 长路径、URL 等不可断词内容在窄屏下换行，避免撑破布局 */
+.md-body {
+  overflow-wrap: break-word;
+}
+
+/* 行内代码允许断词（代码块仍整体横向滚动） */
+.md-body :not(pre) > code {
+  overflow-wrap: anywhere;
+}
+
+/* 锚点跳转预留 sticky 顶栏高度 */
+.md-body h2 {
+  scroll-margin-top: 84px;
+}
+
+.md-body h1 {
+  font-size: 24px;
+  font-weight: 800;
+  margin: 56px 0 16px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.md-body h1:first-child {
+  margin-top: 0;
+}
+
+.md-body h2 {
+  font-size: 21px;
+  font-weight: 700;
+  margin: 48px 0 12px;
+}
+
+.md-body h3 {
+  font-size: 16px;
+  font-weight: 700;
+  margin: 24px 0 8px;
+}
+
+.md-body p {
+  font-size: 14.5px;
+  color: var(--text-secondary);
+  margin: 10px 0;
+  line-height: 1.75;
+}
+
+.md-body strong {
+  color: var(--text-primary);
+}
+
+.md-body a {
+  color: var(--accent-secondary);
+}
+
+.md-body ul,
+.md-body ol {
+  margin: 10px 0 18px;
+  padding-left: 8px;
+  list-style: none;
+}
+
+.md-body ul li {
+  position: relative;
+  padding: 4px 0 4px 22px;
+  font-size: 14px;
+  color: var(--text-secondary);
+  line-height: 1.7;
+}
+
+.md-body ul li::before {
+  content: '';
+  position: absolute;
+  left: 4px;
+  top: 14px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent-gold);
+}
+
+.md-body ol {
+  counter-reset: mditem;
+}
+
+.md-body ol li {
+  position: relative;
+  padding: 4px 0 4px 32px;
+  font-size: 14px;
+  color: var(--text-secondary);
+  line-height: 1.7;
+  counter-increment: mditem;
+}
+
+.md-body ol li::before {
+  content: counter(mditem);
+  position: absolute;
+  left: 0;
+  top: 6px;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--accent-primary);
+  color: var(--text-inverse);
+  font-size: 12px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.md-body ul ul,
+.md-body ol ol,
+.md-body ul ol,
+.md-body ol ul {
+  margin: 4px 0;
+}
+
+.md-body ul ul li::before,
+.md-body ol ul li::before {
+  background: var(--accent-gold-light);
+}
+
+/* 表格：卡片化；外层滚动容器负责窄屏横向滚动 */
+.md-body .md-table-wrap {
+  width: 100%;
+  max-width: 100%;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  margin: 14px 0 20px;
+  border-radius: var(--radius-lg);
+}
+
+.md-body .md-table-wrap table {
+  margin: 0;
+  width: auto;
+  min-width: 100%;
+}
+
+.md-body table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: 14px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-md);
+  margin: 14px 0 20px;
+}
+
+.md-body th {
+  text-align: left;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-tertiary);
+  padding: 10px 14px;
+  background: var(--bg-tertiary);
+  border-bottom: 1px solid var(--border-color);
+}
+
+.md-body td {
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border-light);
+  vertical-align: top;
+  color: var(--text-secondary);
+  line-height: 1.65;
+}
+
+.md-body tr:last-child td {
+  border-bottom: none;
+}
+
+.md-body td:first-child,
+.md-body th:first-child {
+  white-space: nowrap;
+}
+
+.md-body td:only-child,
+.md-body th:only-child {
+  white-space: normal;
+}
+
+/* 代码块 */
+.md-body pre {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-lg);
+  padding: 16px 18px;
+  margin: 14px 0 20px;
+  overflow-x: auto;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.md-body pre code {
+  background: none;
+  padding: 0;
+  font-size: inherit;
+  color: var(--text-primary);
+}
+
+.md-body blockquote {
+  margin: 14px 0 20px;
+  padding: 10px 18px;
+  border-left: 3px solid var(--accent-gold);
+  background: rgba(212, 165, 116, 0.08);
+  border-radius: 0 var(--radius-md) var(--radius-md) 0;
+  color: var(--text-secondary);
+  font-size: 14px;
+}
+
+.md-body hr {
+  border: none;
+  border-top: 1px solid var(--border-light);
+  margin: 40px 0;
+}
+
+/* 文档截图：卡片化图 + 图注 */
+.md-body .md-fig {
+  margin: 16px 0 22px;
+}
+
+.md-body .md-fig img {
+  display: block;
+  width: 100%;
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-md);
+}
+
+.md-body .md-fig figcaption {
+  margin-top: 8px;
+  font-size: 12.5px;
+  color: var(--text-tertiary);
+  text-align: center;
+}
+
+@media (max-width: 768px) {
+  .md-body h1 {
+    font-size: 20px;
+    margin-top: 40px;
+  }
+
+  .md-body h2 {
+    font-size: 18px;
+    margin-top: 36px;
+  }
+
+  .md-body h3 {
+    font-size: 15.5px;
+  }
+
+  .md-body p {
+    font-size: 14px;
+  }
+
+  .md-body ul li,
+  .md-body ol li {
+    font-size: 13.5px;
+  }
+
+  .md-body table {
+    font-size: 12.5px;
+    table-layout: fixed;
+  }
+
+  .md-body td,
+  .md-body th {
+    padding: 8px 10px;
+    word-break: break-word;
+  }
+
+  .md-body td:first-child,
+  .md-body th:first-child {
+    white-space: normal;
+  }
+
+  .md-body pre {
+    padding: 12px 14px;
+    font-size: 12px;
+  }
+
+  .md-body blockquote {
+    padding: 8px 12px;
+  }
+
+  .md-body ol li {
+    padding-left: 28px;
+  }
+}

@@ -13,6 +13,8 @@ use std::path::Path;
 pub struct CheckResult {
     pub name: String,
     pub passed: bool,
+    /// 稳定结论码（前端 i18n 渲染键；message 仅作日志与无 code 旧端的回退）
+    pub code: String,
     pub message: String,
     /// 检测到的路径（无论通过与否，只要找到了就带上）
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -20,6 +22,7 @@ pub struct CheckResult {
     /// 来源标记："configured"（用户配置）| "path"（PATH 检测）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
+    /// 动作 i18n 键（如 viewInstallationGuide）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub action: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -27,10 +30,11 @@ pub struct CheckResult {
 }
 
 impl CheckResult {
-    fn pass_with_path(name: &str, message: &str, path: &str) -> Self {
+    fn pass_with_path(name: &str, code: &str, message: &str, path: &str) -> Self {
         Self {
             name: name.to_string(),
             passed: true,
+            code: code.to_string(),
             message: message.to_string(),
             detected_path: Some(path.to_string()),
             source: None,
@@ -39,15 +43,22 @@ impl CheckResult {
         }
     }
 
-    fn pass_with_path_source(name: &str, message: &str, path: &str, source: &str) -> Self {
+    fn pass_with_path_source(
+        name: &str,
+        code: &str,
+        message: &str,
+        path: &str,
+        source: &str,
+    ) -> Self {
         Self {
             source: Some(source.to_string()),
-            ..Self::pass_with_path(name, message, path)
+            ..Self::pass_with_path(name, code, message, path)
         }
     }
 
     fn fail_with_path(
         name: &str,
+        code: &str,
         message: String,
         path: Option<String>,
         action: &str,
@@ -56,6 +67,7 @@ impl CheckResult {
         Self {
             name: name.to_string(),
             passed: false,
+            code: code.to_string(),
             message,
             detected_path: path,
             source: None,
@@ -124,6 +136,7 @@ fn check_claude_cli(config_path: &Option<String>) -> CheckResult {
     {
         return CheckResult::pass_with_path_source(
             "Claude CLI",
+            "checkFoundConfigured",
             &format!("Found (configured): {}", path),
             &path,
             "configured",
@@ -134,6 +147,7 @@ fn check_claude_cli(config_path: &Option<String>) -> CheckResult {
     if let Some(path) = crate::platform::probe_cli() {
         return CheckResult::pass_with_path_source(
             "Claude CLI",
+            "checkFoundPath",
             &format!("Found: {}", path),
             &path,
             "path",
@@ -141,19 +155,28 @@ fn check_claude_cli(config_path: &Option<String>) -> CheckResult {
     }
 
     // 3. 区分「找不到」与「配置了但不可运行」，给出可操作的修复提示
-    let message = match config_path {
-        Some(path) if Path::new(path).exists() => format!(
-            "Claude CLI at '{}' is not runnable. Reinstall Claude CLI or set a valid path below.",
-            path
-        ),
-        _ => "Claude CLI not found. You can set a custom path below.".to_string(),
-    };
+    if let Some(path) = config_path {
+        if Path::new(path).exists() {
+            return CheckResult::fail_with_path(
+                "Claude CLI",
+                "checkClaudeNotRunnable",
+                format!(
+                    "Claude CLI at '{}' is not runnable. Reinstall Claude CLI or set a valid path below.",
+                    path
+                ),
+                Some(path.clone()),
+                "viewInstallationGuide",
+                "https://code.claude.com/docs",
+            );
+        }
+    }
 
     CheckResult::fail_with_path(
         "Claude CLI",
-        message,
+        "checkClaudeNotFound",
+        "Claude CLI not found. You can set a custom path below.".to_string(),
         None,
-        "View installation guide",
+        "viewInstallationGuide",
         "https://code.claude.com/docs",
     )
 }
@@ -169,6 +192,7 @@ fn check_git_bash(config_path: &Option<String>) -> CheckResult {
         if Path::new(path).exists() {
             return CheckResult::pass_with_path(
                 "Git Bash",
+                "checkFoundConfigured",
                 &format!("Found (config): {}", path),
                 path,
             );
@@ -182,6 +206,7 @@ fn check_git_bash(config_path: &Option<String>) -> CheckResult {
         if Path::new(&path).exists() {
             return CheckResult::pass_with_path(
                 "Git Bash",
+                "checkFoundEnv",
                 &format!("Found (env): {}", path),
                 &path,
             );
@@ -192,6 +217,7 @@ fn check_git_bash(config_path: &Option<String>) -> CheckResult {
     if let Some(bash_path) = detect_git_bash_from_git() {
         return CheckResult::pass_with_path(
             "Git Bash",
+            "checkFoundAuto",
             &format!("Found: {}", bash_path),
             &bash_path,
         );
@@ -199,9 +225,10 @@ fn check_git_bash(config_path: &Option<String>) -> CheckResult {
 
     CheckResult::fail_with_path(
         "Git Bash",
+        "checkGitBashNotFound",
         "Git Bash not found. You can set a custom path below.".to_string(),
         None,
-        "Install Git for Windows",
+        "installGitForWindows",
         "https://git-scm.com/download/win",
     )
 }

@@ -19,9 +19,9 @@
           <div class="check-detail">
             <div class="check-item-header">
               <span class="check-name">{{ check.name }}</span>
-              <span class="check-message">{{ check.message }}</span>
+              <span class="check-message">{{ checkCodeText(check.code, check.message) }}</span>
             </div>
-            <div v-if="check.passed && check.detectedPath" class="check-detected-path">
+            <div v-if="check.detectedPath" class="check-detected-path">
               {{ check.detectedPath }}
             </div>
 
@@ -45,7 +45,7 @@
               </div>
               <p v-if="customPathErrors[check.name]" class="custom-path-error">{{ customPathErrors[check.name] }}</p>
               <a v-if="check.url" href="javascript:void(0)" class="check-doc-link" @click="openUrl(check.url)">
-                {{ check.action || t('viewDocs') }} →
+                {{ checkActionText(check.action, t('viewDocs')) }} →
               </a>
             </template>
           </div>
@@ -184,6 +184,7 @@ import ToastHost from '@/components/ToastHost.vue'
 import RemoteModal from '@/components/RemoteModal.vue'
 import DeviceSwitcherDialog from '@/components/remote/DeviceSwitcherDialog.vue'
 import { useRemotePanel } from '@/composables/useRemotePanel'
+import { checkCodeText, checkActionText } from '@/utils/check-i18n'
 
 const TerminalView = defineAsyncComponent(() => import('@/components/TerminalView.vue'))
 const SettingsOverlay = defineAsyncComponent(() => import('@/components/settings/SettingsOverlay.vue'))
@@ -440,7 +441,7 @@ watch(() => appStore.currentProject, (project) => {
 }, { immediate: true })
 
 async function startApp() {
-  await appStore.runChecks()
+  await appStore.bootstrap()
   if (appStore.checkFailed) {
     return
   }
@@ -576,7 +577,7 @@ async function retryChecks() {
 }
 
 function initAfterChecks() {
-  // 应用主题到 DOM（loadAppConfig 已在 onMounted 中调用并设置 theme 值）
+  // 应用主题到 DOM（bootstrap 已先加载配置并设置 theme 值）
   const html = document.documentElement
   html.setAttribute('data-theme', appStore.theme)
   html.classList.remove('light', 'dark')
@@ -588,7 +589,6 @@ function initAfterChecks() {
       currentView.value = 'projects'
     }
   })
-  appStore.loadAppConfig()
 
   shortcutUnlisteners.push(...setupShortcutListeners())
 

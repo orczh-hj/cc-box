@@ -28,6 +28,14 @@
 - `run_checks()` / `pty::spawn_claude()` 都是只读；自动检测到的路径只出现在 `CheckResult`（`source = "path"`）与运行时 `cliHealth` 中。
 - 这样做消除了“自动检测覆盖用户配置”“检查与执行争抢写入”的隐式耦合——配置来源始终是用户意图。
 
+## 检查文案与双语
+
+- `CheckResult.code` 是稳定结论码（前端 i18n 键，如 `checkClaudeNotFound`、`checkFoundConfigured`），`action` 同理（`viewInstallationGuide` / `installGitForWindows`）；`message` 保留英文，仅作日志与旧后端回退，前端不再直接展示。
+- 前端 `src/utils/check-i18n.ts` 按 locale 渲染（键在 `src/i18n/locales/*.ts` 的 Environment check codes 段）；code 缺失或未知（旧桌面 + 新 Web UI 组合）时回退原始 `message`/`action` 文本。
+- **语言必须先于检查初始化**：启动走 `appStore.bootstrap()`（先 `loadAppConfig` 再 `runChecks`）。检查失败时 UI 停在检查遮罩、不再进入后续初始化；若此时才加载配置，遮罩会以默认 `en` 渲染（曾导致中文用户看到整页英文）。回归测试见 `tests/stores/app.test.ts` 的 `Bootstrap_ConfigBeforeChecks_001`。
+- `name`（"Claude CLI" / "Git Bash"）是前端定位键（`configKeyFor`、`cliHealth` 匹配），保持英文原文不翻译。
+- 「配置路径不可运行」失败项带 `detectedPath`（配置的路径），展示层对失败项也显示该路径。
+
 ## 自动安装功能
 
 检查失败时提供自动安装选项：
