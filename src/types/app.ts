@@ -33,6 +33,8 @@ export interface AppConfig {
   claudeEnvVars?: Record<string, string>
   language?: string
   remote?: RemoteConfig
+  /** 自动更新：有新版本时自动下载，零窗口时自动安装（缺省视为 true） */
+  autoUpdate?: boolean
 }
 
 export interface RemoteConfig {

@@ -15,6 +15,11 @@ pub(crate) fn available() -> Option<String> {
     AVAILABLE.lock().clone()
 }
 
+/// 自动更新开关解析：config 缺字段（旧版本写入的 config）= 默认开启
+pub(crate) fn resolve_auto_update(cfg: Option<bool>) -> bool {
+    cfg.unwrap_or(true)
+}
+
 /// 启动周期检查：开机网络/代理未就绪时先等 30s，之后每 2h 一次
 pub(crate) fn spawn_checker(app: tauri::AppHandle) {
     tauri::async_runtime::spawn(async move {
@@ -42,4 +47,17 @@ async fn check_once(app: &tauri::AppHandle) -> Result<Option<String>, String> {
     let updater = app.updater().map_err(|e| e.to_string())?;
     let update = updater.check().await.map_err(|e| e.to_string())?;
     Ok(update.map(|u| u.version.clone()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn Update_AutoUpdateDefaultOn_1() {
+        // 旧 config / 字段缺失 = 默认开启
+        assert!(resolve_auto_update(None));
+        assert!(resolve_auto_update(Some(true)));
+        assert!(!resolve_auto_update(Some(false)));
+    }
 }

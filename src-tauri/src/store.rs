@@ -81,6 +81,9 @@ pub struct AppConfig {
     /// 用户添加的市场（仅入 CC-Box 列表可浏览；安装插件时才懒注册到 Claude）
     #[serde(rename = "customMarkets", default)]
     pub custom_markets: Option<Vec<CustomMarket>>,
+    /// 自动更新：有新版本时自动下载，零窗口时自动安装（缺省视为 true）
+    #[serde(rename = "autoUpdate", default)]
+    pub auto_update: Option<bool>,
 }
 
 /// 用户添加的市场记录（CC-Box 自己的列表，非 Claude 注册表）
