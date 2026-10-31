@@ -144,6 +144,9 @@ export default {
   envValuePlaceholder: '变量值',
 
   // Update section
+  updateMoreSettings: '更多设置',
+  autoUpdateLabel: '自动更新',
+  autoUpdateDesc: '有新版本时自动下载；无窗口运行时自动安装并重启。',
   ccBoxUpdate: 'CC-Box 更新',
   currentVersion: '当前版本',
   checking: '检查中...',

@@ -144,6 +144,9 @@ export default {
   envValuePlaceholder: 'value',
 
   // Update section
+  updateMoreSettings: 'More settings',
+  autoUpdateLabel: 'Auto update',
+  autoUpdateDesc: 'Download new versions automatically; install and restart when no window is open.',
   ccBoxUpdate: 'CC-Box Update',
   currentVersion: 'Current Version',
   checking: 'Checking...',

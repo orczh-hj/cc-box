@@ -93,6 +93,21 @@
       </template>
     </div>
 
+    <!-- 更多设置（折叠）：自动更新开关 -->
+    <div class="update-card">
+      <button class="advanced-header" @click="showAdvanced = !showAdvanced">
+        <span class="chevron" :class="{ expanded: showAdvanced }">›</span>
+        <span>{{ t('updateMoreSettings') }}</span>
+      </button>
+      <div v-if="showAdvanced" class="advanced-body">
+        <label class="option-item">
+          <input type="checkbox" v-model="autoUpdate" @change="handleAutoUpdateChange" />
+          <span class="option-label">{{ t('autoUpdateLabel') }}</span>
+        </label>
+        <div class="option-desc">{{ t('autoUpdateDesc') }}</div>
+      </div>
+    </div>
+
     <!-- Claude CLI 历史版本卡片 -->
     <div class="update-card claude-cli-card">
       <div class="version-row">
@@ -252,6 +267,8 @@ import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { check, relaunch, prepareForUpdate, resumeBrokerConnection } from '@/api/tauri'
 import { checkForUpdates, downloadClaudeVersion, cancelClaudeVersionDownload, installClaudeVersion, killClaudeProcesses, getInstalledClaudeVersion, onInstallProgress } from '@/api/tauri'
+import { getAppConfig, updateAppConfig } from '@/api/tauri'
+import { resolveAutoUpdate } from '@/utils/auto-update'
 import { openExternal } from '@/api/platform'
 import { useSidebarStore } from '@/stores/sidebar'
 import { useSessionStore } from '@/stores/session'
@@ -543,9 +560,31 @@ async function openDownloadedFolder(version: string) {
   }
 }
 
+// ============ 更多设置：自动更新 ============
+
+const showAdvanced = ref(false)
+// undefined = 旧 config 缺字段 = 默认开启；v-model 绑定具体布尔值
+const autoUpdate = ref(true)
+
+async function handleAutoUpdateChange() {
+  try {
+    await updateAppConfig({ autoUpdate: autoUpdate.value })
+  } catch (err) {
+    console.error('Failed to save autoUpdate:', err)
+  }
+}
+
 onMounted(async () => {
   // 自动检查 CC-Box 更新（未检查过时）：托盘「更新到新版本」跳转进来即可看到结果
   if (!updateStore.updateInfo) void handleCheckUpdate()
+
+  // 读取自动更新开关（缺字段视为开启）
+  try {
+    const config = await getAppConfig()
+    autoUpdate.value = resolveAutoUpdate(config.autoUpdate)
+  } catch {
+    /* 读失败保持默认开启 */
+  }
 
   // 自动加载版本列表（带缓存）
   await updateStore.loadClaudeVersionList()
@@ -601,6 +640,63 @@ onUnmounted(() => {
 
 .claude-cli-card {
   margin-top: 20px;
+}
+
+/* 更多设置（折叠区） */
+.advanced-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  cursor: pointer;
+}
+
+.advanced-header .chevron {
+  display: inline-block;
+  font-size: 16px;
+  line-height: 1;
+  transition: transform 0.15s ease;
+}
+
+.advanced-header .chevron.expanded {
+  transform: rotate(90deg);
+}
+
+.advanced-body {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border-color);
+}
+
+.advanced-body .option-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+
+.advanced-body .option-item input[type='checkbox'] {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent-color);
+}
+
+.advanced-body .option-label {
+  font-size: 13px;
+  color: var(--text-primary);
+}
+
+.advanced-body .option-desc {
+  margin-top: 6px;
+  margin-left: 24px;
+  font-size: 12px;
+  color: var(--text-tertiary);
 }
 
 .version-row {
