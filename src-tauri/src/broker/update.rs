@@ -21,6 +21,24 @@ static DOWNLOADED: Mutex<Option<(String, Vec<u8>)>> = Mutex::new(None);
 /// 安装进行中标志：防止周期检查与手动更新双安装重入
 static INSTALLING: AtomicBool = AtomicBool::new(false);
 
+/// 安装互斥 guard：获取成功 = INSTALLING 置位（已被占用返回 None），
+/// Drop 复位；成功安装路径 restart 不返回，无需手动复位。
+struct InstallGuard;
+impl InstallGuard {
+    fn acquire() -> Option<Self> {
+        if INSTALLING.swap(true, Ordering::SeqCst) {
+            None
+        } else {
+            Some(Self)
+        }
+    }
+}
+impl Drop for InstallGuard {
+    fn drop(&mut self) {
+        INSTALLING.store(false, Ordering::SeqCst);
+    }
+}
+
 /// 当前可获得的新版本号（托盘渲染用）
 pub(crate) fn available() -> Option<String> {
     AVAILABLE.lock().clone()
@@ -145,6 +163,11 @@ async fn run_cycle(app: &tauri::AppHandle) {
             }
         }
         Decision::Install => {
+            // 写侧互斥：与手动更新共用 InstallGuard，decide 的 installing 输入只是快速路径
+            let Some(_guard) = InstallGuard::acquire() else {
+                log::warn!("[broker-update] auto install skipped: another install in progress");
+                return;
+            };
             if let Some((version, bytes)) = DOWNLOADED.lock().take() {
                 if let Some(update) = fetch_update(app).await {
                     install_and_restart(app, &version, &update, &bytes).await;
@@ -157,55 +180,52 @@ async fn run_cycle(app: &tauri::AppHandle) {
     }
 }
 
-/// 托盘「更新到 vX」手动更新：关窗 → 确保已下载 → 安装重启。
-/// 用户已二次确认，有窗口也安装（先让窗口整体退出）。
+/// 托盘「更新到 vX」手动更新：预检并备好安装包 → 关窗 → 安装重启。
+/// 用户已二次确认，有窗口也安装（先让窗口整体退出）；
+/// 预检/下载失败时不动窗口，避免白关会话。
 async fn manual_update(app: &tauri::AppHandle) {
-    if INSTALLING.swap(true, Ordering::SeqCst) {
+    let Some(_guard) = InstallGuard::acquire() else {
         log::warn!("[broker-update] manual update: already in progress");
         return;
-    }
-    // guard 结构保证失败路径 INSTALLING 复位；成功路径 restart 不返回
-    struct Guard;
-    impl Drop for Guard {
-        fn drop(&mut self) {
-            INSTALLING.store(false, Ordering::SeqCst);
-        }
-    }
-    let _guard = Guard;
-
-    crate::broker::windows::close_all_windows(Duration::from_secs(10)).await;
-
-    // 已下载当前版本则直接用；否则现场检查 + 下载
-    let has_update = available();
-    let cached = DOWNLOADED
-        .lock()
-        .as_ref()
-        .filter(|(v, _)| Some(v.as_str()) == has_update.as_deref())
-        .map(|(_, b)| b.clone());
-    let (version, bytes) = match cached {
-        Some(bytes) => (has_update.unwrap_or_default(), bytes),
-        None => {
-            let Ok(Some(ver)) = check_once(app).await else {
-                log::warn!("[broker-update] manual update: no update available");
-                return;
-            };
-            let Some(update) = fetch_update(app).await else {
-                log::warn!("[broker-update] manual update: fetch failed");
-                return;
-            };
-            let Ok(bytes) = update.download(|_, _| {}, || {}).await else {
-                log::warn!("[broker-update] manual update: download failed");
-                return;
-            };
-            *DOWNLOADED.lock() = Some((ver.clone(), bytes.clone()));
-            (ver, bytes)
-        }
     };
-    log::info!("[broker-update] manual update: installing v{}", version);
-    let Some(update) = fetch_update(app).await else {
-        log::warn!("[broker-update] manual update: fetch failed before install");
+
+    // 1. 预检：确认更新仍在，并取到 Update 对象（失败不关窗）
+    let Ok(Some(_)) = check_once(app).await else {
+        log::warn!("[broker-update] manual update: no update available");
         return;
     };
+    let Some(update) = fetch_update(app).await else {
+        log::warn!("[broker-update] manual update: fetch failed");
+        return;
+    };
+    // 远端在预检后换代：以实际取到的 Update 对象为准
+    let version = update.version.clone();
+
+    // 2. 字节：缓存命中且版本一致则复用；否则现场下载（含换代重下）
+    let bytes = {
+        let cached = DOWNLOADED
+            .lock()
+            .as_ref()
+            .filter(|(v, _)| v == &version)
+            .map(|(_, b)| b.clone());
+        match cached {
+            Some(bytes) => bytes,
+            None => {
+                let Ok(bytes) = update.download(|_, _| {}, || {}).await else {
+                    log::warn!("[broker-update] manual update: download failed");
+                    return;
+                };
+                *DOWNLOADED.lock() = Some((version.clone(), bytes.clone()));
+                bytes
+            }
+        }
+    };
+
+    // 3. 关窗（此步开始有破坏性）
+    crate::broker::windows::close_all_windows(Duration::from_secs(10)).await;
+
+    // 4. 安装（update.version == version 已在步骤 2 保证）
+    log::info!("[broker-update] manual update: installing v{}", version);
     install_and_restart(app, &version, &update, &bytes).await;
 }
 
@@ -252,6 +272,18 @@ async fn fetch_update(app: &tauri::AppHandle) -> Option<Update> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn Update_InstallGuardMutex_3() {
+        // 写侧互斥：第一次获取成功，持用期间第二次被拒；Drop 后复位可再取
+        let _g1 = InstallGuard::acquire();
+        assert!(_g1.is_some(), "first acquire must succeed");
+        assert!(INSTALLING.load(Ordering::SeqCst));
+        assert!(InstallGuard::acquire().is_none(), "second acquire must be rejected");
+        drop(_g1);
+        assert!(!INSTALLING.load(Ordering::SeqCst), "drop must reset the flag");
+        assert!(InstallGuard::acquire().is_some(), "re-acquire after drop must succeed");
+    }
 
     #[test]
     fn Update_AutoUpdateDefaultOn_1() {
