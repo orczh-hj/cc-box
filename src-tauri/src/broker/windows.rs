@@ -226,34 +226,6 @@ pub(crate) async fn open_remote_panel() -> Result<(), String> {
     crate::gateway::send_window_command(&target, WindowAction::OpenRemote).await
 }
 
-/// 托盘「更新到新版本」：显示第一个可控制窗口并跳转设置→更新；
-/// 没有可控制窗口时先拉起一个新窗口，再下发 OpenUpdate。
-pub(crate) async fn open_update_panel() -> Result<(), String> {
-    let target = match crate::gateway::window_roster()
-        .into_iter()
-        .find(|w| w.closable)
-    {
-        Some(w) => w.id,
-        None => {
-            spawn_window_user()?;
-            let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-            loop {
-                if let Some(w) = crate::gateway::window_roster()
-                    .into_iter()
-                    .find(|w| w.closable)
-                {
-                    break w.id;
-                }
-                if tokio::time::Instant::now() >= deadline {
-                    return Err("new window did not register in time".to_string());
-                }
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-        }
-    };
-    crate::gateway::send_window_command(&target, WindowAction::OpenUpdate).await
-}
-
 /// 关闭所有可控制窗口（`except` 用于更新时保留发起者）。
 pub(crate) async fn close_windows(except: Option<&str>, timeout: Duration) {
     let windows: Vec<_> = crate::gateway::window_roster()

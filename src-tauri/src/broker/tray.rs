@@ -39,6 +39,8 @@ pub(crate) struct TrayLabels {
     pub quit: String,
     /// 有新版本时的菜单项文案（None = 不显示该项、托盘图标无红点）
     pub update: Option<String>,
+    /// 无更新时显示的「检查更新」文案（有更新时由 build_menu 跳过渲染）
+    pub check_update: String,
     pub windows: Vec<TrayWindow>,
 }
 
@@ -144,6 +146,11 @@ pub(crate) fn build_model(
                 format!("Update to v{}", v)
             }
         }),
+        check_update: if zh {
+            "检查更新".to_string()
+        } else {
+            "Check for updates".to_string()
+        },
         windows,
     }
 }
@@ -223,6 +230,16 @@ fn build_menu(
             None::<&str>,
         )?));
         items.push(Box::new(PredefinedMenuItem::separator(app)?));
+    } else {
+        // 无更新：「检查更新」立即查一次（结果经菜单签名变化自动重建菜单）
+        items.push(Box::new(MenuItem::with_id(
+            app,
+            "check-update",
+            &model.check_update,
+            true,
+            None::<&str>,
+        )?));
+        items.push(Box::new(PredefinedMenuItem::separator(app)?));
     }
 
     // 每个窗口直接是一级菜单项，单击直接显示/聚焦
@@ -298,13 +315,30 @@ fn confirm_destructive(
 fn handle_menu_event(app: &tauri::AppHandle, id: &str) {
     let zh = zh();
     if id == "update" {
-        // 显示第一个可控制窗口并跳转设置→更新（更新执行仍由 GUI 完成：
-        // 下载进度/确认/失败恢复都在 UpdateSection，不在这里重复实现）
-        tauri::async_runtime::spawn(async move {
-            if let Err(e) = crate::broker::windows::open_update_panel().await {
-                log::warn!("[broker-tray] open update panel failed: {}", e);
+        // 二次确认后 Broker 直接执行更新链（关窗 → 下载/复用 → 安装重启）
+        let (title, message, confirm) = if zh {
+            (
+                "更新 CC-Box",
+                "将关闭所有窗口并更新到新版本，更新完成后可重新打开窗口。确认更新？",
+                "更新",
+            )
+        } else {
+            (
+                "Update CC-Box",
+                "All windows will be closed and CC-Box will update to the new version. Continue?",
+                "Update",
+            )
+        };
+        confirm_destructive(app, title, message, confirm, {
+            let app = app.clone();
+            move || {
+                crate::broker::update::run_manual_update(app.clone());
             }
         });
+        return;
+    }
+    if id == "check-update" {
+        crate::broker::update::check_now(app.clone());
         return;
     }
     if id == "new" {
@@ -448,15 +482,22 @@ fn handle_menu_event(app: &tauri::AppHandle, id: &str) {
     }
 }
 
+/// 红点几何（纯函数，可单测）：半径缩小到边长 16%，圆心贴右上角（边缘留 2px）
+#[cfg(not(target_os = "linux"))]
+fn badge_geometry(w: u32, h: u32) -> (i32, i32, i32) {
+    let radius = ((w.min(h) as f32) * 0.16).round().max(3.0) as i32;
+    let cx = w as i32 - 2 - radius;
+    let cy = 2 + radius;
+    (cx, cy, radius)
+}
+
 /// 托盘图标叠加红点（有新版本时）：在右上角画实心圆，不改动基础图标资源
 #[cfg(not(target_os = "linux"))]
 fn badge_icon(app: &tauri::AppHandle) -> Option<tauri::image::Image<'static>> {
     let base = app.default_window_icon()?.clone();
     let (w, h) = (base.width(), base.height());
     let mut rgba = base.rgba().to_vec();
-    let radius = ((w.min(h) as f32) * 0.28).round().max(3.0) as i32;
-    let cx = w as i32 - radius - 1;
-    let cy = radius + 1;
+    let (cx, cy, radius) = badge_geometry(w, h);
     for y in 0..h as i32 {
         for x in 0..w as i32 {
             let dx = x - cx;
@@ -656,5 +697,26 @@ mod tests {
 
         let en = build_model(Some(&status(true, false)), &[], false, Some("0.17.0"), false);
         assert_eq!(en.update.as_deref(), Some("Update to v0.17.0"));
+    }
+
+    // 无更新时提供「检查更新」文案（有更新时不渲染该项，由 build_menu 决定）
+    #[test]
+    fn Tray_CheckUpdateItem_6() {
+        let none = build_model(Some(&status(true, false)), &[], false, None, true);
+        assert_eq!(none.check_update, "检查更新");
+        let en = build_model(Some(&status(true, false)), &[], false, None, false);
+        assert_eq!(en.check_update, "Check for updates");
+        let some = build_model(Some(&status(true, false)), &[], false, Some("0.17.0"), true);
+        assert_eq!(some.check_update, "检查更新");
+    }
+
+    // 红点缩小且更贴右上角边缘
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn Tray_BadgeGeometry_7() {
+        let (cx, cy, r) = badge_geometry(32, 32);
+        assert_eq!(r, 5); // 32*0.16 ≈ 5.12 → 5
+        assert_eq!(cx, 32 - 2 - 5); // 右缘留 2px
+        assert_eq!(cy, 2 + 5); // 圆心距顶 2px + 半径
     }
 }
