@@ -95,21 +95,22 @@ pub(crate) fn spawn_checker(app: tauri::AppHandle) {
             .expect("failed to build updater runtime");
         rt.block_on(async move {
             loop {
-                run_cycle(&app).await;
+                run_cycle(&app, true).await;
                 tokio::time::sleep(Duration::from_secs(2 * 60 * 60)).await;
             }
         });
     });
 }
 
-/// 托盘「检查更新」：专用线程立即执行一次周期逻辑（fire-and-forget）
+/// 托盘「检查更新」：专用线程立即检查并下载，**不自动安装**（用户点了菜单 =
+/// 主动查看，安装与否由周期检查按开关+零窗口评估，或走「更新到 vX」手动链）
 pub(crate) fn check_now(app: tauri::AppHandle) {
     std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .expect("failed to build updater runtime");
-        rt.block_on(run_cycle(&app));
+        rt.block_on(run_cycle(&app, false));
     });
 }
 
@@ -124,8 +125,9 @@ pub(crate) fn run_manual_update(app: tauri::AppHandle) {
     });
 }
 
-/// 一次完整的「检查 → 下载 → 判窗口 → 安装」
-async fn run_cycle(app: &tauri::AppHandle) {
+/// 一次完整的「检查 → 下载 → 判窗口 → 安装」。
+/// `allow_install=false`（托盘「检查更新」）只检查与下载，不自动安装。
+async fn run_cycle(app: &tauri::AppHandle, allow_install: bool) {
     let has_update = match check_once(app).await {
         Ok(v) => v,
         // 失败保留上次结果：网络抖动不应让红点闪烁
@@ -163,6 +165,14 @@ async fn run_cycle(app: &tauri::AppHandle) {
             }
         }
         Decision::Install => {
+            if !allow_install {
+                // 「检查更新」只查不装：更新已下载好，等周期检查评估安装条件
+                log::info!(
+                    "[broker-update] check-only: v{} ready, install deferred to periodic cycle",
+                    downloaded_ver.as_deref().unwrap_or("?")
+                );
+                return;
+            }
             // 写侧互斥：与手动更新共用 InstallGuard，decide 的 installing 输入只是快速路径
             let Some(_guard) = InstallGuard::acquire() else {
                 log::warn!("[broker-update] auto install skipped: another install in progress");
