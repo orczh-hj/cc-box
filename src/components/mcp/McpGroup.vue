@@ -16,8 +16,9 @@
     <div v-if="expanded" class="servers-container">
       <McpItemCard
         v-for="server in servers"
-        :key="server.name"
+        :key="server.name + server.sourceType"
         :server="server"
+      @edit="$emit('edit', $event)"
       />
     </div>
   </div>
@@ -36,6 +37,7 @@ defineProps<{
 
 defineEmits<{
   toggle: []
+  edit: [server: McpServerInfo]
 }>()
 </script>
 

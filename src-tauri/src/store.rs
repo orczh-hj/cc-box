@@ -78,6 +78,18 @@ pub struct AppConfig {
     pub language: Option<String>,
     #[serde(rename = "remote")]
     pub remote: Option<RemoteConfig>,
+    /// 用户添加的市场（仅入 CC-Box 列表可浏览；安装插件时才懒注册到 Claude）
+    #[serde(rename = "customMarkets", default)]
+    pub custom_markets: Option<Vec<CustomMarket>>,
+}
+
+/// 用户添加的市场记录（CC-Box 自己的列表，非 Claude 注册表）
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomMarket {
+    pub name: String,
+    /// GitHub owner/repo / git URL / marketplace.json URL / 本地目录
+    pub source: String,
 }
 
 /// 远程连接配置（局域网直连 + 中继）
@@ -183,13 +195,45 @@ pub struct AgentItem {
 
 /// Hook 配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct HookItem {
     pub event: String,
     pub matcher: Option<String>,
+    /// 展示摘要：command 类型 = 命令；http = url；prompt/agent = prompt（CSS 截断）
     pub command: Option<String>,
     #[serde(rename = "hookType")]
     pub hook_type: Option<String>,
+    /// matcher 条目内 hook 命令数（>1 时前端禁止表单编辑，防止整条替换丢命令）
+    #[serde(default)]
+    pub hook_count: usize,
+    /// 首个 hook 的超时（秒；编辑器回显用）
+    #[serde(default)]
+    pub timeout: Option<u64>,
     pub source: ConfigSource,
+    /// 原始 matcher 层条目（get_hook_list 计算定位键用，不下发前端）
+    #[serde(default, skip_serializing)]
+    pub raw: Option<serde_json::Value>,
+}
+
+/// matcher 条目首个 hook 对象（hook_type/command/timeout/raw 的公共取值）
+pub(crate) fn hook_first(hook_entry: &serde_json::Value) -> Option<&serde_json::Value> {
+    hook_entry
+        .get("hooks")
+        .and_then(|h| h.as_array())
+        .and_then(|a| a.first())
+}
+
+/// 展示摘要：command → url → prompt（多类型 hook 的面板摘要）
+pub(crate) fn hook_summary(first: Option<&serde_json::Value>) -> Option<String> {
+    let first = first?;
+    for key in ["command", "url", "prompt"] {
+        if let Some(s) = first.get(key).and_then(|v| v.as_str()) {
+            if !s.trim().is_empty() {
+                return Some(s.to_string());
+            }
+        }
+    }
+    None
 }
 
 /// 项目配置结果
@@ -231,6 +275,22 @@ pub(crate) fn claude_config_dir() -> Result<PathBuf> {
 /// serde 默认值=true（用于 enabled 字段向后兼容）
 fn default_true() -> bool {
     true
+}
+
+/// Claude 全局状态文件 `.claude.json`（mcpServers / projects 等）：
+/// 设置了 `CLAUDE_CONFIG_DIR` 时在其内（测试注入也走这里），否则在
+/// **家目录根** `~/.claude.json`（不在 `~/.claude/` 里——写错位置 =
+/// 保存对 Claude 与面板完全无效，曾因此把远程保存写进幽灵文件）。
+pub(crate) fn claude_state_json_path() -> Result<PathBuf> {
+    if let Some(dir) = std::env::var_os("CLAUDE_CONFIG_DIR") {
+        let dir = PathBuf::from(dir);
+        if !dir.as_os_str().is_empty() {
+            return Ok(dir.join(".claude.json"));
+        }
+    }
+    dirs::home_dir()
+        .map(|h| h.join(".claude.json"))
+        .context("Home directory not found")
 }
 
 /// 测试注入：覆盖 GUI 配置目录（隔离真实 ~/.cc-box）。remote_state 的 rpc
@@ -1637,7 +1697,7 @@ fn read_agents_from_filesystem(project_path: &str) -> Result<Vec<AgentInfo>> {
     Ok(agents)
 }
 
-fn read_hooks_config(project_path: &str) -> Result<Vec<HookItem>> {
+pub(crate) fn read_hooks_config(project_path: &str) -> Result<Vec<HookItem>> {
     let mut result = Vec::new();
 
     let settings_paths: Vec<(PathBuf, &str)> = vec![
@@ -1664,33 +1724,31 @@ fn read_hooks_config(project_path: &str) -> Result<Vec<HookItem>> {
                         for (event, hook_list) in hooks {
                             if let Some(list) = hook_list.as_array() {
                                 for hook in list {
+                                    let hook_list = hook.get("hooks").and_then(|h| h.as_array());
+                                    let first = crate::store::hook_first(hook);
                                     result.push(HookItem {
                                         event: event.to_string(),
                                         matcher: hook
                                             .get("matcher")
                                             .and_then(|v| v.as_str())
                                             .map(|s| s.to_string()),
-                                        command: hook
-                                            .get("command")
-                                            .and_then(|v| v.as_str())
-                                            .map(|s| s.to_string())
-                                            .or_else(|| {
-                                                hook.get("hooks")
-                                                    .and_then(|h| h.as_array())
-                                                    .and_then(|a| a.first())
-                                                    .and_then(|h| h.get("command"))
-                                                    .and_then(|v| v.as_str())
-                                                    .map(|s| s.to_string())
-                                            }),
-                                        hook_type: hook
-                                            .get("type")
+                                        command: hook_summary(first),
+                                        // hook 类型在首个 hook 对象上（type: command/http/…）
+                                        hook_type: first
+                                            .and_then(|h| h.get("type"))
                                             .and_then(|v| v.as_str())
                                             .map(|s| s.to_string()),
+                                        hook_count: hook_list.map(|a| a.len()).unwrap_or(1),
+                                        timeout: hook_list
+                                            .and_then(|a| a.first())
+                                            .and_then(|h| h.get("timeout"))
+                                            .and_then(|v| v.as_u64()),
                                         source: ConfigSource {
                                             source_type: source_type.to_string(),
                                             label: source_type.to_string(),
                                             path: Some(path.to_string_lossy().to_string()),
                                         },
+                                        raw: Some(hook.clone()),
                                     });
                                 }
                             }
@@ -1712,17 +1770,27 @@ pub(crate) fn extract_md_description(path: &Path) -> Option<String> {
 
         // 检查是否有 YAML frontmatter
         if lines.first().map(|l| l.trim() == "---") == Some(true) {
-            // 在 frontmatter 中查找 description 字段
-            for line in lines.iter().skip(1) {
-                if line.trim() == "---" {
+            // 在 frontmatter 中查找 description 字段（支持 `>-` / `|` 块标量）
+            let mut i = 1;
+            while i < lines.len() {
+                if lines[i].trim() == "---" {
                     break;
                 }
-                if let Some(desc) = line.strip_prefix("description:") {
+                if let Some(desc) = lines[i].strip_prefix("description:") {
                     let desc = desc.trim();
+                    if is_block_scalar_indicator(desc) {
+                        let (block, next) = parse_block_scalar(&lines, i + 1, desc);
+                        if !block.is_empty() {
+                            return Some(block);
+                        }
+                        i = next;
+                        continue;
+                    }
                     if !desc.is_empty() {
-                        return Some(desc.to_string());
+                        return Some(unquote_yaml(desc));
                     }
                 }
+                i += 1;
             }
         }
 
@@ -1800,6 +1868,72 @@ pub struct PluginAgent {
     pub invoke_format: String,
 }
 
+/// YAML 块标量指示符（`>` 折叠 / `|` 字面量，可带 `-`/`+` chomping）
+pub(crate) fn is_block_scalar_indicator(v: &str) -> bool {
+    matches!(v, ">" | ">-" | ">+" | "|" | "|-" | "|+")
+}
+
+/// 去掉 YAML 标量两侧的配对引号（不做转义解码，仅去掉字面引号）
+pub(crate) fn unquote_yaml(v: &str) -> String {
+    let t = v.trim();
+    if t.len() >= 2 {
+        let b = t.as_bytes();
+        if (b[0] == b'"' && b[t.len() - 1] == b'"') || (b[0] == b'\'' && b[t.len() - 1] == b'\'') {
+            return t[1..t.len() - 1].to_string();
+        }
+    }
+    t.to_string()
+}
+
+/// 读取块标量体：从 start 行起收集所有缩进行（空行属于体内），到首个同级/更高层键止。
+/// 折叠（`>`）相邻非空行以空格连接；字面量（`|`）保留换行。返回（值, 下一行索引）。
+pub(crate) fn parse_block_scalar(lines: &[&str], start: usize, indicator: &str) -> (String, usize) {
+    let mut body: Vec<&str> = Vec::new();
+    let mut i = start;
+    while i < lines.len() {
+        let line = lines[i];
+        if line.trim().is_empty() {
+            body.push("");
+            i += 1;
+            continue;
+        }
+        if line.starts_with(' ') || line.starts_with('\t') {
+            body.push(line);
+            i += 1;
+        } else {
+            break;
+        }
+    }
+    let indent = body
+        .iter()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| l.len() - l.trim_start().len())
+        .min()
+        .unwrap_or(0);
+    let mut out = String::new();
+    if indicator.starts_with('>') {
+        let mut prev_blank = false;
+        for l in &body {
+            let t = l.get(indent..).unwrap_or("").trim_end();
+            if t.is_empty() {
+                prev_blank = true;
+                continue;
+            }
+            if !out.is_empty() && !prev_blank {
+                out.push(' ');
+            }
+            out.push_str(t);
+            prev_blank = false;
+        }
+    } else {
+        for l in &body {
+            out.push_str(l.get(indent..).unwrap_or("").trim_end());
+            out.push('\n');
+        }
+    }
+    (out.trim().to_string(), i)
+}
+
 /// 从 agent .md 文件解析 frontmatter（与 CLI 源码 frontmatterParser.ts + loadAgentsDir.ts 一致）
 /// 提取 name、description、model 三个字段
 fn parse_agent_frontmatter(path: &Path) -> Option<(String, Option<String>, Option<String>)> {
@@ -1823,24 +1957,34 @@ fn parse_agent_frontmatter(path: &Path) -> Option<(String, Option<String>, Optio
     let mut description: Option<String> = None;
     let mut model: Option<String> = None;
 
-    for line in lines.iter().take(end_idx).skip(1) {
-        let trimmed = line.trim();
-        if let Some(val) = trimmed.strip_prefix("name:") {
+    let mut i = 1;
+    while i < end_idx {
+        let trimmed = lines[i].trim();
+        if let Some(val) = trimmed.strip_prefix("description:") {
             let val = val.trim();
-            if !val.is_empty() {
-                name = Some(val.to_string());
+            if is_block_scalar_indicator(val) {
+                let (block, next) = parse_block_scalar(&lines, i + 1, val);
+                if !block.is_empty() {
+                    description = Some(block);
+                }
+                i = next;
+                continue;
             }
-        } else if let Some(val) = trimmed.strip_prefix("description:") {
+            if !val.is_empty() {
+                description = Some(unquote_yaml(val));
+            }
+        } else if let Some(val) = trimmed.strip_prefix("name:") {
             let val = val.trim();
             if !val.is_empty() {
-                description = Some(val.to_string());
+                name = Some(unquote_yaml(val));
             }
         } else if let Some(val) = trimmed.strip_prefix("model:") {
             let val = val.trim();
             if !val.is_empty() {
-                model = Some(val.to_string());
+                model = Some(unquote_yaml(val));
             }
         }
+        i += 1;
     }
 
     // name 是必需字段（与源码 parseAgentFromMarkdown 一致）
@@ -1863,15 +2007,22 @@ pub(crate) fn parse_skill_description(path: &Path) -> Option<String> {
         }
 
         if let Some(end) = end_idx {
-            // 从 frontmatter 提取 description
-            for line in lines.iter().take(end).skip(1) {
-                let trimmed = line.trim();
+            // 从 frontmatter 提取 description（支持 `>-` / `|` 块标量多行写法）
+            let mut i = 1;
+            while i < end {
+                let trimmed = lines[i].trim();
                 if let Some(val) = trimmed.strip_prefix("description:") {
                     let val = val.trim();
-                    if !val.is_empty() {
-                        return Some(val.to_string());
+                    if is_block_scalar_indicator(val) {
+                        let (block, _) = parse_block_scalar(&lines, i + 1, val);
+                        if !block.is_empty() {
+                            return Some(block);
+                        }
+                    } else if !val.is_empty() {
+                        return Some(unquote_yaml(val));
                     }
                 }
+                i += 1;
             }
 
             // 后备：跳过 frontmatter，从正文提取第一行非空非标题
@@ -2595,6 +2746,8 @@ pub(crate) fn invalidate_plugins_list_cache() {
         PLUGINS_LIST_GEN.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         *guard = None;
     }
+    // 市场条目里的 installed/enabled 徽标来自 plugins list，一并失效
+    invalidate_plugin_market_cache();
 }
 
 /// 检测 Git Bash 路径（Windows）
@@ -2692,6 +2845,21 @@ pub(crate) fn parse_agents_list_output(output: &str, agents: &mut Vec<AgentInfo>
 
 // ==================== Plugin 信息获取 ====================
 
+/// 插件提供的单条 hook（只读展示：事件 + matcher + 类型 + 摘要 + 超时）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginHookEntry {
+    pub event: String,
+    #[serde(rename = "matcher", skip_serializing_if = "Option::is_none")]
+    pub matcher: Option<String>,
+    #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
+    pub hook_type: Option<String>,
+    /// 摘要：command → url → prompt 回退链
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<serde_json::Value>,
+}
+
 /// Plugin 信息（用于面板显示）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginInfo {
@@ -2724,6 +2892,16 @@ pub struct PluginInfo {
     /// Plugin 提供的 MCP servers
     #[serde(rename = "mcpServers")]
     pub mcp_servers: Option<serde_json::Value>,
+    /// Plugin 提供的 commands（commands/ 目录或 plugin.json 声明路径的 .md 文件名）
+    pub commands: Vec<String>,
+    /// Plugin 提供的 hook 明细（事件 + matcher + 摘要，只读展示）
+    pub hooks: Vec<PluginHookEntry>,
+    /// Plugin 提供的 LSP 服务器名（.lsp.json / plugin.json lspServers）
+    pub lsp: Vec<String>,
+    /// Plugin 提供的 monitor 名（monitors/monitors.json / plugin.json monitors）
+    pub monitors: Vec<String>,
+    /// Plugin 提供的主题名（themes/ 目录 / plugin.json themes）
+    pub themes: Vec<String>,
 }
 
 /// CLI 返回的 Plugin JSON 结构
@@ -2793,6 +2971,12 @@ pub fn get_all_plugins(project_path: &str) -> Result<Vec<PluginInfo>> {
         let plugin_skills = parse_plugin_skills(&install_path, plugin_name);
         let plugin_agents = parse_plugin_agents(&install_path, plugin_name);
 
+        // commands/hooks/lsp/monitors/themes（默认位置 + plugin.json 声明/内联，覆盖官方插件形态）
+        let (plugin_commands, _) = parse_plugin_commands_hooks(Path::new(&install_path));
+        let plugin_hooks = parse_plugin_hooks_detail(Path::new(&install_path));
+        let (plugin_lsp, plugin_monitors, plugin_themes) =
+            parse_plugin_extra_components(Path::new(&install_path));
+
         // 读取 mcpServers（优先从 CLI 输出，后备从文件读取）
         let mcp_servers = cli_plugin
             .mcp_servers
@@ -2812,6 +2996,11 @@ pub fn get_all_plugins(project_path: &str) -> Result<Vec<PluginInfo>> {
             skills: plugin_skills,
             agents: plugin_agents,
             mcp_servers,
+            commands: plugin_commands,
+            hooks: plugin_hooks,
+            lsp: plugin_lsp,
+            monitors: plugin_monitors,
+            themes: plugin_themes,
         });
     }
 
@@ -3020,7 +3209,7 @@ pub fn get_disabled_subdir(category: &str) -> Result<PathBuf> {
 }
 
 /// 校验名称不含路径穿越字符
-fn validate_simple_name(name: &str) -> Result<()> {
+pub(crate) fn validate_simple_name(name: &str) -> Result<()> {
     if name.is_empty()
         || name.contains('/')
         || name.contains('\\')
@@ -3190,7 +3379,7 @@ fn relocate_symlink(src: &Path, dst: &Path) -> std::io::Result<PathBuf> {
 
 /// 移动目录项：符号链接按"目标不变"重建，其余走 rename（跨卷回退 copy+remove）。
 /// 调用方负责冲突判定；这里只清理目标位的断链残留。
-fn move_entry(src: &Path, dst: &Path) -> std::io::Result<()> {
+pub(crate) fn move_entry(src: &Path, dst: &Path) -> std::io::Result<()> {
     let meta = fs::symlink_metadata(src)?;
     if meta.file_type().is_symlink() {
         match relocate_symlink(src, dst) {
@@ -3501,8 +3690,17 @@ pub(crate) fn set_mcp_server_enabled_in(
     Ok(())
 }
 
+/// 原子写文本：先写 .tmp 再 rename（市场浏览缓存等非配置文件）
+pub(crate) fn write_text_atomic(path: &Path, content: &[u8]) -> Result<()> {
+    let tmp = path.with_extension("tmp");
+    fs::write(&tmp, content)
+        .with_context(|| format!("Failed to write {}", tmp.display()))?;
+    fs::rename(&tmp, path).with_context(|| "Failed to rename .tmp to target")?;
+    Ok(())
+}
+
 /// 原子写 JSON：先写 .tmp 再 rename
-fn write_json_atomic(path: &Path, value: &serde_json::Value) -> Result<()> {
+pub(crate) fn write_json_atomic(path: &Path, value: &serde_json::Value) -> Result<()> {
     let tmp = path.with_extension("json.tmp");
     let content = serde_json::to_string_pretty(value)?;
     fs::write(&tmp, &content).with_context(|| "Failed to write .tmp file")?;
@@ -3522,9 +3720,1515 @@ pub fn set_plugin_enabled(plugin_id: &str, enabled: bool) -> Result<()> {
     let action = if enabled { "enable" } else { "disable" };
     let args = format!("plugin {} {}", action, plugin_id);
     // 无论成败都失效缓存：CLI 可能已部分写入，且失败后下次读取必须反映真实状态
+    // （市场列表缓存含 installed/enabled 徽标，一并失效）
     let result = run_claude_command_strict(&args);
     invalidate_plugins_list_cache();
+    invalidate_plugin_market_cache();
     result.with_context(|| format!("Failed to {} plugin '{}'", action, plugin_id))?;
     Ok(())
+}
+
+// ---------- Plugin 市场（浏览 + 安装管理，全部包装 claude plugin CLI）----------
+//
+// 市场注册事实源是 Claude 自己的 known_marketplaces.json，CC-Box 只读；
+// 添加/移除/刷新/安装/卸载/更新全部转发 CLI（marketplace add 解析 URL/GitHub/
+// 本地路径的能力在 CLI 侧），CC-Box 不建第二份注册表。
+
+/// 市场操作（clone/网络下载）的超时上限
+const CLI_MARKET_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// 带超时执行已配置好的命令（argv 语义，供长耗时 CLI 调用使用）。
+/// 成功 → stdout；失败（非零退出/超时/spawn 失败）→ Err（优先 stderr）。
+/// 管道读取放独立线程：避免子进程写满管道阻塞而我们仍在轮询的死锁；
+/// 超时分支不 join 读线程（kill 后孙进程可能持有管道），直接 bail。
+pub(crate) fn run_command_with_timeout(
+    cmd: &mut std::process::Command,
+    timeout: std::time::Duration,
+) -> Result<String> {
+    use std::process::Stdio;
+
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = cmd.spawn().context("Failed to spawn command")?;
+
+    let stdout_pipe = child.stdout.take().context("missing stdout pipe")?;
+    let stderr_pipe = child.stderr.take().context("missing stderr pipe")?;
+    let stdout_join = std::thread::spawn(move || {
+        let mut buf = String::new();
+        let _ = std::io::Read::read_to_string(&mut { stdout_pipe }, &mut buf);
+        buf
+    });
+    let stderr_join = std::thread::spawn(move || {
+        let mut buf = String::new();
+        let _ = std::io::Read::read_to_string(&mut { stderr_pipe }, &mut buf);
+        buf
+    });
+
+    let start = std::time::Instant::now();
+    let poll = std::time::Duration::from_millis(50);
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {
+                if start.elapsed() >= timeout {
+                    kill_process_tree(child.id());
+                    let _ = child.wait();
+                    bail!("command timed out after {}s", timeout.as_secs());
+                }
+                std::thread::sleep(poll);
+            }
+            Err(e) => bail!("wait failed: {}", e),
+        }
+    };
+
+    let stdout = stdout_join.join().unwrap_or_default();
+    let stderr = stderr_join.join().unwrap_or_default();
+
+    if status.success() {
+        Ok(stdout)
+    } else {
+        bail!(
+            "command failed (exit {:?}): {}",
+            status.code(),
+            if stderr.trim().is_empty() { stdout.trim() } else { stderr.trim() }
+        );
+    }
+}
+
+/// 终止进程树：Windows 上 cmd/npm 等 wrapper 会派生孙进程（claude → node），
+/// 只 kill 外层会留下持有管道的孤儿——用 taskkill /T 连树杀；Unix 直接 SIGKILL。
+fn kill_process_tree(pid: u32) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let _ = std::process::Command::new("taskkill")
+            .args(["/F", "/T", "/PID", &pid.to_string()])
+            .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+            .output();
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = std::process::Command::new("kill")
+            .args(["-9", &pid.to_string()])
+            .output();
+    }
+}
+
+/// argv 版 claude CLI 调用（现有 run_claude_command 用 split_whitespace，
+/// 无法携带含空格的参数，也没有 cwd 与超时）
+fn run_claude_command_argv(args: &[&str], cwd: Option<&Path>) -> Result<String> {
+    let mut cmd = claude_command();
+    cmd.args(args);
+    if let Some(dir) = cwd {
+        cmd.current_dir(dir);
+    }
+    run_command_with_timeout(&mut cmd, CLI_MARKET_TIMEOUT)
+        .with_context(|| format!("claude {} failed", args.join(" ")))
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MarketplacePluginEntry {
+    pub name: String,
+    pub description: Option<String>,
+    pub version: Option<String>,
+    pub category: Option<String>,
+    pub tags: Vec<String>,
+    /// 市场清单声明的组件清单（安装确认的信任提示依据）
+    pub components: Option<MarketplaceComponents>,
+    /// 安装量（Claude 的 plugin-catalog-cache.json::unique_installs，按热度排序依据）
+    pub installs: Option<u64>,
+    /// 精选置顶（marketplace.json 条目的 `ccbox.pinned`，自有市场用）
+    #[serde(default)]
+    pub pinned: bool,
+    /// 精选排序（`ccbox.order`，升序；与 pinned 一起决定顺序）
+    #[serde(default)]
+    pub order: Option<i64>,
+    /// 插件图标（`ccbox.icon`：emoji / 短文本 / http(s) 图片 URL）
+    #[serde(default)]
+    pub icon: Option<String>,
+    /// 该插件是否已安装（按 `name@市场名` 匹配已安装列表）
+    pub installed: bool,
+    /// 已安装时的启用状态
+    pub enabled: Option<bool>,
+}
+
+/// 插件组件清单（marketplace.json 的 commands/agents/hooks/mcpServers/skills，
+/// 每项可为相对路径字符串或 {name, description} 对象，统一取名称）
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MarketplaceComponents {
+    pub commands: Vec<String>,
+    pub agents: Vec<String>,
+    pub hooks: Vec<String>,
+    pub mcp_servers: Vec<String>,
+    pub skills: Vec<String>,
+    pub lsp_servers: Vec<String>,
+}
+
+impl MarketplaceComponents {
+    fn is_empty(&self) -> bool {
+        self.commands.is_empty()
+            && self.agents.is_empty()
+            && self.hooks.is_empty()
+            && self.mcp_servers.is_empty()
+            && self.skills.is_empty()
+            && self.lsp_servers.is_empty()
+    }
+}
+
+/// 组件名展示归一化：路径 → 末段，去 .md/.json 扩展名
+/// （市场清单常写 "./skills/xlsx"、"./hooks/hooks.json"）
+fn normalize_component_name(raw: &str) -> Option<String> {
+    let s = raw.trim().trim_end_matches(['/', '\\']);
+    if s.is_empty() {
+        return None;
+    }
+    let seg = s.rsplit(['/', '\\']).next().unwrap_or(s);
+    let name = seg
+        .strip_suffix(".md")
+        .or_else(|| seg.strip_suffix(".json"))
+        .unwrap_or(seg)
+        .trim();
+    (!name.is_empty()).then(|| name.to_string())
+}
+
+/// 单类组件展示上限（防止超大型插件把详情撑爆）
+const MAX_COMPONENT_NAMES: usize = 40;
+
+fn push_unique(out: &mut Vec<String>, item: String) {
+    if out.len() < MAX_COMPONENT_NAMES && !out.iter().any(|x| x == &item) {
+        out.push(item);
+    }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum CompKind {
+    /// commands / agents：*.md 文件名
+    Md,
+    /// skills：含 SKILL.md 的子目录
+    Skills,
+    /// hooks：hooks.json 的事件名
+    Hooks,
+    /// mcpServers：.mcp.json 的服务器名
+    Mcp,
+}
+
+/// 扫描命令/agent 目录：*.md 文件名（去扩展名）
+fn scan_md_dir(dir: &Path, out: &mut Vec<String>) {
+    let Ok(rd) = fs::read_dir(dir) else { return };
+    let mut names: Vec<String> = rd
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().is_file())
+        .filter_map(|e| {
+            let n = e.file_name().to_string_lossy().to_string();
+            n.strip_suffix(".md").map(|s| s.to_string())
+        })
+        .collect();
+    names.sort();
+    for n in names {
+        push_unique(out, n);
+    }
+}
+
+/// 扫描 skills 目录：含 SKILL.md 的子目录名
+fn scan_skills_dir(dir: &Path, out: &mut Vec<String>) {
+    let Ok(rd) = fs::read_dir(dir) else { return };
+    let mut names: Vec<String> = rd
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().join("SKILL.md").is_file())
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .collect();
+    names.sort();
+    for n in names {
+        push_unique(out, n);
+    }
+}
+
+/// hooks 文件 → 事件名（兼容 { hooks: { Event: [...] } } 与 { Event: [...] }）
+fn scan_hooks_file(file: &Path, out: &mut Vec<String>) {
+    let Ok(content) = fs::read_to_string(file) else { return };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) else { return };
+    let Some(map) = v
+        .get("hooks")
+        .and_then(|h| h.as_object())
+        .or_else(|| v.as_object())
+    else {
+        return;
+    };
+    let mut names: Vec<String> = map
+        .iter()
+        .filter(|(_, val)| val.is_array())
+        .map(|(k, _)| k.clone())
+        .collect();
+    names.sort();
+    for n in names {
+        push_unique(out, n);
+    }
+}
+
+/// mcp 配置 → 服务器名（兼容 { mcpServers: {...} } 与直接 {...}）
+fn scan_mcp_file(file: &Path, out: &mut Vec<String>) {
+    let Ok(content) = fs::read_to_string(file) else { return };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) else { return };
+    let Some(map) = v
+        .get("mcpServers")
+        .and_then(|m| m.as_object())
+        .or_else(|| v.as_object())
+    else {
+        return;
+    };
+    let mut names: Vec<String> = map.keys().cloned().collect();
+    names.sort();
+    for n in names {
+        push_unique(out, n);
+    }
+}
+
+/// monitors 配置 → 监视器名（条目 name 字段；兼容 { monitors: [...] } 包装）
+fn scan_monitors_file(file: &Path, out: &mut Vec<String>) {
+    let Ok(content) = fs::read_to_string(file) else { return };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) else { return };
+    let Some(items) = v.as_array().or_else(|| v.get("monitors").and_then(|m| m.as_array())) else {
+        return;
+    };
+    for item in items {
+        if let Some(n) = item.get("name").and_then(|n| n.as_str()) {
+            push_unique(out, n.to_string());
+        }
+    }
+}
+
+/// 目录 → *.json 文件名（去扩展名，如 themes/）
+fn scan_json_names(dir: &Path, out: &mut Vec<String>) {
+    let Ok(rd) = fs::read_dir(dir) else { return };
+    let mut names: Vec<String> = rd
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().is_file())
+        .filter_map(|e| {
+            let n = e.file_name().to_string_lossy().to_string();
+            n.strip_suffix(".json").map(|s| s.to_string())
+        })
+        .collect();
+    names.sort();
+    for n in names {
+        push_unique(out, n);
+    }
+}
+
+/// 按类型扫描一个路径（目录或文件）
+fn scan_path(kind: CompKind, path: &Path, out: &mut Vec<String>) {
+    match kind {
+        CompKind::Md => scan_md_dir(path, out),
+        CompKind::Skills => scan_skills_dir(path, out),
+        CompKind::Hooks => {
+            if path.is_dir() {
+                scan_hooks_file(&path.join("hooks.json"), out);
+            } else {
+                scan_hooks_file(path, out);
+            }
+        }
+        CompKind::Mcp => {
+            if path.is_dir() {
+                scan_mcp_file(&path.join(".mcp.json"), out);
+            } else {
+                scan_mcp_file(path, out);
+            }
+        }
+    }
+}
+
+/// 清单声明的组件项：字符串 / 数组（字符串或 {name} 对象）/ 对象键
+fn declared_raw(entry: &serde_json::Value, key: &str) -> Vec<String> {
+    match entry.get(key) {
+        Some(serde_json::Value::String(s)) => vec![s.clone()],
+        Some(serde_json::Value::Array(a)) => a
+            .iter()
+            .filter_map(|item| {
+                item.as_str()
+                    .map(|s| s.to_string())
+                    .or_else(|| item.get("name").and_then(|n| n.as_str()).map(|s| s.to_string()))
+            })
+            .collect(),
+        Some(serde_json::Value::Object(o)) => o.keys().cloned().collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// 展开清单声明：能落到插件目录里的路径按类型扫描（目录→扫，hooks/mcp 文件→读），
+/// 否则按归一化名展示
+fn expand_declared(
+    entry: &serde_json::Value,
+    key: &str,
+    plugin_dir: Option<&Path>,
+    kind: CompKind,
+    out: &mut Vec<String>,
+) {
+    for raw in declared_raw(entry, key) {
+        if let Some(dir) = plugin_dir {
+            let p = Path::new(&raw);
+            let path = if p.is_absolute() {
+                p.to_path_buf()
+            } else {
+                dir.join(&raw)
+            };
+            let file_like = matches!(kind, CompKind::Hooks | CompKind::Mcp);
+            if path.is_dir() || (file_like && path.is_file()) {
+                scan_path(kind, &path, out);
+                continue;
+            }
+        }
+        if let Some(n) = normalize_component_name(&raw) {
+            push_unique(out, n);
+        }
+    }
+}
+
+fn read_plugin_json(dir: &Path) -> Option<serde_json::Value> {
+    // 规范位置 .claude-plugin/plugin.json；agent-plugins 新 schema 也允许根目录 plugin.json
+    let content = fs::read_to_string(dir.join(".claude-plugin").join("plugin.json"))
+        .or_else(|_| fs::read_to_string(dir.join("plugin.json")))
+        .ok()?;
+    serde_json::from_str(&content).ok()
+}
+
+/// hooks 配置文件 → (事件名, matcher 条目对象) 列表
+/// （兼容 { hooks: { Event: [...] } } 与 { Event: [...] }）
+fn hooks_file_entries(file: &Path, out: &mut Vec<(String, serde_json::Value)>) {
+    let Ok(content) = fs::read_to_string(file) else { return };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) else { return };
+    let Some(map) = v
+        .get("hooks")
+        .and_then(|h| h.as_object())
+        .or_else(|| v.as_object())
+    else {
+        return;
+    };
+    for (event, val) in map {
+        if let Some(arr) = val.as_array() {
+            for e in arr {
+                out.push((event.clone(), e.clone()));
+            }
+        }
+    }
+}
+
+/// 插件 hooks 的单一收集来源：hooks/hooks.json、根 hooks.json、
+/// plugin.json 声明路径（字符串/数组）与内联 object（键=事件名）
+fn collect_plugin_hook_entries(install_path: &Path) -> Vec<(String, serde_json::Value)> {
+    let mut out = Vec::new();
+    hooks_file_entries(&install_path.join("hooks").join("hooks.json"), &mut out);
+    hooks_file_entries(&install_path.join("hooks.json"), &mut out);
+    if let Some(pj) = read_plugin_json(install_path) {
+        for raw in declared_raw(&pj, "hooks") {
+            let file = install_path.join(&raw);
+            if file.is_file() {
+                hooks_file_entries(&file, &mut out);
+            } else if let Some(arr) = pj
+                .get("hooks")
+                .and_then(|h| h.as_object())
+                .and_then(|m| m.get(&raw))
+                .and_then(|v| v.as_array())
+            {
+                // 内联 object：raw 为事件名，值为 matcher 条目数组
+                for e in arr {
+                    out.push((raw.clone(), e.clone()));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// 插件提供的 commands 与 hook 事件（供面板明细与 Hooks 面板插件组）。
+/// 覆盖官方形态：commands/ 目录、hooks/hooks.json、根 hooks.json、
+/// plugin.json 声明的 commands 路径与内联（object 键=事件名）/路径式（含数组）hooks。
+pub(crate) fn parse_plugin_commands_hooks(install_path: &Path) -> (Vec<String>, Vec<String>) {
+    let mut commands = Vec::new();
+    scan_md_dir(&install_path.join("commands"), &mut commands);
+    let mut hooks = Vec::new();
+    let mut seen: Vec<String> = Vec::new();
+    for (event, _) in collect_plugin_hook_entries(install_path) {
+        if !seen.contains(&event) {
+            seen.push(event);
+        }
+    }
+    seen.sort();
+    for event in seen {
+        push_unique(&mut hooks, event);
+    }
+    if let Some(pj) = read_plugin_json(install_path) {
+        if commands.is_empty() {
+            expand_declared(&pj, "commands", Some(install_path), CompKind::Md, &mut commands);
+        }
+    }
+    (commands, hooks)
+}
+
+/// hook 对象摘要：command → url → prompt 回退链（与 HookItem 一致）
+fn plugin_hook_summary(h: &serde_json::Value) -> Option<String> {
+    for key in ["command", "url", "prompt"] {
+        if let Some(s) = h.get(key).and_then(|v| v.as_str()) {
+            return Some(s.to_string());
+        }
+    }
+    None
+}
+
+/// 插件 hooks 只读明细（Hooks 面板「插件」组）：展开为逐条 hook，
+/// 按事件名稳定排序
+pub(crate) fn parse_plugin_hooks_detail(install_path: &Path) -> Vec<PluginHookEntry> {
+    let mut entries = collect_plugin_hook_entries(install_path);
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut out = Vec::new();
+    for (event, entry) in entries {
+        let matcher = entry.get("matcher").and_then(|m| m.as_str()).map(String::from);
+        if let Some(hooks) = entry.get("hooks").and_then(|h| h.as_array()) {
+            for h in hooks {
+                out.push(PluginHookEntry {
+                    event: event.clone(),
+                    matcher: matcher.clone(),
+                    hook_type: h.get("type").and_then(|t| t.as_str()).map(String::from),
+                    summary: plugin_hook_summary(h),
+                    timeout: h.get("timeout").cloned().filter(|v| !v.is_null()),
+                });
+            }
+        } else {
+            out.push(PluginHookEntry {
+                event,
+                matcher,
+                hook_type: None,
+                summary: None,
+                timeout: None,
+            });
+        }
+    }
+    out
+}
+
+/// 插件提供的 lsp / monitors / themes 组件名（默认位置 + plugin.json 声明/内联）。
+/// lsp：根 .lsp.json 或 plugin.json lspServers（内联 object 键=服务器名 / 路径）；
+/// monitors：monitors/monitors.json 或 plugin.json monitors（内联条目 name / 路径）；
+/// themes：themes/ 目录 *.json 或 plugin.json themes 路径（目录→扫，文件→名）。
+pub(crate) fn parse_plugin_extra_components(install_path: &Path) -> (Vec<String>, Vec<String>, Vec<String>) {
+    let mut lsp = Vec::new();
+    scan_mcp_file(&install_path.join(".lsp.json"), &mut lsp);
+    let mut monitors = Vec::new();
+    scan_monitors_file(&install_path.join("monitors").join("monitors.json"), &mut monitors);
+    let mut themes = Vec::new();
+    scan_json_names(&install_path.join("themes"), &mut themes);
+    if let Some(pj) = read_plugin_json(install_path) {
+        for raw in declared_raw(&pj, "lspServers") {
+            let file = install_path.join(&raw);
+            if file.is_file() {
+                scan_mcp_file(&file, &mut lsp);
+            } else {
+                push_unique(&mut lsp, raw);
+            }
+        }
+        for raw in declared_raw(&pj, "monitors") {
+            let file = install_path.join(&raw);
+            if file.is_file() {
+                scan_monitors_file(&file, &mut monitors);
+            } else {
+                push_unique(&mut monitors, raw);
+            }
+        }
+        for raw in declared_raw(&pj, "themes") {
+            let p = install_path.join(&raw);
+            if p.is_dir() {
+                scan_json_names(&p, &mut themes);
+            } else if let Some(n) = normalize_component_name(&raw) {
+                push_unique(&mut themes, n);
+            }
+        }
+    }
+    (lsp, monitors, themes)
+}
+
+/// 组件清单：清单/plugin.json 声明优先，缺失时扫描插件目录
+/// （Claude 原生插件按 commands/ agents/ skills/ hooks/hooks.json .mcp.json 自动发现）
+pub(crate) fn parse_components(entry: &serde_json::Value, plugin_dir: Option<&Path>) -> Option<MarketplaceComponents> {
+    let pj = plugin_dir.and_then(read_plugin_json);
+    let mut c = MarketplaceComponents {
+        commands: Vec::new(),
+        agents: Vec::new(),
+        hooks: Vec::new(),
+        mcp_servers: Vec::new(),
+        skills: Vec::new(),
+        lsp_servers: Vec::new(),
+    };
+
+    let mut decl = |key: &str, kind: CompKind, out: &mut Vec<String>| {
+        expand_declared(entry, key, plugin_dir, kind, out);
+        if let Some(pj) = &pj {
+            expand_declared(pj, key, plugin_dir, kind, out);
+        }
+    };
+    decl("commands", CompKind::Md, &mut c.commands);
+    decl("agents", CompKind::Md, &mut c.agents);
+    decl("hooks", CompKind::Hooks, &mut c.hooks);
+    decl("mcpServers", CompKind::Mcp, &mut c.mcp_servers);
+    decl("skills", CompKind::Skills, &mut c.skills);
+    // LSP：条目/plugin.json 内联声明（object 键=服务器名）或 .lsp.json 路径
+    decl("lspServers", CompKind::Mcp, &mut c.lsp_servers);
+
+    if let Some(dir) = plugin_dir {
+        if c.commands.is_empty() {
+            scan_md_dir(&dir.join("commands"), &mut c.commands);
+        }
+        if c.agents.is_empty() {
+            scan_md_dir(&dir.join("agents"), &mut c.agents);
+        }
+        if c.skills.is_empty() {
+            scan_skills_dir(&dir.join("skills"), &mut c.skills);
+        }
+        if c.hooks.is_empty() {
+            scan_hooks_file(&dir.join("hooks").join("hooks.json"), &mut c.hooks);
+            scan_hooks_file(&dir.join("hooks.json"), &mut c.hooks);
+        }
+        if c.mcp_servers.is_empty() {
+            scan_mcp_file(&dir.join(".mcp.json"), &mut c.mcp_servers);
+            // agent-plugins 新 schema：mcp.json 与 .mcp.json 同义
+            scan_mcp_file(&dir.join("mcp.json"), &mut c.mcp_servers);
+        }
+        if c.lsp_servers.is_empty() {
+            scan_mcp_file(&dir.join(".lsp.json"), &mut c.lsp_servers);
+        }
+    }
+
+    if c.is_empty() {
+        None
+    } else {
+        Some(c)
+    }
+}
+
+/// 读取 Claude 维护的插件热度（`plugins/plugin-catalog-cache.json` 的
+/// `catalog.plugins[*].unique_installs`，键为 `name@marketplace`）。
+/// 文件缺失/损坏 → 空表（列表退化为按名称排序）。
+fn load_plugin_installs(config_dir: &Path) -> HashMap<String, u64> {
+    let path = config_dir
+        .join("plugins")
+        .join("plugin-catalog-cache.json");
+    let Ok(content) = fs::read_to_string(&path) else {
+        return HashMap::new();
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) else {
+        return HashMap::new();
+    };
+    let Some(map) = v
+        .pointer("/catalog/plugins")
+        .and_then(|p| p.as_object())
+    else {
+        return HashMap::new();
+    };
+    map.iter()
+        .filter_map(|(id, entry)| {
+            entry
+                .get("unique_installs")
+                .and_then(|n| n.as_u64())
+                .map(|n| (id.clone(), n))
+        })
+        .collect()
+}
+
+/// 解析插件源码目录：市场条目相对 source 指向仓库内路径；
+/// 远程源未安装时没有本地源码，退到已安装缓存
+/// `<config>/plugins/cache/<市场>/<插件>/<版本>/`。
+/// market_dir = None（json 文件形态的浏览缓存）时无仓库目录，直接走缓存回退
+/// ——不能传空 Path，否则相对 source 会按进程 CWD 探测出无关目录。
+fn resolve_plugin_dir(
+    market_dir: Option<&Path>,
+    market_name: &str,
+    entry: &serde_json::Value,
+    plugin_name: &str,
+    config_dir: &Path,
+) -> Option<PathBuf> {
+    if let Some(dir) = market_dir {
+        // installLocation 直接指向 .json（file 源市场）时没有仓库目录可扫描
+        let has_repo_dir = dir.extension().map(|e| e != "json").unwrap_or(true);
+        if let Some(serde_json::Value::String(src)) = entry.get("source") {
+            // 只接受市场仓库内的相对路径（防止远程清单指向本地任意目录）
+            if has_repo_dir && !src.contains("..") {
+                let p = Path::new(src);
+                if !p.is_absolute() {
+                    let plugin = dir.join(src);
+                    if plugin.is_dir() {
+                        return Some(plugin);
+                    }
+                }
+            }
+        }
+    }
+    let root = config_dir
+        .join("plugins")
+        .join("cache")
+        .join(market_name)
+        .join(plugin_name);
+    let mut dirs: Vec<(std::time::SystemTime, PathBuf)> = fs::read_dir(&root)
+        .ok()?
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().is_dir())
+        .map(|e| {
+            let mtime = e
+                .metadata()
+                .and_then(|m| m.modified())
+                .unwrap_or(std::time::UNIX_EPOCH);
+            (mtime, e.path())
+        })
+        .collect();
+    dirs.sort_by(|a, b| a.0.cmp(&b.0));
+    dirs.pop().map(|(_, p)| p)
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MarketplaceInfo {
+    pub name: String,
+    pub install_location: String,
+    /// 上次拉取时间（注册市场 = Claude 的 known_marketplaces.json::lastUpdated；
+    /// 未注册市场 = CC-Box 浏览缓存的拉取时间）
+    pub last_updated: Option<String>,
+    pub plugins: Vec<MarketplacePluginEntry>,
+    /// marketplace.json 读取/解析失败原因（市场仍列出，便于用户排查）
+    pub load_error: Option<String>,
+    /// 来源：preset（OSS 推荐，未添加）/ user（用户添加）/ registered（仅 Claude 注册）
+    pub origin: String,
+    /// 是否已注册到 Claude（known_marketplaces.json）
+    pub registered: bool,
+    /// 市场来源（owner/repo、git URL、marketplace.json URL、本地路径；仅 preset/user）
+    pub source: Option<String>,
+    /// preset 展示字段
+    pub description: Option<String>,
+    pub pinned: bool,
+    pub order: Option<i64>,
+    pub icon: Option<String>,
+}
+
+/// 市场列表内存缓存（组件目录扫描 + plugins list 的代价随插件数量增长）
+static MARKET_LIST_CACHE: Mutex<Option<(std::time::Instant, Vec<MarketplaceInfo>)>> = Mutex::new(None);
+const MARKET_LIST_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// 失效市场列表缓存（市场增删/刷新、插件安装或启停后调用）
+pub(crate) fn invalidate_plugin_market_cache() {
+    if let Ok(mut guard) = MARKET_LIST_CACHE.lock() {
+        *guard = None;
+    }
+}
+
+/// 读取 Claude 已注册市场与各市场插件条目（含 installed/enabled 徽标）。
+/// 未注册任何市场（文件不存在）时返回空列表而非报错（首次使用场景）。
+/// 结果按 60s 内存缓存：打开市场浏览器与刷新后立即重读都不再重复扫描插件目录。
+pub fn get_plugin_marketplaces() -> Result<Vec<MarketplaceInfo>> {
+    if let Ok(guard) = MARKET_LIST_CACHE.lock() {
+        if let Some((at, data)) = guard.as_ref() {
+            if at.elapsed() < MARKET_LIST_TTL {
+                return Ok(data.clone());
+            }
+        }
+    }
+    let data = load_plugin_marketplaces()?;
+    if let Ok(mut guard) = MARKET_LIST_CACHE.lock() {
+        *guard = Some((std::time::Instant::now(), data.clone()));
+    }
+    Ok(data)
+}
+
+fn load_plugin_marketplaces() -> Result<Vec<MarketplaceInfo>> {
+    // installed 徽标数据来自 plugins list --json（短 TTL 缓存）
+    let mut installed: std::collections::HashMap<String, bool> = Default::default();
+    if let Ok(raw) = plugins_list_json() {
+        if let Ok(list) =
+            serde_json::from_str::<Vec<CliPluginLite>>(&raw)
+        {
+            for p in list {
+                installed.insert(p.id, p.enabled);
+            }
+        }
+    }
+    let custom = get_app_config()?.custom_markets.unwrap_or_default();
+    // 推荐清单获取失败不阻塞市场列表（只影响 preset 分组）
+    let presets = get_market_presets().unwrap_or_default();
+    get_plugin_marketplaces_in(&claude_config_dir()?, &installed, &custom, &presets)
+}
+
+/// 市场来源分类（未注册市场的浏览方式）
+pub(crate) enum MarketSource {
+    /// 本地目录（直读，不缓存）
+    Dir(PathBuf),
+    /// marketplace.json URL（HTTP GET → 缓存文件）
+    JsonUrl(String),
+    /// git 仓库（owner/repo 简写或 git URL → clone --depth 1 到缓存目录）
+    Git(String),
+}
+
+/// 分类市场来源：URL(.json) / URL(git) / 本地目录 / GitHub owner-repo 简写
+pub(crate) fn classify_market_source(source: &str) -> Result<MarketSource> {
+    let s = source.trim();
+    let lower = s.to_lowercase();
+    if lower.starts_with("http://") || lower.starts_with("https://") {
+        if lower.split('?').next().unwrap_or("").ends_with(".json") {
+            return Ok(MarketSource::JsonUrl(s.to_string()));
+        }
+        return Ok(MarketSource::Git(s.to_string()));
+    }
+    let p = Path::new(s);
+    if p.exists() {
+        return Ok(MarketSource::Dir(p.to_path_buf()));
+    }
+    // GitHub owner/repo 简写（无 scheme、一段斜杠、无路径分隔之外的字符）
+    let parts: Vec<&str> = s.split('/').collect();
+    if parts.len() == 2
+        && !s.contains('\\')
+        && parts.iter().all(|seg| !seg.is_empty() && !seg.contains(':') && !seg.contains(' '))
+    {
+        return Ok(MarketSource::Git(format!("https://github.com/{}.git", s)));
+    }
+    bail!("无法识别的市场来源：{:?}（支持 GitHub owner/repo、git URL、marketplace.json URL、本地目录）", source);
+}
+
+/// CC-Box 市场浏览缓存根目录（~/.cc-box/cache/markets/）
+fn market_browse_cache_dir() -> Result<PathBuf> {
+    let dir = get_gui_config_dir()?.join("cache").join("markets");
+    fs::create_dir_all(&dir)?;
+    Ok(dir)
+}
+
+/// 未注册市场的浏览本地副本路径（目录 = git 克隆；文件 = 下载的 marketplace.json）
+fn market_browse_local_copy(source: &str) -> Result<MarketSource> {
+    match classify_market_source(source)? {
+        MarketSource::Dir(p) => Ok(MarketSource::Dir(p)),
+        MarketSource::JsonUrl(url) => {
+            let cache = market_browse_cache_dir()?.join(format!("src-{}.json", short_hash(&url)));
+            if cache.is_file() {
+                return Ok(MarketSource::Dir(cache));
+            }
+            let text = http_get_market_json(&url)?;
+            write_text_atomic(&cache, text.as_bytes())?;
+            Ok(MarketSource::Dir(cache))
+        }
+        MarketSource::Git(url) => {
+            let dir = market_browse_cache_dir()?.join(format!("src-{}", short_hash(&url)));
+            if dir.join(".claude-plugin").join("marketplace.json").is_file() {
+                return Ok(MarketSource::Dir(dir));
+            }
+            clone_market_repo(&url, &dir)?;
+            Ok(MarketSource::Dir(dir))
+        }
+    }
+}
+
+/// 强制刷新浏览缓存（先清理再重新拉取）
+fn refresh_market_browse_copy(source: &str) -> Result<MarketSource> {
+    match classify_market_source(source)? {
+        MarketSource::Dir(p) => Ok(MarketSource::Dir(p)),
+        MarketSource::JsonUrl(url) => {
+            let cache = market_browse_cache_dir()?.join(format!("src-{}.json", short_hash(&url)));
+            let text = http_get_market_json(&url)?;
+            write_text_atomic(&cache, text.as_bytes())?;
+            Ok(MarketSource::Dir(cache))
+        }
+        MarketSource::Git(url) => {
+            let dir = market_browse_cache_dir()?.join(format!("src-{}", short_hash(&url)));
+            let _ = fs::remove_dir_all(&dir);
+            clone_market_repo(&url, &dir)?;
+            Ok(MarketSource::Dir(dir))
+        }
+    }
+}
+
+/// 清理某来源的浏览缓存
+fn clean_market_browse_copy(source: &str) {
+    let Ok(kind) = classify_market_source(source) else { return };
+    let name = match kind {
+        MarketSource::Dir(_) => return,
+        MarketSource::JsonUrl(url) => format!("src-{}.json", short_hash(&url)),
+        MarketSource::Git(url) => format!("src-{}", short_hash(&url)),
+    };
+    if let Ok(root) = market_browse_cache_dir() {
+        let _ = fs::remove_dir_all(root.join(&name));
+        let _ = fs::remove_file(root.join(&name));
+    }
+}
+
+/// 稳定短 hash（缓存目录名，非安全用途）
+fn short_hash(s: &str) -> String {
+    // FNV-1a 64bit
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in s.as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    format!("{:016x}", h)
+}
+
+/// HTTP 拉取 marketplace.json（直连优先，失败走系统代理兜底；与 MCP 详情同策略）
+fn http_get_market_json(url: &str) -> Result<String> {
+    let fetch = |client: reqwest::blocking::Client| -> Result<String> {
+        let resp = client
+            .get(url)
+            .timeout(std::time::Duration::from_secs(20))
+            .send()
+            .with_context(|| format!("请求失败: {}", url))?;
+        let status = resp.status();
+        let text = resp.text().with_context(|| "读取响应失败")?;
+        if !status.is_success() {
+            bail!("HTTP {} for {}", status, url);
+        }
+        Ok(text)
+    };
+    let direct = reqwest::blocking::Client::builder()
+        .no_proxy()
+        .build()
+        .context("构建 HTTP 客户端失败")?;
+    match fetch(direct) {
+        Ok(t) => Ok(t),
+        Err(e) => {
+            let via_proxy = reqwest::blocking::Client::builder()
+                .build()
+                .context("构建 HTTP 客户端失败")?;
+            fetch(via_proxy).with_context(|| format!("直连失败（{}），系统代理亦失败", e))
+        }
+    }
+}
+
+/// git clone --depth 1（120s 超时树杀，与 plugin CLI 同一超时策略）
+fn clone_market_repo(url: &str, dir: &Path) -> Result<()> {
+    let mut cmd = std::process::Command::new("git");
+    cmd.arg("clone").arg("--depth").arg("1").arg(url).arg(dir);
+    run_command_with_timeout(&mut cmd, std::time::Duration::from_secs(120))
+        .with_context(|| format!("git clone 失败: {}（GitHub 源可能需要代理）", url))?;
+    Ok(())
+}
+
+/// get_plugin_marketplaces 的可注入版本（测试：base_dir + installed 表 + 自定义市场 + 推荐清单）
+pub(crate) fn get_plugin_marketplaces_in(
+    base_dir: &Path,
+    installed: &std::collections::HashMap<String, bool>,
+    custom_markets: &[CustomMarket],
+    presets: &[MarketPreset],
+) -> Result<Vec<MarketplaceInfo>> {
+    // 热度：Claude 自己维护的插件目录缓存（unique_installs，键为 name@marketplace）
+    let installs = load_plugin_installs(base_dir);
+
+    let mut result: Vec<MarketplaceInfo> = Vec::new();
+
+    // 1. Claude 已注册市场
+    let file = base_dir.join("plugins").join("known_marketplaces.json");
+    if let Ok(content) = fs::read_to_string(&file) {
+        let data: serde_json::Value =
+            serde_json::from_str(&content).context("Failed to parse known_marketplaces.json")?;
+        if let Some(map) = data.as_object() {
+            let mut names: Vec<&String> = map.keys().collect();
+            names.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
+            for name in names {
+                let entry = &map[name.as_str()];
+                let install_location = entry
+                    .get("installLocation")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+
+                let mut info = MarketplaceInfo {
+                    name: name.clone(),
+                    install_location: install_location.clone(),
+                    last_updated: entry
+                        .get("lastUpdated")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
+                    plugins: Vec::new(),
+                    load_error: None,
+                    origin: "registered".to_string(),
+                    registered: true,
+                    source: None,
+                    description: None,
+                    pinned: false,
+                    order: None,
+                    icon: None,
+                };
+
+                match read_marketplace_json(Path::new(&install_location)) {
+                    Ok(mp) => {
+                        info.plugins = parse_marketplace_plugins(
+                            &mp,
+                            name,
+                            Some(Path::new(&install_location)),
+                            base_dir,
+                            installed,
+                            &installs,
+                        );
+                    }
+                    Err(e) => {
+                        info.load_error = Some(e.to_string());
+                    }
+                }
+                result.push(info);
+            }
+        }
+    }
+
+    // 2. 用户添加市场：已注册的合并（origin=user + source），未注册的走浏览缓存
+    let mut customs: Vec<&CustomMarket> = custom_markets.iter().collect();
+    customs.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    for custom in customs {
+        if let Some(existing) = result
+            .iter_mut()
+            .find(|m| m.name.to_lowercase() == custom.name.to_lowercase())
+        {
+            existing.origin = "user".to_string();
+            existing.source = Some(custom.source.clone());
+            continue;
+        }
+        let mut info = MarketplaceInfo {
+            name: custom.name.clone(),
+            install_location: custom.source.clone(),
+            last_updated: None,
+            plugins: Vec::new(),
+            load_error: None,
+            origin: "user".to_string(),
+            registered: false,
+            source: Some(custom.source.clone()),
+            description: None,
+            pinned: false,
+            order: None,
+            icon: None,
+        };
+        match market_browse_local_copy(&custom.source) {
+            Ok(MarketSource::Dir(root)) => {
+                let mtime = fs::metadata(&root)
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .and_then(|d| chrono::DateTime::from_timestamp(d.as_secs() as i64, 0))
+                    .map(|dt| dt.to_rfc3339());
+                info.last_updated = mtime.filter(|s| !s.is_empty());
+                match read_marketplace_json(&root) {
+                    Ok(mp) => {
+                        // json 文件缓存没有插件源码目录（相对 source 不探测，防按 CWD 误扫）
+                        let has_repo = root.is_dir()
+                            && root
+                                .extension()
+                                .map(|e| e != "json")
+                                .unwrap_or(true);
+                        info.plugins = parse_marketplace_plugins(
+                            &mp,
+                            &custom.name,
+                            if has_repo { Some(&root) } else { None },
+                            base_dir,
+                            installed,
+                            &installs,
+                        );
+                    }
+                    Err(e) => info.load_error = Some(e.to_string()),
+                }
+            }
+            Ok(_) => unreachable!("market_browse_local_copy 只返回 Dir"),
+            Err(e) => info.load_error = Some(e.to_string()),
+        }
+        result.push(info);
+    }
+
+    // 3. 推荐市场（OSS 清单）：过滤已添加/已注册的，只列元数据（添加前不拉取）
+    for preset in presets {
+        let exists = result
+            .iter()
+            .any(|m| m.name.to_lowercase() == preset.name.to_lowercase());
+        if exists {
+            continue;
+        }
+        result.push(MarketplaceInfo {
+            name: preset.name.clone(),
+            install_location: String::new(),
+            last_updated: None,
+            plugins: Vec::new(),
+            load_error: None,
+            origin: "preset".to_string(),
+            registered: false,
+            source: Some(preset.source.clone()),
+            description: preset.description.clone(),
+            pinned: preset.pinned,
+            order: preset.order,
+            icon: preset.icon.clone(),
+        });
+    }
+
+    // 排序：精选置顶 → order 升序 → 名称
+    result.sort_by(|a, b| {
+        b.pinned
+            .cmp(&a.pinned)
+            .then_with(|| a.order.unwrap_or(i64::MAX).cmp(&b.order.unwrap_or(i64::MAX)))
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+    Ok(result)
+}
+
+/// 解析市场插件条目列表（注册市场与浏览缓存共用）
+#[allow(clippy::too_many_arguments)]
+fn parse_marketplace_plugins(
+    mp: &serde_json::Value,
+    market_name: &str,
+    market_dir: Option<&Path>,
+    base_dir: &Path,
+    installed: &std::collections::HashMap<String, bool>,
+    installs: &HashMap<String, u64>,
+) -> Vec<MarketplacePluginEntry> {
+    let mut plugins = Vec::new();
+    if let Some(list) = mp.get("plugins").and_then(|v| v.as_array()) {
+        for p in list {
+            let Some(pname) = p.get("name").and_then(|n| n.as_str()) else {
+                continue;
+            };
+            let full_id = format!("{}@{}", pname, market_name);
+            let enabled = installed.get(&full_id).copied();
+            plugins.push(MarketplacePluginEntry {
+                name: pname.to_string(),
+                description: p
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+                version: p.get("version").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                // 分类：官方字段 category 优先，缺失时用精选扩展 ccbox.category
+                category: p
+                    .get("category")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| {
+                        p.get("ccbox")
+                            .and_then(|c| c.get("category"))
+                            .and_then(|v| v.as_str())
+                    })
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty()),
+                tags: p
+                    .get("tags")
+                    .and_then(|v| v.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|t| t.as_str())
+                            .map(|t| t.to_string())
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                components: parse_components(
+                    p,
+                    resolve_plugin_dir(market_dir, market_name, p, pname, base_dir).as_deref(),
+                ),
+                installs: installs.get(&full_id).copied(),
+                pinned: p
+                    .get("ccbox")
+                    .and_then(|c| c.get("pinned"))
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
+                order: p
+                    .get("ccbox")
+                    .and_then(|c| c.get("order"))
+                    .and_then(|v| v.as_i64()),
+                icon: p
+                    .get("ccbox")
+                    .and_then(|c| c.get("icon"))
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty()),
+                installed: enabled.is_some(),
+                enabled,
+            });
+        }
+    }
+    // 顺序：已安装置顶（无论精选/热度）→ 精选置顶 → 精选 order 升序 → 安装量降序 → 名称；
+    // 与 enabled 解耦（开关不改变顺序）
+    plugins.sort_by(|a, b| {
+        b.installed
+            .cmp(&a.installed)
+            .then_with(|| b.pinned.cmp(&a.pinned))
+            .then_with(|| a.order.unwrap_or(i64::MAX).cmp(&b.order.unwrap_or(i64::MAX)))
+            .then_with(|| b.installs.unwrap_or(0).cmp(&a.installs.unwrap_or(0)))
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+    plugins
+}
+
+/// 读取市场清单：installLocation 为目录 → `<dir>/.claude-plugin/marketplace.json`；
+/// 直接指向 .json 文件（file 源市场）→ 本身。
+fn read_marketplace_json(install_location: &Path) -> Result<serde_json::Value> {
+    if install_location.extension().map(|e| e == "json").unwrap_or(false) {
+        let content = fs::read_to_string(install_location)
+            .with_context(|| format!("Failed to read {}", install_location.display()))?;
+        return serde_json::from_str(&content)
+            .with_context(|| format!("Failed to parse {}", install_location.display()));
+    }
+    let path = install_location
+        .join(".claude-plugin")
+        .join("marketplace.json");
+    let content = fs::read_to_string(&path)
+        .with_context(|| format!("Failed to read {}", path.display()))?;
+    serde_json::from_str(&content)
+        .with_context(|| format!("Failed to parse {}", path.display()))
+}
+
+/// plugins list --json 的轻量解析（只要 id/enabled，容忍字段缺失）
+#[derive(serde::Deserialize)]
+struct CliPluginLite {
+    id: String,
+    #[serde(default)]
+    enabled: bool,
+}
+
+// ---------- 推荐市场（OSS data/plugin-markets.json，与客户端版本解耦、可热更新） ----------
+//
+// 不把推荐源写死在代码里：启动/打开市场面板时从 OSS 拉取，磁盘缓存供离线兜底。
+// OSS 直连（no_proxy，与 installer 一致），data/ 目录独立于官网与更新通道。
+
+/// 推荐市场数据地址（OSS 默认域名；公网自定义域名同路径亦可）
+const MARKET_PRESETS_URL: &str = "https://cc-box.oss-cn-beijing.aliyuncs.com/data/plugin-markets.json";
+const PRESET_FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+const PRESET_TTL: std::time::Duration = std::time::Duration::from_secs(6 * 60 * 60);
+
+static PRESET_MEM_CACHE: Mutex<Option<(std::time::Instant, Vec<MarketPreset>)>> = Mutex::new(None);
+
+/// 推荐市场条目（下发给前端「推荐市场」分组）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MarketPreset {
+    pub name: String,
+    /// marketplace add 的来源：GitHub owner/repo、marketplace.json URL 或本地目录
+    pub source: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    /// 置顶推荐（排在推荐列表最前）
+    #[serde(default)]
+    pub pinned: bool,
+    /// 推荐排序（升序；与 pinned 一起决定顺序）
+    #[serde(default)]
+    pub order: Option<i64>,
+    /// 市场图标（emoji / 短文本 / http(s) 图片 URL）
+    #[serde(default)]
+    pub icon: Option<String>,
+    /// 市场分类（如「官方」「精选」），前端展示用
+    #[serde(default)]
+    pub category: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MarketPresetFile {
+    #[serde(default)]
+    markets: Vec<MarketPreset>,
+}
+
+/// 解析推荐市场文件：丢弃空名/空来源，按名称（不区分大小写）去重
+pub(crate) fn parse_market_presets(json: &str) -> Result<Vec<MarketPreset>> {
+    let file: MarketPresetFile = serde_json::from_str(json).context("Failed to parse plugin markets")?;
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for m in file.markets {
+        let name = m.name.trim().to_string();
+        let source = m.source.trim().to_string();
+        if name.is_empty() || source.is_empty() {
+            continue;
+        }
+        if !seen.insert(name.to_lowercase()) {
+            continue;
+        }
+        out.push(MarketPreset {
+            name,
+            source,
+            description: m
+                .description
+                .map(|d| d.trim().to_string())
+                .filter(|d| !d.is_empty()),
+            pinned: m.pinned,
+            order: m.order,
+            icon: m.icon.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()),
+            category: m
+                .category
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty()),
+        });
+    }
+    Ok(out)
+}
+
+fn preset_cache_file() -> Option<PathBuf> {
+    get_gui_config_dir()
+        .ok()
+        .map(|d| d.join("cache").join("plugin-markets.json"))
+}
+
+fn fetch_and_cache_presets() -> Result<Vec<MarketPreset>> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(PRESET_FETCH_TIMEOUT)
+        .no_proxy()
+        .build()
+        .context("Failed to build HTTP client")?;
+    let resp = client
+        .get(MARKET_PRESETS_URL)
+        .send()
+        .context("Failed to fetch plugin markets")?;
+    if !resp.status().is_success() {
+        bail!("plugin markets returned HTTP {}", resp.status());
+    }
+    let text = resp.text().context("Failed to read plugin markets body")?;
+    let presets = parse_market_presets(&text)?;
+    if let Some(path) = preset_cache_file() {
+        if let Some(dir) = path.parent() {
+            let _ = fs::create_dir_all(dir);
+        }
+        // 缓存失败不影响本次结果
+        let _ = fs::write(&path, &text);
+    }
+    Ok(presets)
+}
+
+/// 推荐市场：内存缓存 → OSS 拉取 → 磁盘缓存（离线兜底）→ 空列表。
+/// 返回空列表表示「当前拿不到推荐源」，前端只是不显示推荐分组，不报错。
+pub fn get_market_presets() -> Result<Vec<MarketPreset>> {
+    if let Ok(guard) = PRESET_MEM_CACHE.lock() {
+        if let Some((at, data)) = guard.as_ref() {
+            if at.elapsed() < PRESET_TTL {
+                return Ok(data.clone());
+            }
+        }
+    }
+
+    let result = match fetch_and_cache_presets() {
+        Ok(list) => list,
+        Err(e) => {
+            log::warn!("[Market] fetch presets failed: {}", e);
+            preset_cache_file()
+                .and_then(|p| fs::read_to_string(p).ok())
+                .and_then(|s| parse_market_presets(&s).ok())
+                .unwrap_or_default()
+        }
+    };
+
+    if let Ok(mut guard) = PRESET_MEM_CACHE.lock() {
+        *guard = Some((std::time::Instant::now(), result.clone()));
+    }
+    Ok(result)
+}
+
+pub(crate) fn validate_marketplace_source(source: &str) -> Result<String> {
+    let s = source.trim();
+    if s.is_empty() || s.len() > 512 || s.contains('\n') || s.contains('\r') || s.contains('\0') {
+        bail!("Invalid marketplace source");
+    }
+    Ok(s.to_string())
+}
+
+pub(crate) fn validate_plugin_ref(plugin_ref: &str) -> Result<()> {
+    validate_simple_name(plugin_ref)?;
+    if !plugin_ref.contains('@') {
+        bail!("Plugin reference must be name@marketplace: {:?}", plugin_ref);
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_install_scope(scope: &str) -> Result<()> {
+    if !matches!(scope, "user" | "project" | "local") {
+        bail!("Invalid install scope: {:?}", scope);
+    }
+    Ok(())
+}
+
+/// project 作用域必须提供项目路径作为 CLI cwd；其他作用域不需要
+pub(crate) fn install_scope_cwd(scope: &str, project_path: Option<&str>) -> Result<Option<PathBuf>> {
+    if scope == "project" {
+        let p = project_path
+            .filter(|s| !s.trim().is_empty())
+            .context("project scope requires project_path")?;
+        Ok(Some(PathBuf::from(p)))
+    } else {
+        Ok(None)
+    }
+}
+
+/// 市场是否已注册到 Claude（known_marketplaces.json 键，大小写不敏感）
+fn market_registered(name: &str) -> Result<bool> {
+    let file = claude_config_dir()?.join("plugins").join("known_marketplaces.json");
+    let Ok(content) = fs::read_to_string(&file) else {
+        return Ok(false);
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) else {
+        return Ok(false);
+    };
+    Ok(v
+        .as_object()
+        .map(|m| m.keys().any(|k| k.eq_ignore_ascii_case(name)))
+        .unwrap_or(false))
+}
+
+/// 用户市场列表中按名找来源
+fn custom_market_source(name: &str) -> Option<String> {
+    get_app_config()
+        .ok()?
+        .custom_markets
+        .unwrap_or_default()
+        .into_iter()
+        .find(|m| m.name.eq_ignore_ascii_case(name))
+        .map(|m| m.source)
+}
+
+fn set_custom_markets(list: &[CustomMarket]) -> Result<()> {
+    update_app_config(serde_json::json!({ "customMarkets": list }))
+}
+
+/// 添加市场：**只入 CC-Box 列表**（可浏览），不注册 Claude。
+/// 先拉取浏览副本并校验 marketplace.json，返回清单里的市场名（与 Claude 注册键一致）。
+pub fn add_plugin_marketplace(source: &str) -> Result<String> {
+    let src = validate_marketplace_source(source)?;
+    let root = match market_browse_local_copy(&src)? {
+        MarketSource::Dir(p) => p,
+        _ => bail!("内部错误：浏览副本应为本地路径"),
+    };
+    let mp = read_marketplace_json(&root)?;
+    let name = mp
+        .get("name")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .context("marketplace.json 缺少 name 字段")?;
+    // 官方精选市场名不可被外部来源抢占（同名会与置顶/不可移除守卫冲突，
+    // 且懒注册会用抢占者的 source 执行 marketplace add）
+    if name.eq_ignore_ascii_case(CCBOX_MARKET_NAME) {
+        bail!("ccbox-market 是 CC-Box 官方精选市场名，不可被其他来源占用");
+    }
+    let mut list = get_app_config()?.custom_markets.unwrap_or_default();
+    if list.iter().any(|m| m.name.eq_ignore_ascii_case(&name)) {
+        bail!("市场 {} 已在列表中", name);
+    }
+    list.push(CustomMarket {
+        name: name.clone(),
+        source: src,
+    });
+    set_custom_markets(&list)?;
+    invalidate_plugin_market_cache();
+    log::info!("[PluginMarket] added to browse list: {} ({})", name, source);
+    Ok(name)
+}
+
+/// 移除/取消注册（两个独立动作，前端两个按钮）：
+/// - also_unregister=false：**移除该市场** = 仅从 CC-Box 列表删除（+清理浏览缓存），
+///   不动 Claude 注册（registered-only 市场不在列表，报错）。
+/// - also_unregister=true：**取消注册** = 仅 `claude plugin marketplace remove`
+///   （列表条目保留，仍可浏览；未注册报错）。
+/// CC-Box 官方精选市场名：不可移除/卸载
+pub(crate) const CCBOX_MARKET_NAME: &str = "ccbox-market";
+
+pub fn remove_plugin_marketplace(name: &str, also_unregister: bool) -> Result<()> {
+    validate_simple_name(name)?;
+    // ccbox-market 是 CC-Box 官方精选来源：不可移除也不可卸载
+    if name.eq_ignore_ascii_case(CCBOX_MARKET_NAME) {
+        bail!("ccbox-market 是 CC-Box 官方精选市场，不可移除");
+    }
+    if also_unregister {
+        if !market_registered(name)? {
+            bail!("市场 {} 未注册", name);
+        }
+        let res =
+            run_claude_command_argv(&["plugin", "marketplace", "remove", name], None).map(|_| ());
+        invalidate_plugin_market_cache();
+        return res;
+    }
+    let mut list = get_app_config()?.custom_markets.unwrap_or_default();
+    let removed: Vec<CustomMarket> = list
+        .iter()
+        .filter(|m| m.name.eq_ignore_ascii_case(name))
+        .cloned()
+        .collect();
+    if removed.is_empty() {
+        bail!("市场 {} 不在列表中", name);
+    }
+    list.retain(|m| !m.name.eq_ignore_ascii_case(name));
+    set_custom_markets(&list)?;
+    for m in &removed {
+        clean_market_browse_copy(&m.source);
+    }
+    invalidate_plugin_market_cache();
+    Ok(())
+}
+
+/// 注册该市场（「卸载市场」的逆操作）：显式 `claude plugin marketplace add <source>`。
+/// 市场须在 CC-Box 列表中（来源可查），已注册时幂等成功。
+pub fn register_plugin_marketplace(name: &str) -> Result<()> {
+    validate_simple_name(name)?;
+    if market_registered(name)? {
+        return Ok(());
+    }
+    let source = custom_market_source(name)
+        .context(format!("市场 {} 不在列表中，无法获取来源", name))?;
+    run_claude_command_argv(&["plugin", "marketplace", "add", &source], None)
+        .with_context(|| format!("注册市场 {} 失败", name))?;
+    // 注册成功后浏览切到 Claude 克隆，CC-Box 浏览缓存即刻清理
+    // （失败保留缓存——下次浏览不用重新 clone）
+    clean_market_browse_copy(&source);
+    invalidate_plugin_market_cache();
+    Ok(())
+}
+
+/// 刷新市场：已注册 → Claude `marketplace update`（git pull）；
+/// 未注册（仅列表）→ 强制重拉 CC-Box 浏览缓存。
+pub fn refresh_plugin_marketplace(name: &str) -> Result<()> {
+    validate_simple_name(name)?;
+    let res = if market_registered(name)? {
+        run_claude_command_argv(&["plugin", "marketplace", "update", name], None).map(|_| ())
+    } else if let Some(source) = custom_market_source(name) {
+        refresh_market_browse_copy(&source).map(|_| ())
+    } else {
+        bail!("市场 {} 不存在", name);
+    };
+    invalidate_plugin_market_cache();
+    res?;
+    Ok(())
+}
+
+fn install_plugin_lifecycle(
+    action: &str,
+    plugin_ref: &str,
+    scope: &str,
+    project_path: Option<&str>,
+    market_source: Option<&str>,
+) -> Result<()> {
+    validate_plugin_ref(plugin_ref)?;
+    validate_install_scope(scope)?;
+    let cwd = install_scope_cwd(scope, project_path)?;
+    // 安装懒注册：市场未注册时先 add（来源 = 前端传参或用户市场列表）
+    if action == "install" {
+        if let Some(market) = plugin_ref.rsplit('@').next() {
+            if !market_registered(market)? {
+                let source = market_source
+                    .map(|s| s.to_string())
+                    .or_else(|| custom_market_source(market))
+                    .context(format!(
+                        "市场 {} 未注册且无来源可自动添加；请先将该市场加入列表",
+                        market
+                    ))?;
+                run_claude_command_argv(&["plugin", "marketplace", "add", &source], None)?;
+            }
+        }
+    }
+    let res = run_claude_command_argv(
+        &["plugin", action, plugin_ref, "-s", scope],
+        cwd.as_deref(),
+    );
+    // 无论成败都失效缓存：CLI 可能已部分写入
+    invalidate_plugins_list_cache();
+    invalidate_plugin_market_cache();
+    res.with_context(|| format!("Failed to {} '{}'", action, plugin_ref))?;
+    Ok(())
+}
+
+pub fn install_plugin(
+    plugin_ref: &str,
+    scope: &str,
+    project_path: Option<&str>,
+    market_source: Option<&str>,
+) -> Result<()> {
+    install_plugin_lifecycle("install", plugin_ref, scope, project_path, market_source)
+}
+
+pub fn uninstall_plugin(plugin_ref: &str, scope: &str, project_path: Option<&str>) -> Result<()> {
+    install_plugin_lifecycle("uninstall", plugin_ref, scope, project_path, None)
+}
+
+pub fn update_plugin(plugin_ref: &str, scope: &str, project_path: Option<&str>) -> Result<()> {
+    install_plugin_lifecycle("update", plugin_ref, scope, project_path, None)
 }
 

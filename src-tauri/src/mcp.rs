@@ -11,6 +11,9 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
 
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
+
 // ==================== 数据结构 ====================
 
 /// MCP Server 详细信息（通过协议获取）
@@ -135,14 +138,40 @@ impl McpHttpClient {
     pub async fn get_server_detail(&mut self) -> Result<McpServerDetail, String> {
         log::info!("[MCP] Fetching HTTP server detail: {}", self.url);
 
-        let client = reqwest::Client::builder()
+        // 直连优先（系统代理常把国内端点路由到远端节点导致握手被掐断），
+        // 失败再走系统代理兜底（GitHub 等需要代理的端点）
+        let direct = reqwest::Client::builder()
             .timeout(Duration::from_secs(10))
+            .no_proxy()
             .build()
             .map_err(|e| {
                 let msg = format!("Failed to build HTTP client: {}", e);
                 log::error!("[MCP] {}", msg);
                 msg
             })?;
+
+        match self.fetch_detail_with(&direct).await {
+            Ok(detail) => Ok(detail),
+            Err(direct_err) => {
+                log::warn!(
+                    "[MCP] HTTP direct fetch failed for {} ({}), retrying via system proxy",
+                    self.url,
+                    direct_err
+                );
+                let via_proxy = reqwest::Client::builder()
+                    .timeout(Duration::from_secs(10))
+                    .build()
+                    .map_err(|e| e.to_string())?;
+                self.request_id = 0;
+                self.fetch_detail_with(&via_proxy).await.map_err(|e| {
+                    log::error!("[MCP] HTTP fetch failed for {}: {} (direct: {})", self.url, e, direct_err);
+                    e
+                })
+            }
+        }
+    }
+
+    async fn fetch_detail_with(&mut self, client: &reqwest::Client) -> Result<McpServerDetail, String> {
 
         // 1. Initialize
         let init_response = self
@@ -532,6 +561,27 @@ pub fn get_mcp_cache() -> &'static McpDetailCache {
 
 // ==================== MCP Stdio 客户端 ====================
 
+/// Windows `cmd /S /C` 命令行拼装：含空白或 cmd 元字符（`&|<>^()`,`;=` 等）的
+/// token 加引号（防止无空格但含元字符的参数被 cmd 解释为管道/分隔，如 `a&b`）；
+/// token 内的 `"` 按 Windows 参数规则转义为 `\"`（`/S` 保证整体外层引号被剥掉
+/// 后内层结构不变）。
+#[cfg(target_os = "windows")]
+pub(crate) fn windows_cmd_line(command: &str, args: &[String]) -> String {
+    const METACHARS: &str = "&|<>^()\",;=";
+    fn quote(s: &str) -> String {
+        let needs = s.is_empty()
+            || s.chars().any(|c| c.is_whitespace() || METACHARS.contains(c));
+        if needs {
+            format!("\"{}\"", s.replace('"', "\\\""))
+        } else {
+            s.to_string()
+        }
+    }
+    let mut parts = vec![quote(command)];
+    parts.extend(args.iter().map(|a| quote(a)));
+    parts.join(" ")
+}
+
 pub struct McpStdioClient {
     command: String,
     args: Vec<String>,
@@ -567,13 +617,10 @@ impl McpStdioClient {
         let mut cmd;
         #[cfg(target_os = "windows")]
         {
-            let full_cmd = if self.args.is_empty() {
-                self.command.clone()
-            } else {
-                format!("{} {}", self.command, self.args.join(" "))
-            };
+            let full_cmd = windows_cmd_line(&self.command, &self.args);
             cmd = Command::new("cmd");
-            cmd.args(["/C", &full_cmd]);
+            cmd.arg("/S").arg("/C");
+            cmd.raw_arg(format!("\"{}\"", full_cmd));
             crate::platform::configure_command(&mut cmd);
         }
         #[cfg(not(target_os = "windows"))]

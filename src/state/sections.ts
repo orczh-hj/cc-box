@@ -114,6 +114,9 @@ registerSectionLoader('plugins', {
   load: withLoadedCwd((cwd) => useSidebarStore().loadPlugins(cwd, { silent: true })),
   alsoLoad: ['skills', 'agents', 'mcp'],
 })
+registerSectionLoader('hooks', {
+  load: withLoadedCwd((cwd) => useSidebarStore().loadHooks(cwd, { silent: true })),
+})
 registerSectionLoader('providers', {
   load: () => useProvidersStore().loadProvidersConfig(),
   deferWhileSettingsOpen: true,

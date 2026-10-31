@@ -168,6 +168,16 @@ export interface PluginAgent {
   invokeFormat: string   // @"plugin-name:agent-name (agent)"
 }
 
+// Plugin 提供的单条 hook（只读展示）
+export interface PluginHookEntry {
+  event: string
+  matcher?: string
+  type?: string
+  /** 摘要：command → url → prompt 回退 */
+  summary?: string
+  timeout?: unknown
+}
+
 // Plugin 信息（用于面板显示）
 export interface PluginInfo {
   id: string
@@ -187,4 +197,14 @@ export interface PluginInfo {
     command?: string
     args?: string[]
   }>
+  /** Plugin 提供的 commands（.md 文件名，展示时并入 skills） */
+  commands?: string[]
+  /** Plugin 提供的 hook 明细（事件 + matcher + 摘要） */
+  hooks?: PluginHookEntry[]
+  /** Plugin 提供的 LSP 服务器名 */
+  lsp?: string[]
+  /** Plugin 提供的 monitor 名 */
+  monitors?: string[]
+  /** Plugin 提供的主题名 */
+  themes?: string[]
 }

@@ -10,14 +10,17 @@
       />
       <div class="skill-info">
         <span class="skill-name">{{ skill.displayName }}</span>
-        <span v-if="skill.sourceType === 'plugin'" class="skill-full-name">{{ skill.name }}</span>
+        <span v-if="skill.sourceType === 'plugin'" class="skill-full-name">{{ pluginName }}</span>
       </div>
       <ToggleSwitch
-        v-if="skill.sourceType === 'user'"
+        v-if="canToggle"
         :modelValue="!isDisabled"
         :title="isDisabled ? t('enable') : t('disable')"
         @update:modelValue="onToggle"
       />
+      <button v-if="canEdit" class="edit-btn" @click.stop="$emit('edit', skill)" :title="t('edit')">
+        <img src="@/assets/icons/edit.svg" :alt="t('edit')" />
+      </button>
       <button class="use-btn" :disabled="isDisabled" @click.stop="emitUseSkill" :title="t('useThisSkill')">
         <img src="@/assets/icons/use.svg" :alt="t('useBtn')" />
       </button>
@@ -33,10 +36,6 @@
       </div>
       <div v-else class="skill-description-empty">
         {{ t('noDescription') }}
-      </div>
-      <div class="skill-invoke-format">
-        <span class="invoke-label">Invoke:</span>
-        <span class="invoke-value">{{ skill.invokeFormat }}</span>
       </div>
     </div>
   </div>
@@ -55,10 +54,19 @@ const props = defineProps<{
   skill: SkillInfo
 }>()
 
+defineEmits<{
+  edit: [skill: SkillInfo]
+}>()
+
 const sidebarStore = useSidebarStore()
 
 const isExpanded = ref(false)
 const isDisabled = computed(() => props.skill.enabled === false)
+// plugin 条目 name 为 "plugin:skill"，第二行只展示 plugin 名（skill 名已在首行）
+const pluginName = computed(() => props.skill.name.split(':')[0] ?? '')
+// 项目级开关后端已支持（disabled 按 project_key 隔离）
+const canToggle = computed(() => props.skill.sourceType === 'user' || props.skill.sourceType === 'project')
+const canEdit = computed(() => canToggle.value)
 
 function toggleExpand() {
   isExpanded.value = !isExpanded.value
@@ -76,7 +84,7 @@ let errorTimer: ReturnType<typeof setTimeout> | undefined
 
 async function onToggle(newValue: boolean) {
   try {
-    await sidebarStore.toggleSkillEnabled(props.skill.name, newValue)
+    await sidebarStore.toggleSkillEnabled(props.skill.name, newValue, props.skill.sourceType)
     toggleError.value = ''
   } catch (err) {
     console.error('[SkillItem] toggle failed:', err)
@@ -182,6 +190,30 @@ onUnmounted(() => clearTimeout(errorTimer))
   height: 14px;
 }
 
+.edit-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: none;
+  background: transparent;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+
+.edit-btn img {
+  width: 13px;
+  height: 13px;
+}
+
+.edit-btn:hover {
+  color: var(--accent-color);
+  background: var(--bg-tertiary);
+}
+
 .use-btn:hover {
   color: var(--accent-color);
   background: var(--bg-tertiary);
@@ -206,24 +238,5 @@ onUnmounted(() => clearTimeout(errorTimer))
   font-size: 12px;
   color: var(--text-tertiary);
   font-style: italic;
-}
-
-.skill-invoke-format {
-  margin-top: 8px;
-  display: flex;
-  gap: 6px;
-  font-size: 11px;
-}
-
-.invoke-label {
-  color: var(--text-tertiary);
-}
-
-.invoke-value {
-  font-family: var(--font-mono);
-  color: var(--text-primary);
-  background: var(--bg-tertiary);
-  padding: 2px 6px;
-  border-radius: 4px;
 }
 </style>

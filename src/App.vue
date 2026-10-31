@@ -137,6 +137,9 @@
   :initial-denied="true"
   @connected="remoteAuthLost = false"
 />
+
+<!-- 统一确认框（uiConfirm 的挂载点，全应用仅此一份） -->
+<ConfirmDialog />
 </template>
 
 <script setup lang="ts">
@@ -176,6 +179,7 @@ import DownloadTicketPage from '@/components/remote/DownloadTicketPage.vue'
 import { remoteTransport } from '@/api/remote-transport'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import DirectoryPicker from '@/components/DirectoryPicker.vue'
+import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import WelcomeView from '@/components/WelcomeView.vue'
 import ProjectSelectView from '@/components/ProjectSelectView.vue'
 import TitleBar from '@/components/TitleBar.vue'

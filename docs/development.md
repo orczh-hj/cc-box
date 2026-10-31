@@ -4,6 +4,7 @@
 
 ## Windows 环境配置
 
+- **UTF-8 源文件禁止用 PowerShell Get-Content/Set-Content 处理**：Windows PowerShell 5.1 的 `Get-Content -Raw` 默认按系统 ANSI（GBK）解码，配 `Set-Content -Encoding utf8` 会把整个文件的中文写成不可逆乱码（`?` 替换丢字节，曾致 700 行测试文件只能靠会话 transcript 重放恢复）。批量文本处理用 Edit/Write 工具，或 Bash + sed/node。
 - **Rust 工具链**：使用 MSVC 工具链（`rustup default stable-x86_64-pc-windows-msvc`）
 - **前置依赖**：需安装 [Microsoft C++ Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/)，勾选「C++ build tools」和「Windows 11 SDK」
   - 安装后确保 `link.exe` 为 MSVC 版本而非 Git coreutils 的 `link`

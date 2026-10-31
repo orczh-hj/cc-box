@@ -316,3 +316,51 @@ fn ParseRes_Empty_001() {
     let resources = parse_resources(&response);
     assert!(resources.is_empty());
 }
+
+/// Windows `cmd /S /C` 命令行拼装：含空格的命令/参数必须加引号——
+/// 曾经 `C:/Program Files (x86)/.../msedge.exe` 被按空格拆成多个参数
+/// （cmd 报 "too many arguments"，playwright 详情获取失败）
+#[cfg(target_os = "windows")]
+#[test]
+fn WindowsCmdLine_含空格token加引号() {
+    use crate::mcp::windows_cmd_line;
+
+    // 手算真值：空格 token 加引号，无空格原样
+    let line = windows_cmd_line(
+        "cmd",
+        &["/c".to_string(), "C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe".to_string()],
+    );
+    assert_eq!(
+        line,
+        "cmd /c \"C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe\""
+    );
+
+    // 全部无空格：原样拼装
+    assert_eq!(
+        windows_cmd_line("npx", &["-y".to_string(), "@playwright/mcp@latest".to_string()]),
+        "npx -y @playwright/mcp@latest"
+    );
+
+    // 空参数：引号包裹
+    assert_eq!(windows_cmd_line("node", &[String::new()]), "node \"\"");
+}
+
+/// cmd 元字符转义：无空格但含 &|" 的 token 也必须加引号/转义，
+/// 否则 `a&b` 会被 cmd 当命令分隔执行（命令注入面，来源含项目级 .mcp.json）
+#[cfg(target_os = "windows")]
+#[test]
+fn WindowsCmdLine_元字符token转义() {
+    use crate::mcp::windows_cmd_line;
+
+    // 手算真值：& 触发加引号；内层 " 转义为 \"
+    assert_eq!(
+        windows_cmd_line("node", &["a&b".to_string(), "echo".to_string()]),
+        "node \"a&b\" echo"
+    );
+    assert_eq!(
+        windows_cmd_line("node", &["he\"llo|x".to_string()]),
+        "node \"he\\\"llo|x\""
+    );
+    // 纯净 token 原样
+    assert_eq!(windows_cmd_line("npx", &["-y".to_string()]), "npx -y");
+}

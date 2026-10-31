@@ -10,15 +10,18 @@
       />
       <div class="agent-info">
         <span class="agent-name">{{ agent.displayName }}</span>
-        <span v-if="agent.sourceType === 'plugin'" class="agent-full-name">{{ agent.name }}</span>
+        <span v-if="agent.sourceType === 'plugin'" class="agent-full-name">{{ pluginName }}</span>
       </div>
       <span v-if="agent.model" class="agent-model">{{ agent.model }}</span>
       <ToggleSwitch
-        v-if="agent.sourceType === 'user'"
+        v-if="canToggle"
         :modelValue="!isDisabled"
         :title="isDisabled ? t('enable') : t('disable')"
         @update:modelValue="onToggle"
       />
+      <button v-if="canToggle" class="edit-btn" @click.stop="$emit('edit', agent)" :title="t('edit')">
+        <img src="@/assets/icons/edit.svg" :alt="t('edit')" />
+      </button>
       <button class="use-btn" :disabled="isDisabled" @click.stop="emitUseAgent" :title="t('useThisAgent')">
         <img src="@/assets/icons/use.svg" :alt="t('useBtn')" />
       </button>
@@ -34,10 +37,6 @@
       </div>
       <div v-else class="agent-description-empty">
         {{ t('noDescription') }}
-      </div>
-      <div class="agent-invoke-format">
-        <span class="invoke-label">Invoke:</span>
-        <span class="invoke-value">{{ agent.invokeFormat }}</span>
       </div>
     </div>
   </div>
@@ -56,10 +55,17 @@ const props = defineProps<{
   agent: AgentInfo
 }>()
 
+defineEmits<{
+  edit: [agent: AgentInfo]
+}>()
+
 const sidebarStore = useSidebarStore()
 
 const isExpanded = ref(false)
 const isDisabled = computed(() => props.agent.enabled === false)
+// plugin 条目 name 为 "plugin:agent"，第二行只展示 plugin 名（agent 名已在首行）
+const pluginName = computed(() => props.agent.name.split(':')[0] ?? '')
+const canToggle = computed(() => props.agent.sourceType === 'user' || props.agent.sourceType === 'project')
 
 function toggleExpand() {
   isExpanded.value = !isExpanded.value
@@ -76,7 +82,7 @@ let errorTimer: ReturnType<typeof setTimeout> | undefined
 
 async function onToggle(newValue: boolean) {
   try {
-    await sidebarStore.toggleAgentEnabled(props.agent.name, newValue)
+    await sidebarStore.toggleAgentEnabled(props.agent.name, newValue, props.agent.sourceType)
     toggleError.value = ''
   } catch (err) {
     console.error('[AgentItem] toggle failed:', err)
@@ -112,6 +118,30 @@ onUnmounted(() => clearTimeout(errorTimer))
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.edit-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: none;
+  background: transparent;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+
+.edit-btn img {
+  width: 13px;
+  height: 13px;
+}
+
+.edit-btn:hover {
+  color: var(--accent-color);
+  background: var(--bg-tertiary);
 }
 
 .agent-item.disabled .agent-name {
@@ -215,24 +245,5 @@ onUnmounted(() => clearTimeout(errorTimer))
   font-size: 12px;
   color: var(--text-tertiary);
   font-style: italic;
-}
-
-.agent-invoke-format {
-  margin-top: 8px;
-  display: flex;
-  gap: 6px;
-  font-size: 11px;
-}
-
-.invoke-label {
-  color: var(--text-tertiary);
-}
-
-.invoke-value {
-  font-family: var(--font-mono);
-  color: var(--text-primary);
-  background: var(--bg-tertiary);
-  padding: 2px 6px;
-  border-radius: 4px;
 }
 </style>

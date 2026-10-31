@@ -1,9 +1,10 @@
 import { defineStore } from 'pinia'
 import { ref, computed, type Ref } from 'vue'
-import { getAllAgents, getAllSkills, getAllMcpServers, getAllPlugins, setSkillEnabled, setAgentEnabled, setMcpServerEnabled, setPluginEnabled } from '@/api/tauri'
+import { getAllAgents, getAllSkills, getAllMcpServers, getAllPlugins, getHookList, setSkillEnabled, setAgentEnabled, setMcpServerEnabled, setPluginEnabled, setHookEnabled } from '@/api/tauri'
 import type { AgentInfo, SkillInfo, McpServerInfo, PluginInfo, UpdateInfo, ClaudeCliUpdateInfo } from '@/types'
+import type { HookListItem } from '@/api/tauri'
 
-export type SidebarPanelType = 'sessions' | 'skills' | 'agents' | 'mcp' | 'plugins' | 'files' | null
+export type SidebarPanelType = 'sessions' | 'skills' | 'agents' | 'mcp' | 'plugins' | 'hooks' | 'files' | null
 
 export const useSidebarStore = defineStore('sidebar', () => {
   const activePanel = ref<SidebarPanelType>(null)
@@ -46,6 +47,7 @@ export const useSidebarStore = defineStore('sidebar', () => {
   const mcpExpandedGroups = ref({
     plugin: true,
     user: true,
+    local: true,
     project: true
   })
 
@@ -53,6 +55,15 @@ export const useSidebarStore = defineStore('sidebar', () => {
   const pluginsExpandedGroups = ref({
     user: true,
     project: true
+  })
+
+  // Hooks 面板折叠状态
+  const hooksExpandedGroups = ref({
+    user: true,
+    project: true,
+    local: true,
+    plugin: true,
+    disabled: true
   })
 
   // ========== 预加载数据 ==========
@@ -110,6 +121,11 @@ export const useSidebarStore = defineStore('sidebar', () => {
   const loadAgents = createLoader(agents, 'agents', getAllAgents, agentsLoading)
   const loadMcpServers = createLoader(mcpServers, 'mcp servers', getAllMcpServers, mcpServersLoading)
   const loadPlugins = createLoader(plugins, 'plugins', getAllPlugins, pluginsLoading)
+
+  // Hooks（项目相关：user/project/local 三来源 + disabled 合并）
+  const hooks = ref<HookListItem[]>([])
+  const hooksLoading = ref(false)
+  const loadHooks = createLoader(hooks, 'hooks', getHookList, hooksLoading)
 
   // ========== 本端写回环抑制 ==========
   // 开关成功后后端会广播 state-changed（桌面与远程都会把事件回环给发起方）。
@@ -170,6 +186,7 @@ export const useSidebarStore = defineStore('sidebar', () => {
     agents.value = []
     mcpServers.value = []
     plugins.value = []
+    hooks.value = []
 
     // 并行加载所有数据
     await Promise.all([
@@ -177,6 +194,7 @@ export const useSidebarStore = defineStore('sidebar', () => {
       loadAgents(cwd),
       loadMcpServers(cwd),
       loadPlugins(cwd),
+      loadHooks(cwd),
     ])
   }
 
@@ -199,14 +217,18 @@ export const useSidebarStore = defineStore('sidebar', () => {
     list: T[],
     name: string,
     targetEnabled: boolean,
+    sourceType?: string,
   ): number {
-    const isUserLevel = (item: T) => item.sourceType === 'user'
+    // 指定来源时严格按该来源定位（同名 project/user 行由点击行决定）；
+    // 未指定（旧调用/兜底）只匹配 user——同名 project 行排在前面，裸匹配会误改
+    const isTogglable = (item: T) =>
+      sourceType ? item.sourceType === sourceType : item.sourceType === 'user'
     const matchesTarget = (item: T) => (item.enabled !== false) !== targetEnabled
     const precise = list.findIndex(
-      item => item.name === name && isUserLevel(item) && matchesTarget(item),
+      item => item.name === name && isTogglable(item) && matchesTarget(item),
     )
     if (precise >= 0) return precise
-    return list.findIndex(item => item.name === name && isUserLevel(item))
+    return list.findIndex(item => item.name === name && isTogglable(item))
   }
 
   /**
@@ -244,15 +266,21 @@ export const useSidebarStore = defineStore('sidebar', () => {
     if (idx >= 0) list[idx] = { ...list[idx], enabled: !optimisticEnabled }
   }
 
-  async function toggleSkillEnabled(name: string, enabled: boolean) {
-    const idx = findToggleIndex(skills.value, name, enabled)
+  async function toggleSkillEnabled(name: string, enabled: boolean, sourceType?: string) {
+    const idx = findToggleIndex(skills.value, name, enabled, sourceType)
     const identity = idx >= 0
       ? { name: skills.value[idx].name, sourceType: skills.value[idx].sourceType, sourceLabel: skills.value[idx].sourceLabel }
       : { name, sourceType: 'user' }
     if (idx >= 0) skills.value[idx] = { ...skills.value[idx], enabled }
     markSelfWrite('skills')
+    // 项目级开关需要带来源与项目路径（后端按 scope 落盘）
+    const source = idx >= 0 ? skills.value[idx] : undefined
+    const scopeArg =
+      source && (source.sourceType === 'project' || (source.sourceType as string) === 'local')
+        ? { sourceType: source.sourceType, projectPath: loadedCwd.value ?? undefined }
+        : undefined
     try {
-      await setSkillEnabled(name, enabled)
+      await setSkillEnabled(name, enabled, scopeArg?.sourceType, scopeArg?.projectPath)
     } catch (err) {
       cancelSelfWrite('skills')
       revertToggle(skills.value, identity, enabled)
@@ -260,15 +288,21 @@ export const useSidebarStore = defineStore('sidebar', () => {
     }
   }
 
-  async function toggleAgentEnabled(name: string, enabled: boolean) {
-    const idx = findToggleIndex(agents.value, name, enabled)
+  async function toggleAgentEnabled(name: string, enabled: boolean, sourceType?: string) {
+    const idx = findToggleIndex(agents.value, name, enabled, sourceType)
     const identity = idx >= 0
       ? { name: agents.value[idx].name, sourceType: agents.value[idx].sourceType, sourceLabel: agents.value[idx].sourceLabel }
       : { name, sourceType: 'user' }
     if (idx >= 0) agents.value[idx] = { ...agents.value[idx], enabled }
     markSelfWrite('agents')
+    // 项目级开关需要带来源与项目路径（后端按 scope 落盘）
+    const source = idx >= 0 ? agents.value[idx] : undefined
+    const scopeArg =
+      source && (source.sourceType === 'project' || (source.sourceType as string) === 'local')
+        ? { sourceType: source.sourceType, projectPath: loadedCwd.value ?? undefined }
+        : undefined
     try {
-      await setAgentEnabled(name, enabled)
+      await setAgentEnabled(name, enabled, scopeArg?.sourceType, scopeArg?.projectPath)
     } catch (err) {
       cancelSelfWrite('agents')
       revertToggle(agents.value, identity, enabled)
@@ -276,18 +310,42 @@ export const useSidebarStore = defineStore('sidebar', () => {
     }
   }
 
-  async function toggleMcpServerEnabled(name: string, enabled: boolean) {
-    const idx = findToggleIndex(mcpServers.value, name, enabled)
+  async function toggleMcpServerEnabled(name: string, enabled: boolean, sourceType?: string) {
+    const idx = findToggleIndex(mcpServers.value, name, enabled, sourceType)
     const identity = idx >= 0
       ? { name: mcpServers.value[idx].name, sourceType: mcpServers.value[idx].sourceType, sourceLabel: mcpServers.value[idx].sourceLabel }
       : { name, sourceType: 'user' }
     if (idx >= 0) mcpServers.value[idx] = { ...mcpServers.value[idx], enabled }
     markSelfWrite('mcp')
+    // 项目级开关需要带来源与项目路径（后端按 scope 落盘）
+    const source = idx >= 0 ? mcpServers.value[idx] : undefined
+    const scopeArg =
+      source && (source.sourceType === 'project' || (source.sourceType as string) === 'local')
+        ? { sourceType: source.sourceType, projectPath: loadedCwd.value ?? undefined }
+        : undefined
     try {
-      await setMcpServerEnabled(name, enabled)
+      await setMcpServerEnabled(name, enabled, scopeArg?.sourceType, scopeArg?.projectPath)
     } catch (err) {
       cancelSelfWrite('mcp')
       revertToggle(mcpServers.value, identity, enabled)
+      throw err
+    }
+  }
+
+  async function toggleHookEnabled(item: HookListItem, enabled: boolean) {
+    // 定位键 = 列表下发的 key（后端按 hash(event|matcher|hook0) 生成），跨端一致
+    const idx = hooks.value.findIndex(h => h.key === item.key && h.scope === item.scope)
+    if (idx >= 0) hooks.value[idx] = { ...hooks.value[idx], enabled }
+    markSelfWrite('hooks')
+    const scope = item.scope ?? 'user'
+    const projectPath =
+      scope !== 'user' ? (item.projectPath ?? loadedCwd.value ?? undefined) : undefined
+    try {
+      await setHookEnabled(scope, item.event, item.key, enabled, projectPath)
+    } catch (err) {
+      cancelSelfWrite('hooks')
+      const i = hooks.value.findIndex(h => h.key === item.key && h.scope === item.scope)
+      if (i >= 0) hooks.value[i] = { ...hooks.value[i], enabled: !enabled }
       throw err
     }
   }
@@ -376,6 +434,11 @@ export const useSidebarStore = defineStore('sidebar', () => {
     pluginsExpandedGroups.value[group] = !pluginsExpandedGroups.value[group]
   }
 
+  // 切换 Hook 分组折叠
+  function toggleHookGroup(group: keyof typeof hooksExpandedGroups.value) {
+    hooksExpandedGroups.value[group] = !hooksExpandedGroups.value[group]
+  }
+
   return {
     activePanel,
     panelVisible,
@@ -390,21 +453,25 @@ export const useSidebarStore = defineStore('sidebar', () => {
     agentsExpandedGroups,
     mcpExpandedGroups,
     pluginsExpandedGroups,
+    hooksExpandedGroups,
     // 预加载数据
     skills,
     agents,
     mcpServers,
     plugins,
+    hooks,
     skillsLoading,
     agentsLoading,
     mcpServersLoading,
     pluginsLoading,
+    hooksLoading,
     loadedCwd,
     loadAllSidebarData,
     loadSkills,
     loadAgents,
     loadMcpServers,
     loadPlugins,
+    loadHooks,
     // 本端写回环登记（状态中心消费；测试可直接模拟）
     markSelfWrite,
     cancelSelfWrite,
@@ -420,10 +487,12 @@ export const useSidebarStore = defineStore('sidebar', () => {
     toggleAgentGroup,
     toggleMcpGroup,
     togglePluginGroup,
+    toggleHookGroup,
     // 用户级资源开关
     toggleSkillEnabled,
     toggleAgentEnabled,
     toggleMcpServerEnabled,
+    toggleHookEnabled,
     togglePluginEnabled
   }
 })

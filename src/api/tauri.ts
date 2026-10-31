@@ -302,20 +302,306 @@ export const getAllMcpServers = (projectPath: string): Promise<McpServerInfo[]> 
 export const getAllPlugins = (projectPath: string): Promise<PluginInfo[]> =>
   invoke<PluginInfo[]>('get_all_plugins', { projectPath });
 
-// 切换用户级 skill/agent/mcp/plugin 启用状态
-export const setSkillEnabled = (name: string, enabled: boolean): Promise<void> =>
-  invoke<void>('set_skill_enabled', { name, enabled });
+// 切换 skill/agent/mcp/plugin 启用状态（skill/agent 支持 user|project，
+// mcp 支持 user|project|local；缺省 = user，旧调用兼容）
+export const setSkillEnabled = (
+  name: string,
+  enabled: boolean,
+  sourceType?: string,
+  projectPath?: string
+): Promise<void> =>
+  invoke<void>('set_skill_enabled', {
+    name,
+    enabled,
+    sourceType: sourceType ?? null,
+    projectPath: projectPath ?? null,
+  });
 
-export const setAgentEnabled = (name: string, enabled: boolean): Promise<void> =>
-  invoke<void>('set_agent_enabled', { name, enabled });
+export const setAgentEnabled = (
+  name: string,
+  enabled: boolean,
+  sourceType?: string,
+  projectPath?: string
+): Promise<void> =>
+  invoke<void>('set_agent_enabled', {
+    name,
+    enabled,
+    sourceType: sourceType ?? null,
+    projectPath: projectPath ?? null,
+  });
 
-export const setMcpServerEnabled = (name: string, enabled: boolean): Promise<void> =>
-  invoke<void>('set_mcp_server_enabled', { name, enabled });
+export const setMcpServerEnabled = (
+  name: string,
+  enabled: boolean,
+  scope?: string,
+  projectPath?: string
+): Promise<void> =>
+  invoke<void>('set_mcp_server_enabled', {
+    name,
+    enabled,
+    scope: scope ?? null,
+    projectPath: projectPath ?? null,
+  });
 
 export const setPluginEnabled = (pluginId: string, enabled: boolean): Promise<void> =>
   // 后端同步执行 `claude plugin enable/disable` 子进程，可能超过远程 rpc 默认 15s；
   // 桌面实现忽略 timeoutMs（本地 IPC 无超时）。超时会让远程先报错回滚、桌面最终成功。
   invoke<void>('set_plugin_enabled', { pluginId, enabled }, { timeoutMs: 60000 });
+
+// ---------- Plugin 市场（浏览 + 安装管理）----------
+
+export interface MarketplaceComponents {
+  commands: string[];
+  agents: string[];
+  hooks: string[];
+  mcpServers: string[];
+  skills: string[];
+  lspServers: string[];
+}
+
+export interface MarketplacePluginEntry {
+  name: string;
+  description?: string;
+  version?: string;
+  category?: string;
+  tags: string[];
+  components?: MarketplaceComponents;
+  /** 安装量（Claude plugin-catalog-cache 的 unique_installs，列表按它降序） */
+  installs?: number;
+  /** 精选置顶（marketplace.json 的 ccbox.pinned） */
+  pinned?: boolean;
+  /** 精选排序（marketplace.json 的 ccbox.order，升序） */
+  order?: number;
+  /** 图标（marketplace.json 的 ccbox.icon：emoji / 短文本 / http(s) URL） */
+  icon?: string;
+  installed: boolean;
+  enabled?: boolean;
+}
+
+export interface MarketplaceInfo {
+  name: string;
+  installLocation: string;
+  /** 本地缓存时间（注册 = Claude lastUpdated；未注册 = CC-Box 浏览缓存拉取时间） */
+  lastUpdated?: string;
+  plugins: MarketplacePluginEntry[];
+  loadError?: string;
+  /** 来源：preset（OSS 推荐，未添加）/ user（用户添加）/ registered（仅 Claude 注册） */
+  origin: 'preset' | 'user' | 'registered';
+  /** 是否已注册到 Claude */
+  registered: boolean;
+  /** 市场来源（owner/repo、git URL、marketplace.json URL、本地路径） */
+  source?: string;
+  description?: string;
+  /** 精选置顶（preset） */
+  pinned?: boolean;
+  /** 精选排序（preset，升序） */
+  order?: number;
+  icon?: string;
+}
+
+export const getPluginMarketplaces = (): Promise<MarketplaceInfo[]> =>
+  invoke<MarketplaceInfo[]>('get_plugin_marketplaces');
+
+/** 推荐市场（OSS data/plugin-markets.json 热更新；离线回退本地缓存） */
+export interface MarketPreset {
+  name: string;
+  source: string;
+  description?: string;
+  /** 置顶推荐 */
+  pinned?: boolean;
+  /** 推荐排序（升序，缺省排后） */
+  order?: number;
+  /** 图标：emoji / 短文本 / http(s) 图片 URL */
+  icon?: string;
+  /** 分类标签（展示用） */
+  category?: string;
+}
+
+export const getMarketPresets = (): Promise<MarketPreset[]> =>
+  invoke<MarketPreset[]>('get_market_presets');
+
+// 市场与插件管理均为可能阻塞数十秒的 CLI 调用（clone/网络下载），
+// 远程 rpc 默认 15s 不够，统一放宽到 120s（后端超时上限同值）
+const MARKET_TIMEOUT = { timeoutMs: 120000 };
+
+/** 添加市场：只入 CC-Box 浏览列表（不注册 Claude）；返回清单里的市场名 */
+export const addPluginMarketplace = (source: string): Promise<string> =>
+  invoke<string>('add_plugin_marketplace', { source }, MARKET_TIMEOUT);
+
+/** 移除市场：从 CC-Box 列表删除；alsoUnregister 时同时从 Claude 注销 */
+export const removePluginMarketplace = (name: string, alsoUnregister?: boolean): Promise<void> =>
+  invoke<void>('remove_plugin_marketplace', { name, alsoUnregister: alsoUnregister ?? null }, MARKET_TIMEOUT);
+
+/** 刷新市场：已注册 → Claude update；未注册 → 重拉 CC-Box 浏览缓存 */
+export const refreshPluginMarketplace = (name: string): Promise<void> =>
+  invoke<void>('refresh_plugin_marketplace', { name }, MARKET_TIMEOUT);
+
+/** 注册该市场（显式注册到 Claude；「卸载市场」的逆操作） */
+export const registerPluginMarketplace = (name: string): Promise<void> =>
+  invoke<void>('register_plugin_marketplace', { name }, MARKET_TIMEOUT);
+
+// pluginRef = name@marketplace；scope = user|project|local（project 必须带 projectPath）；
+// marketSource：未注册市场安装时用于自动注册的来源
+export const installPlugin = (
+  pluginRef: string,
+  scope: string,
+  projectPath?: string,
+  marketSource?: string
+): Promise<void> =>
+  invoke<void>('install_plugin', { pluginRef, scope, projectPath: projectPath ?? null, marketSource: marketSource ?? null }, MARKET_TIMEOUT);
+
+export const uninstallPlugin = (
+  pluginRef: string,
+  scope: string,
+  projectPath?: string
+): Promise<void> =>
+  invoke<void>('uninstall_plugin', { pluginRef, scope, projectPath: projectPath ?? null }, MARKET_TIMEOUT);
+
+export const updatePlugin = (
+  pluginRef: string,
+  scope: string,
+  projectPath?: string
+): Promise<void> =>
+  invoke<void>('update_plugin', { pluginRef, scope, projectPath: projectPath ?? null }, MARKET_TIMEOUT);
+
+// ---------- 扩展编辑（MCP / Skill / Agent / Hook 表单化新增与编辑）----------
+
+export interface SaveMcpRequest {
+  scope: 'user' | 'project' | 'local';
+  name: string;
+  config: Record<string, unknown>;
+  projectPath?: string;
+  originalName?: string;
+  /** 跨作用域编辑：原作用域（不同则从旧作用域配置移除原条目） */
+  originalScope?: string;
+}
+
+export interface SaveSkillRequest {
+  scope: 'user' | 'project';
+  name: string;
+  projectPath?: string;
+  originalName?: string;
+  /** 跨作用域编辑：原作用域（不同则整目录 move 到新作用域） */
+  originalScope?: string;
+  asSource: boolean;
+  description?: string;
+  content: string;
+}
+
+export interface SaveAgentRequest {
+  scope: 'user' | 'project';
+  name: string;
+  projectPath?: string;
+  originalName?: string;
+  /** 跨作用域编辑：原作用域（不同则文件 move 到新作用域） */
+  originalScope?: string;
+  asSource: boolean;
+  description?: string;
+  tools?: string;
+  model?: string;
+  content: string;
+}
+
+export interface SaveHookRequest {
+  scope: 'user' | 'project' | 'local';
+  event: string;
+  matcher?: string;
+  /** 完整 hook 对象（type: command/http/prompt/agent/mcp_tool + 各自字段） */
+  hook: Record<string, unknown>;
+  projectPath?: string;
+  /** 编辑定位：key = 列表下发的条目键 */
+  original?: { event: string; matcher?: string; key: string };
+  /** 跨作用域编辑：原作用域（不同则从旧 settings 移除原条目） */
+  originalScope?: string;
+}
+
+export interface HookListItem {
+  event: string;
+  matcher?: string;
+  command?: string;
+  hookType?: string;
+  /** matcher 条目内命令数（>1 时禁止表单编辑，防止整条替换丢命令） */
+  hookCount: number;
+  timeout?: number;
+  source: { type: string; label: string; path?: string };
+  enabled: boolean;
+  key: string;
+  /** 原始作用域（停用条目启用时回到原 settings 文件） */
+  scope: 'user' | 'project' | 'local';
+  projectPath?: string;
+}
+
+export const saveMcpServer = (request: SaveMcpRequest): Promise<void> =>
+  invoke<void>('save_mcp_server', { request });
+
+export const deleteMcpServer = (scope: string, name: string, projectPath?: string): Promise<void> =>
+  invoke<void>('delete_mcp_server', { scope, name, projectPath: projectPath ?? null });
+
+export const saveSkill = (request: SaveSkillRequest): Promise<string> =>
+  invoke<string>('save_skill', { request });
+
+export const deleteSkill = (scope: string, name: string, projectPath?: string): Promise<void> =>
+  invoke<void>('delete_skill', { scope, name, projectPath: projectPath ?? null });
+
+/** 返回 [source, path] */
+export const getSkillSource = (
+  scope: string,
+  name: string,
+  projectPath?: string
+): Promise<[string, string]> =>
+  invoke<[string, string]>('get_skill_source', { scope, name, projectPath: projectPath ?? null });
+
+export const saveAgent = (request: SaveAgentRequest): Promise<string> =>
+  invoke<string>('save_agent', { request });
+
+export const deleteAgent = (scope: string, name: string, projectPath?: string): Promise<void> =>
+  invoke<void>('delete_agent', { scope, name, projectPath: projectPath ?? null });
+
+/** 返回 [source, path] */
+export const getAgentSource = (
+  scope: string,
+  name: string,
+  projectPath?: string
+): Promise<[string, string]> =>
+  invoke<[string, string]>('get_agent_source', { scope, name, projectPath: projectPath ?? null });
+
+export const getHookList = (projectPath: string): Promise<HookListItem[]> =>
+  invoke<HookListItem[]>('get_hook_list', { projectPath });
+
+export const saveHook = (request: SaveHookRequest): Promise<void> =>
+  invoke<void>('save_hook', { request });
+
+export const deleteHook = (
+  scope: string,
+  event: string,
+  key: string,
+  projectPath?: string
+): Promise<void> =>
+  invoke<void>('delete_hook', {
+    scope,
+    event,
+    key,
+    projectPath: projectPath ?? null,
+  });
+
+export const setHookEnabled = (
+  scope: string,
+  event: string,
+  key: string,
+  enabled: boolean,
+  projectPath?: string
+): Promise<void> =>
+  invoke<void>('set_hook_enabled', {
+    scope,
+    event,
+    key,
+    enabled,
+    projectPath: projectPath ?? null,
+  });
+
+/** 在文件管理器中定位文件（桌面专属；远程端降级为复制路径） */
+export const revealInFileManager = (path: string): Promise<void> =>
+  invoke<void>('reveal_in_file_manager', { path });
 
 export const getMcpServerDetail = (
   projectPath: string,

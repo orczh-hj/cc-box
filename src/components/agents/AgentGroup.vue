@@ -16,8 +16,9 @@
     <div v-if="expanded" class="agents-container">
       <AgentItemCard
         v-for="agent in agents"
-        :key="agent.name"
+        :key="agent.name + agent.sourceType"
         :agent="agent"
+      @edit="$emit('edit', $event)"
       />
     </div>
   </div>
@@ -36,6 +37,7 @@ defineProps<{
 
 defineEmits<{
   toggle: []
+  edit: [agent: AgentInfo]
 }>()
 </script>
 

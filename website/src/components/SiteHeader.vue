@@ -1,5 +1,5 @@
 <script setup lang="ts">
-withDefaults(defineProps<{ page?: 'home' | 'docs' }>(), { page: 'home' })
+withDefaults(defineProps<{ page?: 'home' | 'docs' | 'reference' }>(), { page: 'home' })
 
 const GITHUB_URL = 'https://github.com/orczh-hj/cc-box'
 const GITEE_URL = 'https://gitee.com/orczh/cc-box'
@@ -17,6 +17,12 @@ const GITEE_URL = 'https://gitee.com/orczh/cc-box'
         <a :href="page === 'home' ? '#download' : 'index.html#download'" class="nav-link">下载</a>
         <a href="docs.html" class="nav-link" :class="{ 'nav-link-active': page === 'docs' }"
           >文档</a
+        >
+        <a
+          href="reference.html"
+          class="nav-link"
+          :class="{ 'nav-link-active': page === 'reference' }"
+          >Claude Code 文档</a
         >
         <a :href="GITHUB_URL" target="_blank" rel="noopener" class="nav-link">GitHub</a>
         <a :href="GITEE_URL" target="_blank" rel="noopener" class="nav-link">Gitee</a>

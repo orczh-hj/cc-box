@@ -99,12 +99,13 @@ function main() {
     logErr(`产物缺失: ${path.join(SITE_DIST, 'index.html')}（先跑 npm run build:site）`)
     process.exit(1)
   }
-  // 多入口构建：main-*.js（首页）、docs-*.js（文档页）
+  // 多入口构建：main-*.js（首页）、docs-*.js（文档页）、reference-*.js（参考文档页）
   const assetFiles = fs.readdirSync(path.join(SITE_DIST, 'assets'))
   const mainBundle = assetFiles.find((f) => /^main-.*\.js$/.test(f))
   const docsBundle = assetFiles.find((f) => /^docs-.*\.js$/.test(f))
-  if (!mainBundle || !docsBundle) {
-    logErr('产物缺失: website/dist/assets/main-*.js 或 docs-*.js')
+  const referenceBundle = assetFiles.find((f) => /^reference-.*\.js$/.test(f))
+  if (!mainBundle || !docsBundle || !referenceBundle) {
+    logErr('产物缺失: website/dist/assets/{main,docs,reference}-*.js')
     process.exit(1)
   }
   logOk('产物完整')
@@ -133,8 +134,12 @@ function main() {
   for (const url of [
     `${siteBase}/index.html`,
     `${siteBase}/docs.html`,
+    `${siteBase}/reference.html`,
+    `${siteBase}/robots.txt`,
+    `${siteBase}/sitemap.xml`,
     `${siteBase}/assets/${mainBundle}`,
     `${siteBase}/assets/${docsBundle}`,
+    `${siteBase}/assets/${referenceBundle}`,
   ]) {
     if (httpHeadOk(url)) {
       logOk(`200 ${url}`)

@@ -16,8 +16,9 @@
     <div v-if="expanded" class="skills-container">
       <SkillItemCard
         v-for="skill in skills"
-        :key="skill.name"
+        :key="skill.name + skill.sourceType"
         :skill="skill"
+        @edit="$emit('edit', $event)"
       />
     </div>
   </div>
@@ -36,6 +37,7 @@ defineProps<{
 
 defineEmits<{
   toggle: []
+  edit: [skill: SkillInfo]
 }>()
 </script>
 

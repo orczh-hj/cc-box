@@ -43,6 +43,16 @@
         <img src="@/assets/icons/mcp.svg" alt="MCP" />
       </button>
 
+      <!-- Hooks -->
+      <button
+        class="icon-btn"
+        :class="{ active: activePanel === 'hooks' }"
+        @click="$emit('toggle', 'hooks')"
+        :title="t('titleHooks')"
+      >
+        <img src="@/assets/icons/hooks.svg" alt="Hooks" />
+      </button>
+
       <!-- Plugins -->
       <button
         class="icon-btn"

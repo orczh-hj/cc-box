@@ -81,7 +81,7 @@ ProviderEditPanel 的 `jsonContent` 持有当前展示内容：
 | `~/.claude/settings.json` | Claude Code 运行时配置（激活时写入） | 写入 |
 | `~/.cc-switch/cc-switch.db` | cc-switch SQLite 数据库（导入时读取） | 只读 |
 
-> Provider 页工具栏「打开用户配置」：桌面端经 Rust 命令 `open_claude_user_settings` 直接调用系统默认程序打开
+> Provider 页工具栏「打开用户配置」：桌面端经 Rust 命令 `open_claude_user_settings` 在文件管理器中打开配置所在目录并选中文件（文件不存在时退化为打开 `~/.claude` 目录）
 > 用户级 `settings.json`（尊重 `CLAUDE_CONFIG_DIR`）；浏览器/手机模式不显示该按钮。
 > 注意不能走 JS `@tauri-apps/plugin-shell` 的 `open`——它只允许 http(s)/mailto/tel，本地路径会被 scope 拒绝。
 
@@ -515,7 +515,7 @@ ProvidersSection.vue          # 主面板容器
 | `delete_provider` | id: string | void | 删除 Provider |
 | `update_provider_sort_order` | providerIds: string[] | void | 更新排序 |
 | `update_common_config` | enabled, settings | void | 只更新通用配置默认层（不改写 Provider） |
-| `open_claude_user_settings` | — | void | 桌面端用系统默认程序打开用户 settings.json（尊重 CLAUDE_CONFIG_DIR；远程不可调用） |
+| `open_claude_user_settings` | — | void | 桌面端在文件管理器中定位用户 settings.json（打开所在目录并选中；尊重 CLAUDE_CONFIG_DIR；远程不可调用） |
 | `check_cc_switch_db_exists` | — | bool | 检测 cc-switch 数据库 |
 | `import_from_cc_switch` | — | ImportResult | 从 cc-switch 导入 |
 

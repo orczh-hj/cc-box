@@ -2,63 +2,131 @@
 
 ## 它是什么
 
-Claude Code 是 Anthropic 开发的命令行编码工具，采用代理式（agentic）工作方式：接收自然语言指令后，自主读取代码、制定计划、调用工具执行、根据执行结果继续迭代，直到任务完成或需要用户决策。
+Claude Code 是 Anthropic 开发的命令行 AI 工具。虽然编码是它的强项，但凡是命令行能做的事它都能做：你说「修复这个失败的测试」，它会自己读代码、找原因、改掉、跑通；你说「把这周的会议记录整理成一页文档」「分析这份访问日志，找出响应最慢的接口」，它同样自己翻文件、跑命令、给你结果——而不是丢给你一段建议，由你来执行。
 
-它与代码补全类工具的区别在于执行者：补全工具建议代码片段、由人决定是否写入；Claude Code 直接执行操作——读写文件、运行 shell 命令、搜索代码库、调用外部系统，每个敏感操作经过权限确认。
+它的工作方式是代理式（agentic）的：接收自然语言指令后，自主读取文件、制定计划、调用工具执行、根据执行结果继续迭代，直到任务完成或需要你决策。它能直接执行的操作包括读写文件、运行 shell 命令、搜索代码库、查询数据、调用外部系统；每个敏感操作都会先经过你的确认。
 
 可用形态：终端 CLI、IDE 扩展、桌面应用、浏览器。CC-Box 中使用的是终端形态，行为与终端中完全一致。
 
+> 延伸：[Claude Code 概览](reference.html#/getting-started/overview)、[Claude Code 如何工作](reference.html#/getting-started/core-concepts/how-claude-code-works)
+
 ## 工作逻辑
 
-Claude Code 以项目为单位工作。在项目根目录启动会话后，整个执行过程围绕当前代码库展开。
+在项目目录运行 `claude` 启动会话后，Claude 能看到你的整个项目：所有文件、你能运行的任何命令、git 状态。所以你不必告诉它「先打开 src/auth/session.ts 再看第 120 行」——说「登录过期后会话没清理，查一下并修好」，它自己会找到相关文件；也不必先教它项目怎么构建——构建脚本就在那里，它读得到。
 
-**启动**：在项目目录运行 `claude`。自动加载该项目的 CLAUDE.md（约定与偏好）与 `.claude/` 目录下的配置（skills、agents、hooks、权限规则）及 `.mcp.json`（外部工具连接）。
+执行过程分三步：先收集上下文（读文件、搜索、跑命令了解现状），再动手（编辑文件、运行命令），然后验证（跑测试、检查输出）。不对就调整方案重试。你随时可以按 `Esc` 打断它改方向；也可以不打断，直接把更正发过去，它做完当前这步就会看到。
 
-**执行循环**：理解指令 → 检索相关代码（读文件、搜索、运行命令了解现状）→ 给出计划或直接执行（编辑文件、运行命令、提交 git）→ 检查执行结果 → 继续下一步或向用户汇报。一次指令可触发多轮工具调用；执行中出现问题时会读取报错、修改方案、重试。
+> 延伸：[Claude Code 如何工作](reference.html#/getting-started/core-concepts/how-claude-code-works)、[常见工作流](reference.html#/getting-started/use-claude-code/common-workflows)
 
-**权限控制**：工具调用受权限系统约束。默认模式下，写文件、运行命令等操作先请求批准；批准时可选「本次 / 总是」。规则持久化在 settings.json 的 `permissions` 字段（allow / ask / deny），可用 `/permissions` 管理。`Shift+Tab` 切换权限模式：默认（逐项询问）→ 自动接受编辑 → 计划模式（只读分析，先出方案再执行）。
+## 会话与上下文
 
-**上下文管理**：对话历史与读取的文件共同占用上下文窗口。接近上限时，`/compact` 将历史总结压缩后继续；`/clear` 开启全新对话；`/resume` 回到任意历史会话。无关会话用 `/clear` 分隔可以保持上下文干净。
+每个会话独立保存：对话记录在本地，关掉终端、重启电脑都不会丢，随时可以接着上次的进度继续。任务做完的会话用 `/clear` 结束，上下文从零开始，不被旧内容干扰。
+
+Claude 的记忆有上限：对话越长、读的文件越多，早期内容会被压缩成摘要，细节可能丢失。两个习惯可以避免踩坑——要它长期记住的规则写进 CLAUDE.md（每次会话都会完整加载）；拿不准时用 `/context` 看一眼当前什么占了空间。
+
+| 操作 | 命令 / 快捷键 |
+|------|---------------|
+| 接着上次继续 | `claude --continue` |
+| 挑一个历史会话恢复 | `claude --resume` / 会话内 `/resume` |
+| 按名称恢复 | `claude --resume <name>` |
+| 恢复关联某 PR 的会话 | `claude --from-pr <number>` |
+| 复制一份会话另走一条路（原会话保留） | `--fork-session` / `/branch` |
+| 立刻压缩上下文（可带焦点） | `/compact`、`/compact focus on the API changes` |
+| 结束当前任务、开新对话 | `/clear` |
+| 查看上下文占用 | `/context` |
+
+> 延伸：[管理会话](reference.html#/getting-started/use-claude-code/sessions)、[探索上下文窗口](reference.html#/getting-started/core-concepts/context-window)、[提示缓存](reference.html#/getting-started/core-concepts/prompt-caching)
+
+## 权限与安全
+
+改错了能退回：Claude 每次编辑文件前都会保存快照，输入框为空时连按两次 `Esc`，可以从列表里选一个时间点恢复代码和对话。这个回退不依赖 git，未提交的改动也能退。
+
+要不要每次都问你，由权限模式决定，`Shift+Tab` 切换：
+
+| 模式 | 行为 |
+|------|------|
+| Manual（`default`） | 每个写操作、每个命令都先问你 |
+| Accept edits | 文件编辑不再问，命令仍会问 |
+| Plan | 只读分析，先给出方案，你批准后才动手 |
+| Auto | 大多数操作直接执行，风险操作由后台分类器拦截 |
+| `dontAsk` | 只允许预先批准过的操作，其余直接拒绝（用于 CI） |
+| `bypassPermissions` | 全部放行（只应在隔离容器里用） |
+
+对常用命令可以一劳永逸：把 `npm test`、`git status` 这类放心命令加进 settings.json 的 `permissions.allow`，以后不再询问；`deny` 规则在任何模式下都生效。注意回退只覆盖文件改动——数据库、部署这类影响远端的操作退不回来，靠权限规则管住。
+
+> 延伸：[选择权限模式](reference.html#/configuration/permissions-and-sandboxing/permission-modes)、[权限](reference.html#/configuration/permissions-and-sandboxing/permissions)、[Bash 沙箱](reference.html#/configuration/permissions-and-sandboxing/sandboxing)、[检查点与回退](reference.html#/reference/checkpointing)
+
+## CLAUDE.md 与记忆
+
+同样的话不需要说第二遍：第二次纠正 Claude 的同一个错误时，把这句话写进 CLAUDE.md，以后每个会话它都自动知道。文件就是 Markdown，放在项目根目录、随仓库提交，团队所有人共享。
+
+放的位置决定对谁生效：
+
+| 位置 | 生效范围 |
+|------|----------|
+| `./CLAUDE.md` | 本项目，提交共享 |
+| `~/.claude/CLAUDE.md` | 你的所有项目 |
+| `CLAUDE.local.md` | 本项目、仅自己（不提交） |
+| `.claude/rules/*.md` | 按主题拆分，可限定只在处理某些文件时加载 |
+
+写什么：构建和测试的确切命令、代码约定、目录结构、已知的坑。保持每个文件 200 行以内——它每次会话都占上下文，越长遵守得越差。`/init` 让 Claude 分析代码库生成初稿，`/memory` 打开编辑。
+
+此外 Claude 会自己记笔记（自动记忆）：你纠正过它的偏好、它了解到的项目背景，存在本地并在后续会话自动带上，不需要你维护。仓库里没有 CLAUDE.md 但有 `AGENTS.md` 时，Claude 也可以直接读它。
+
+需要注意：CLAUDE.md 是提示不是保证。必须每次执行的事（比如禁止某个命令），用 hook 实现。
+
+> 延伸：[Claude 如何记住你的项目](reference.html#/getting-started/use-claude-code/memory)、[探索 .claude 目录](reference.html#/getting-started/core-concepts/claude-directory)
 
 ## 命令速查
 
-会话内输入 `/` 查看全部命令，`/` 加字母筛选。
+会话内输入 `/` 查看全部命令（含 skills 与插件提供的命令），`/` 加字母筛选。
 
 | 命令 | 用途 |
 |------|------|
 | `/init` | 分析项目并生成 CLAUDE.md 初稿 |
 | `/clear` | 开启新对话（旧对话保留在 /resume 列表） |
-| `/compact` | 总结当前对话，压缩释放上下文 |
-| `/resume` | 恢复历史会话（按 ID、名称或选择器） |
-| `/model` | 切换模型 |
-| `/memory` | 编辑 CLAUDE.md 记忆文件 |
-| `/permissions` | 管理工具权限规则 |
-| `/agents` | 管理 subagents 配置 |
+| `/compact` | 压缩上下文，可带焦点参数 |
+| `/resume` | 切换到历史会话 |
+| `/branch` | 分叉当前会话 |
+| `/model` | 切换模型（也可用 `Alt+P`） |
+| `/memory` | 编辑记忆文件、开关自动记忆 |
+| `/permissions` | 管理权限规则 |
+| `/agents` | 管理 subagents |
 | `/skills` | 列出可用 skills |
 | `/hooks` | 查看 hooks 配置 |
-| `/mcp` | 管理 MCP 服务器连接 |
-| `/plugin` | 管理插件 |
+| `/mcp` | 管理 MCP 连接与授权 |
+| `/plugin` | 管理插件与市场 |
+| `/sandbox` | 配置 Bash 沙箱 |
 | `/config` | 设置：主题、模型、输出样式等 |
-| `/context` | 可视化当前上下文占用 |
-| `/doctor` | 诊断安装与配置问题 |
-| `/export` | 导出当前对话为纯文本 |
+| `/context` | 可视化上下文占用 |
+| `/tasks` | 查看运行中的 shell 与子代理 |
+| `/doctor` | 诊断安装与配置；`prompt-audit` 审计指令文件 |
+| `/export` | 导出当前对话 |
 | `/usage` | 查看成本与用量 |
 | `/help` | 帮助与完整命令列表 |
+
+> 延伸：[命令参考](reference.html#/reference/commands)、[CLI 参考](reference.html#/reference/cli-reference)
 
 ## 快捷键速查
 
 | 快捷键 | 用途 |
 |--------|------|
-| `Esc` | 中断当前生成 |
-| `Esc Esc` | 回退对话 / 代码到之前的状态 |
+| `Esc` | 中断当前生成 / 关闭对话框 / 拒绝权限请求 |
+| `Esc Esc` | 输入有文字：清空草稿；输入为空：打开回退菜单 |
 | `Shift+Tab` | 循环切换权限模式 |
+| `Ctrl+C` | 中断运行；无运行时清空输入，再按退出 |
+| `Ctrl+D` | 退出会话（两次确认） |
 | `Ctrl+R` | 反向搜索命令历史 |
-| `Ctrl+O` | 展开详细转录，查看工具调用过程 |
-| `Ctrl+B` | 将当前命令转入后台运行 |
-| `Ctrl+T` | 显示 / 隐藏后台任务列表 |
-| `Ctrl+L` | 清屏重绘（对话保留） |
-| `Ctrl+G` | 在外部编辑器中编辑提示 |
-| `↑` / `↓` | 浏览命令历史 |
+| `Ctrl+O` | 展开查看每次工具调用的细节与时间戳 |
+| `Ctrl+B` | 当前命令转入后台运行 |
+| `Ctrl+T` | 显示 / 隐藏 Claude 的任务清单 |
+| `Ctrl+Enter` | 立即发送排队消息 |
+| `Ctrl+L` | 重绘屏幕（对话保留） |
+| `Ctrl+G` / `Ctrl+X Ctrl+E` | 在外部编辑器中编辑提示 |
+| `Ctrl+S` | 隐藏 / 恢复输入草稿 |
+| `Alt+P` | 切换模型（不清空提示） |
+| `Alt+T` | 开关扩展思考 |
+| `↑` / `↓` | 命令历史（多行输入时先移动光标） |
 
 输入前缀：
 
@@ -66,30 +134,12 @@ Claude Code 以项目为单位工作。在项目根目录启动会话后，整�
 |------|------|
 | `/` 开头 | 斜杠命令或 skill |
 | `!` 开头 | 直接执行 shell 命令，输出加入会话上下文 |
-| `@` | 文件路径自动补全与引用 |
+| `@` | 文件路径补全与引用 |
+| `?` 空输入 | 快捷键帮助面板 |
 
-## CLAUDE.md
+多行输入：`\` + Enter 通用；`Shift+Enter` / `Option+Enter` 取决于终端；`Ctrl+J` 无需配置。
 
-CLAUDE.md 是每次会话启动时自动加载的指令文件，用于向 Claude 说明项目约定，内容持续占用上下文。它是「建议」性质：Claude 读取并尽量遵循，但不保证——需要保证执行的行为应使用 hooks 或权限规则。
-
-三个层级：
-
-| 文件 | 位置 | 内容 | 提交 |
-|------|------|------|------|
-| 项目 CLAUDE.md | 项目根目录 | 项目约定：构建命令、代码风格、架构说明 | 提交，团队共享 |
-| 全局 CLAUDE.md | `~/.claude/CLAUDE.md` | 个人偏好：回复风格、提交信息格式 | 不提交 |
-| CLAUDE.local.md | 项目根目录 | 对此项目的私人偏好 | 不提交（加入 .gitignore） |
-
-加载规则：三者同时加载；指令冲突时项目级优先。全局文件进入所有项目的上下文，应保持精简。项目文件接近 200 行时，可拆分到 `.claude/rules/` 按主题组织（支持按文件路径条件加载）。
-
-建议写入的内容：
-
-- 常用命令——构建、测试、lint 的确切命令
-- 代码约定——命名、错误处理、测试要求
-- 架构要点——目录结构、模块边界、关键设计决策
-- 注意事项——已知的坑、不应改动的文件、环境差异
-
-生成与维护：新项目运行 `/init` 生成初稿（Claude 分析代码库后写入）；日常修改用 `/memory` 打开编辑。
+> 延伸：[交互模式参考](reference.html#/reference/interactive-mode)、[自定义快捷键](reference.html#/configuration/interface/keybindings)
 
 ## Skills
 
@@ -124,7 +174,9 @@ description: 本仓库的 API 设计约定，设计新接口时使用
 
 调用：`/<名称>` 手动调用；`/skills` 列出全部。
 
-## Subagents（子代理）
+> 延伸：[使用 skills 扩展 Claude](reference.html#/build-with-claude-code/skills/skills)
+
+## Subagents
 
 **是什么**：用 Markdown 文件定义的专门代理，拥有独立的上下文窗口，可限定工具集与模型。
 
@@ -157,6 +209,8 @@ model: sonnet
 frontmatter 字段：`name`、`description`（供委派判断）、`tools`（可选，逗号分隔的工具清单；缺省为全部）、`model`（可选）。`/agents` 打开交互管理界面。
 
 调用：由 Claude 依据 description 自主委派，或在指令中显式要求使用某个子代理。
+
+> 延伸：[创建自定义 subagents](reference.html#/build-with-claude-code/agents-and-parallel-work/sub-agents)、[并行运行代理](reference.html#/build-with-claude-code/agents-and-parallel-work/agents)、[用 worktrees 运行并行会话](reference.html#/build-with-claude-code/agents-and-parallel-work/worktrees)、[动态工作流](reference.html#/build-with-claude-code/agents-and-parallel-work/workflows)
 
 ## Hooks
 
@@ -200,6 +254,8 @@ frontmatter 字段：`name`、`description`（供委派判断）、`tools`（可
 
 结构：事件名 → 数组，每项含 `matcher`（工具名正则，可省略表示全部）与 `hooks`（命令列表）。命令通过 stdin 收到事件 JSON，可用退出码与 stdout JSON 控制行为（如 PreToolUse 返回阻止该次调用）。`/hooks` 查看当前全部配置。
 
+> 延伸：[使用 hooks 自动化操作](reference.html#/build-with-claude-code/automation/hooks-guide)、[Hooks 参考](reference.html#/reference/hooks)
+
 ## MCP
 
 **是什么**：Model Context Protocol，连接外部工具与数据源的开放协议。一个 MCP 服务器向 Claude 提供三类能力：工具（可调用的函数）、资源（可读取的数据）、提示（预定义的提示词）。
@@ -239,6 +295,8 @@ claude mcp add --transport http notion https://mcp.notion.com/mcp
 
 管理：`/mcp` 查看连接状态、工具列表与 OAuth 授权；`claude mcp list` / `claude mcp remove` 维护清单。stdio 服务器随会话启动，HTTP 服务器按需连接。
 
+> 延伸：[MCP 完整参考](reference.html#/build-with-claude-code/mcp/mcp)、[MCP 快速入门](reference.html#/build-with-claude-code/mcp/mcp-quickstart)
+
 ## Plugins
 
 **是什么**：把 skills、agents、hooks、MCP 服务器、命令等组件打包成的可安装单元，以 `.claude-plugin/plugin.json` 清单描述身份与版本。
@@ -258,3 +316,28 @@ claude mcp add --transport http notion https://mcp.notion.com/mcp
 ```
 
 插件目录结构：`.claude-plugin/plugin.json`（清单，必需）+ `skills/`、`agents/`、`hooks/`、`.mcp.json`（可选组件）。插件中的组件带命名空间（`插件名:skill名`），与本地配置不冲突。开发时可从本地路径加载调试；项目可通过 settings.json 的 `enabledPlugins` 控制默认启用集合。
+
+> 延伸：[插件概览](reference.html#/plugins/overview)、[安装插件](reference.html#/plugins/use-plugins/install)、[创建插件](reference.html#/plugins/create-plugins/create)、[插件市场](reference.html#/plugins/use-plugins/anthropic-marketplaces)
+
+## 扩展机制怎么选
+
+| 需求 | 用 |
+|------|-----|
+| Claude 每个会话都该知道的事实与规则 | CLAUDE.md |
+| 特定条件下的规则，根据文件名自动加载 | `.claude/rules/` |
+| 反复粘贴的流程、参考文档 | Skill |
+| 大量阅读的辅助任务、并行工作 | Subagent |
+| 必须每次发生的事件自动化 | Hook |
+| 连接外部系统、可重复的固定操作 | MCP |
+| 跨仓库复用整套配置 / 分发 | Plugin |
+| 固定 Claude 的角色与响应格式 | 输出样式（`/config`） |
+
+> 延伸：[扩展 Claude Code](reference.html#/getting-started/core-concepts/features-overview)
+
+## 更多主题
+
+速查之外的内容，按需查阅：
+
+- [设置文件](reference.html#/configuration/settings/settings)、[设置项参考](reference.html#/configuration/settings/settings-reference)
+- [用 Claude API 构建自己的代理（Agent SDK）](reference.html#/agent-sdk/overview)
+- [术语表](reference.html#/reference/glossary/glossary)

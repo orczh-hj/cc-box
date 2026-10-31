@@ -3,6 +3,10 @@
     <!-- Header -->
     <PanelHeader :title="t('plugins')" @close="$emit('close')">
       <template #actions>
+        <button class="action-btn" @click="marketVisible = true" :title="t('marketOpen')">
+          <img src="@/assets/icons/market.svg" :alt="t('marketOpen')" />
+        </button>
+        <DocsHelpButton anchor="Plugins" />
         <button class="action-btn" @click="handleRefresh" :title="t('refreshPlugins')">
           <img src="@/assets/icons/refresh.svg" :alt="t('refreshPlugins')" />
         </button>
@@ -27,6 +31,7 @@
       <div v-else-if="userPlugins.length === 0 && projectPlugins.length === 0" class="empty-state">
         <span class="empty-text">{{ t('noPluginsInstalled') }}</span>
         <span class="empty-hint">{{ t('installPluginsHint') }}</span>
+        <button class="market-cta" @click="marketVisible = true">{{ t('marketOpen') }}</button>
       </div>
 
       <!-- Plugins List -->
@@ -52,6 +57,8 @@
       />
     </div>
     </div>
+
+    <MarketBrowser v-model:visible="marketVisible" />
   </div>
 </template>
 
@@ -64,12 +71,16 @@ import { useAppStore } from '@/stores/app'
 const { t } = useI18n()
 import type { PluginInfo } from '@/types'
 import PluginGroup from './PluginGroup.vue'
+import MarketBrowser from './MarketBrowser.vue'
 import PanelHeader from '../sidebar/PanelHeader.vue'
+import DocsHelpButton from '../sidebar/DocsHelpButton.vue'
 
 const sidebarStore = useSidebarStore()
 const appStore = useAppStore()
 
 const error = ref<string | null>(null)
+
+const marketVisible = ref(false)
 
 // 使用 sidebar store 的数据（已预加载）
 const plugins = computed(() => sidebarStore.plugins)
@@ -169,6 +180,21 @@ onMounted(() => {
 .empty-hint {
   font-size: 12px;
   color: var(--text-tertiary);
+}
+
+.market-cta {
+  margin-top: 6px;
+  border: 1px solid var(--border-color);
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-size: 12px;
+  padding: 6px 14px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.market-cta:hover {
+  background: var(--hover-bg);
 }
 
 .plugins-list {

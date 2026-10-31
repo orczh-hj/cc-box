@@ -370,6 +370,50 @@ fn ParseSkill_BodyLongDesc_001() {
     assert!(!result.ends_with("..."));
 }
 
+// 折叠块标量 `>-`：多行合并为单行（用户实测 SKILL.md 曾把描述解析成 ">-"）
+#[test]
+fn ParseSkill_BlockScalarFold_001() {
+    let content = "---\nname: nature\ndescription: >-\n  Search academic papers across\n  multiple sources.\nmodel: sonnet\n---\nBody";
+    let dir = tempfile::tempdir().unwrap();
+    let file_path = dir.path().join("SKILL.md");
+    std::fs::write(&file_path, content).unwrap();
+    let result = parse_skill_description(&file_path).unwrap();
+    assert_eq!(result, "Search academic papers across multiple sources.");
+}
+
+// 字面量块标量 `|`：保留行间换行
+#[test]
+fn ParseSkill_BlockScalarLiteral_001() {
+    let content = "---\ndescription: |\n  第一行\n  第二行\n---\nBody";
+    let dir = tempfile::tempdir().unwrap();
+    let file_path = dir.path().join("SKILL.md");
+    std::fs::write(&file_path, content).unwrap();
+    let result = parse_skill_description(&file_path).unwrap();
+    assert_eq!(result, "第一行\n第二行");
+}
+
+// 单/双引号包裹的 descrption 去掉引号
+#[test]
+fn ParseSkill_QuotedDescription_001() {
+    let content = "---\ndescription: \"quoted value\"\n---\nBody";
+    let dir = tempfile::tempdir().unwrap();
+    let file_path = dir.path().join("SKILL.md");
+    std::fs::write(&file_path, content).unwrap();
+    let result = parse_skill_description(&file_path).unwrap();
+    assert_eq!(result, "quoted value");
+}
+
+// extract_md_description 同样支持块标量（plugin 里的 md 共用该解析）
+#[test]
+fn ExtractMd_BlockScalar_001() {
+    let content = "---\ndescription: >-\n  folded line one\n  folded line two\n---\nBody";
+    let dir = tempfile::tempdir().unwrap();
+    let file_path = dir.path().join("cmd.md");
+    std::fs::write(&file_path, content).unwrap();
+    let result = extract_md_description(&file_path).unwrap();
+    assert_eq!(result, "folded line one folded line two");
+}
+
 // ==================== parse_timestamp ====================
 
 // 有效 ISO 8601 时间戳解析为准确的毫秒值（2024-01-15T10:30:00Z = 1705314600000）

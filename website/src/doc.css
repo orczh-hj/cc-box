@@ -206,6 +206,121 @@
   color: var(--text-primary);
 }
 
+/* Mintlify tabs：多选一交互组件（enhanceTabs 折叠生成） */
+.md-body .md-tabs {
+  margin: 18px 0 24px;
+}
+
+.md-body .md-tabs-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
+.md-body .md-tabs-btn {
+  padding: 4px 14px;
+  font-size: 13px;
+  color: var(--text-secondary);
+  background: none;
+  border: 1px solid var(--border-light);
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.md-body .md-tabs-btn:hover {
+  color: var(--text-primary);
+  border-color: var(--text-tertiary);
+}
+
+.md-body .md-tabs-btn.active {
+  color: var(--accent-primary);
+  border-color: var(--accent-primary);
+  font-weight: 600;
+}
+
+.md-body .md-tabs-panel {
+  display: none;
+}
+
+.md-body .md-tabs-panel.active {
+  display: block;
+}
+
+.md-body .md-tabs .md-tabs {
+  margin: 12px 0 4px;
+}
+
+/* Mintlify accordion：可折叠段（原生 details） */
+.md-body details.md-accordion {
+  margin: 14px 0;
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-md, 8px);
+  overflow: hidden;
+}
+
+.md-body details.md-accordion summary {
+  padding: 10px 16px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+  background: var(--bg-secondary, rgba(0, 0, 0, 0.03));
+  cursor: pointer;
+  user-select: none;
+}
+
+.md-body details.md-accordion summary:hover {
+  color: var(--accent-primary);
+}
+
+.md-body .md-accordion-body {
+  padding: 4px 16px 10px;
+}
+
+/* Mintlify callouts：NOTE/TIP/WARNING/CAUTION/IMPORTANT 提示盒 */
+.md-body .md-callout {
+  margin: 14px 0 20px;
+  padding: 10px 16px;
+  border-left: 3px solid var(--callout-color, var(--accent-gold));
+  background: var(--callout-bg, rgba(212, 165, 116, 0.08));
+  border-radius: 0 var(--radius-md, 8px) var(--radius-md, 8px) 0;
+  font-size: 14px;
+  color: var(--text-secondary);
+}
+
+.md-body .md-callout-label {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: var(--callout-color, var(--accent-gold));
+  margin-bottom: 4px;
+}
+
+.md-body .md-callout-body > :last-child {
+  margin-bottom: 0;
+}
+
+.md-body .md-callout-note {
+  --callout-color: #8a7a4f;
+  --callout-bg: rgba(212, 165, 116, 0.08);
+}
+
+.md-body .md-callout-tip {
+  --callout-color: #4d7c4d;
+  --callout-bg: rgba(93, 156, 93, 0.08);
+}
+
+.md-body .md-callout-warning {
+  --callout-color: #b3742a;
+  --callout-bg: rgba(200, 130, 50, 0.09);
+}
+
+.md-body .md-callout-caution,
+.md-body .md-callout-important {
+  --callout-color: #b34545;
+  --callout-bg: rgba(190, 80, 80, 0.08);
+}
+
 .md-body blockquote {
   margin: 14px 0 20px;
   padding: 10px 18px;

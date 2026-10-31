@@ -4,19 +4,22 @@
     <div class="server-header" @click="handleClick">
       <span class="server-name">{{ server.displayName }}</span>
       <ToggleSwitch
-        v-if="server.sourceType === 'user'"
+        v-if="canToggle"
         :modelValue="!isDisabled"
         :title="isDisabled ? t('enable') : t('disable')"
         @update:modelValue="onToggle"
       />
+      <button v-if="canEdit" class="edit-btn" @click.stop="$emit('edit', server)" :title="t('edit')">
+        <img src="@/assets/icons/edit.svg" :alt="t('edit')" />
+      </button>
       <button class="expand-btn" :class="{ rotated: isExpanded }" :title="t('toggleDetails')">
         <img src="@/assets/icons/chevron.svg" alt="Toggle" />
       </button>
     </div>
 
-    <!-- Full Name (for plugin MCP) -->
+    <!-- 所属 plugin（server 名已在首行，此处只展示 plugin 名） -->
     <div v-if="server.sourceType === 'plugin'" class="server-full-name">
-      {{ server.name }}
+      {{ pluginName }}
     </div>
 
     <!-- 开关失败反馈（乐观更新已回滚；与 SkillItem 一致） -->
@@ -142,6 +145,10 @@ const props = defineProps<{
   server: McpServerInfo
 }>()
 
+defineEmits<{
+  edit: [server: McpServerInfo]
+}>()
+
 const appStore = useAppStore()
 const sidebarStore = useSidebarStore()
 
@@ -151,6 +158,20 @@ const error = ref<string | null>(null)
 const detail = ref<McpServerDetail | null>(null)
 
 const isDisabled = computed(() => props.server.enabled === false)
+// plugin 条目 name 为 "plugin:{plugin}:{server}"，第二行只展示 plugin 名
+const pluginName = computed(() => props.server.name.split(':')[1] ?? '')
+// 项目级开关后端已支持；local 也可切（sourceType 含 local 且有项目路径）
+const canToggle = computed(() =>
+  props.server.sourceType === 'user' ||
+  props.server.sourceType === 'project' ||
+  (props.server.sourceType === 'local' && !!appStore.cwd)
+)
+// plugin/managed 来源编辑只读意图由后端守住；前端仍允许打开查看
+const canEdit = computed(() =>
+  props.server.sourceType === 'user' ||
+  props.server.sourceType === 'project' ||
+  props.server.sourceType === 'local'
+)
 
 // 缓存注入（从父组件）
 const detailCache = inject<Map<string, McpServerDetail>>('mcpDetailCache', new Map())
@@ -161,7 +182,7 @@ let toggleErrorTimer: ReturnType<typeof setTimeout> | undefined
 
 async function onToggle(newValue: boolean) {
   try {
-    await sidebarStore.toggleMcpServerEnabled(props.server.name, newValue)
+    await sidebarStore.toggleMcpServerEnabled(props.server.name, newValue, props.server.sourceType)
     toggleError.value = ''
   } catch (err) {
     console.error('[McpItem] toggle failed:', err)
@@ -233,6 +254,30 @@ async function fetchDetail(force: boolean) {
 
 .mcp-item:hover {
   background: var(--hover-bg);
+}
+
+.edit-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: none;
+  background: transparent;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+
+.edit-btn img {
+  width: 13px;
+  height: 13px;
+}
+
+.edit-btn:hover {
+  color: var(--accent-color);
+  background: var(--bg-tertiary);
 }
 
 .mcp-toggle-error {

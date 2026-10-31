@@ -145,7 +145,7 @@ onMounted(() => {
   providersStore.loadProvidersConfig()
 })
 
-/** 用系统默认程序打开用户级 Claude 配置（~/.claude/settings.json 或 CLAUDE_CONFIG_DIR 下） */
+/** 在文件管理器中打开用户级 Claude 配置所在目录并选中文件（~/.claude/settings.json 或 CLAUDE_CONFIG_DIR 下） */
 async function handleOpenUserConfig() {
   if (openingUserConfig.value) return
   openingUserConfig.value = true

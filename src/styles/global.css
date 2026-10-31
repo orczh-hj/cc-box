@@ -306,3 +306,200 @@ button:disabled, input:disabled {
   /* 触屏目标最小 44px 交叠区（按钮类组件按需覆盖） */
   button { -webkit-tap-highlight-color: transparent; }
 }
+/* ============================================
+ * 扩展编辑器（EditorModal 内的表单通用样式，非 scoped 供四个编辑器共用）
+ * ============================================ */
+.editor-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 14px;
+}
+
+.editor-field-row {
+  display: flex;
+  gap: 12px;
+}
+
+.editor-field-row .editor-field {
+  flex: 1;
+  margin-bottom: 14px;
+}
+
+.editor-label {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.editor-label .editor-req {
+  color: var(--danger-color, #e5484d);
+  margin-left: 2px;
+}
+
+.editor-hint {
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
+
+.editor-input,
+.editor-select,
+.editor-textarea {
+  border: 1px solid var(--border-color);
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  border-radius: 8px;
+  font-size: 13px;
+  padding: 8px 10px;
+  outline: none;
+  transition: border-color 0.15s ease;
+  font-family: inherit;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.editor-textarea {
+  font-family: var(--font-mono);
+  line-height: 1.6;
+  resize: vertical;
+  min-height: 120px;
+}
+
+.editor-input:focus,
+.editor-select:focus,
+.editor-textarea:focus {
+  border-color: var(--accent-color);
+}
+
+.editor-input:disabled,
+.editor-select:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+  background: var(--bg-tertiary);
+}
+
+.editor-error {
+  font-size: 12px;
+  color: var(--danger-color, #e5484d);
+  margin-bottom: 12px;
+  overflow-wrap: break-word;
+  word-break: break-word;
+}
+
+/* 键值对行（环境变量 / headers） */
+.editor-kv-row {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 8px;
+  align-items: center;
+}
+
+.editor-kv-row .editor-input {
+  flex: 1;
+  min-width: 0;
+}
+
+.editor-kv-row .editor-kv-remove {
+  border: none;
+  background: transparent;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  font-size: 16px;
+  padding: 4px 6px;
+  border-radius: 6px;
+  flex-shrink: 0;
+  line-height: 1;
+}
+
+.editor-kv-row .editor-kv-remove:hover {
+  color: var(--danger-color, #e5484d);
+  background: var(--hover-bg);
+}
+
+.editor-kv-add {
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 12px;
+  cursor: pointer;
+  padding: 4px 0;
+}
+
+.editor-kv-add:hover {
+  color: var(--text-primary);
+}
+
+/* 路径/只读信息行 */
+.editor-path {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-tertiary);
+  overflow-wrap: break-word;
+  word-break: break-all;
+}
+
+/* 弹窗按钮体系（必须非 scoped：slot 内容与 MarketBrowser 等独立组件都要用） */
+.editor-btn {
+  border: 1px solid var(--border-color);
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-size: 13px;
+  padding: 7px 16px;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.editor-btn:hover:not(:disabled) {
+  background: var(--hover-bg);
+}
+
+.editor-btn.primary {
+  background: var(--accent-color, #1a1a1a);
+  border-color: var(--accent-color, #1a1a1a);
+  color: #fff;
+}
+
+.editor-btn.primary:hover:not(:disabled) {
+  opacity: 0.9;
+}
+
+/* 次级动作（打开目录/文件等辅助入口）：弱化为文字按钮，与主操作区分层级 */
+.editor-btn.ghost {
+  border-color: transparent;
+  background: transparent;
+  color: var(--text-secondary);
+}
+
+.editor-btn.ghost:hover:not(:disabled) {
+  background: var(--hover-bg);
+  color: var(--text-primary);
+}
+
+.editor-btn.danger {
+  color: var(--danger-color, #e5484d);
+  border-color: var(--danger-color, #e5484d);
+}
+
+.editor-btn.danger:hover:not(:disabled) {
+  background: rgba(229, 72, 77, 0.08);
+}
+
+.editor-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* 触屏（远程手机端）：编辑器按钮与输入放大到可稳定点按的尺寸 */
+@media (max-width: 768px) and (hover: none) {
+  .editor-btn {
+    min-height: 38px;
+    padding: 9px 16px;
+  }
+
+  .editor-input,
+  .editor-select,
+  .editor-textarea {
+    padding: 10px 12px;
+    font-size: 14px;
+  }
+}

@@ -164,6 +164,9 @@ fn RemoteState_HookStateMachine_未注册的pty事件被忽略() {
 
 #[tokio::test]
 async fn RemoteState_Subscribe_订阅后收到输出与状态推送() {
+    // remove_pty 的本地 SessionExit 广播被 !has_uplink() 守卫：与设置全局
+    // UPLINK 的测试互斥，否则并行时最后一帧被静默吞掉
+    let _uplink_lock = crate::tests::UPLINK_TEST_LOCK.lock();
     let state = RemoteState::new();
     state.register_pty("p5", "claude", "/tmp");
     let (conn, mut rx) = setup_conn(&state);
@@ -966,6 +969,7 @@ async fn RemoteState_StateChanged_广播半链与revision单调递增() {
 #[tokio::test]
 async fn RemoteState_StateChanged_成员模式跳过本地手机广播() {
     let _hook_lock = crate::tests::HOOK_TEST_LOCK.lock();
+    let _uplink_lock = crate::tests::UPLINK_TEST_LOCK.lock();
     let (up_tx, mut up_rx) = tokio::sync::mpsc::unbounded_channel();
     crate::remote_state::set_uplink(Some(up_tx));
 

@@ -43,6 +43,7 @@ pub const EXCLUDED: &[&str] = &[
     "pty_claim",
     // 桌面级（打开本地文件/文件夹）
     "open_in_file_manager",
+    "reveal_in_file_manager",
     "open_claude_user_settings",
     "get_app_path",
     // 桌面专属：macOS 原生 Edit 菜单随焦点切换（远程模式无本地菜单）
@@ -71,6 +72,7 @@ pub const EXCLUDED: &[&str] = &[
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StateSection {
     Skills,
+    Hooks,
     Agents,
     Mcp,
     Plugins,
@@ -83,6 +85,7 @@ impl StateSection {
     pub fn as_str(&self) -> &'static str {
         match self {
             StateSection::Skills => "skills",
+            StateSection::Hooks => "hooks",
             StateSection::Agents => "agents",
             StateSection::Mcp => "mcp",
             StateSection::Plugins => "plugins",
@@ -198,11 +201,38 @@ registry! {
     "get_all_skills" => read() => |project_path: String| crate::commands::get_all_skills,
     "get_all_mcp_servers" => read() => |project_path: String| crate::commands::get_all_mcp_servers,
     "get_all_plugins" => read() => |project_path: String| crate::commands::get_all_plugins,
-    "set_skill_enabled" => write(Skills) => |name: String, enabled: bool| crate::commands::set_skill_enabled,
-    "set_agent_enabled" => write(Agents) => |name: String, enabled: bool| crate::commands::set_agent_enabled,
-    "set_mcp_server_enabled" => write(Mcp) => |name: String, enabled: bool| crate::commands::set_mcp_server_enabled,
+    // skill/agent/mcp 开关支持项目级（sourceType/scope 缺省 = user，旧调用兼容）
+    "set_skill_enabled" => write(Skills) => |name: String, enabled: bool, source_type: Option<String>, project_path: Option<String>| crate::commands::set_skill_enabled,
+    "set_agent_enabled" => write(Agents) => |name: String, enabled: bool, source_type: Option<String>, project_path: Option<String>| crate::commands::set_agent_enabled,
+    "set_mcp_server_enabled" => write(Mcp) => |name: String, enabled: bool, scope: Option<String>, project_path: Option<String>| crate::commands::set_mcp_server_enabled,
     "set_plugin_enabled" => write(Plugins) => |plugin_id: String, enabled: bool| crate::commands::set_plugin_enabled,
+    // Plugin 市场：注册事实源是 Claude 的 known_marketplaces.json，这里只做
+    // CLI 包装（添加/移除/刷新市场与插件安装管理）；安装类耗时长，远程调用
+    // 需放宽 timeoutMs
+    "get_plugin_marketplaces" => read() => | | crate::commands::get_plugin_marketplaces,
+    "get_market_presets" => read() => | | crate::commands::get_market_presets,
+    "add_plugin_marketplace" => write(Plugins) => |source: String| crate::commands::add_plugin_marketplace,
+    "remove_plugin_marketplace" => write(Plugins) => |name: String, also_unregister: Option<bool>| crate::commands::remove_plugin_marketplace,
+    "refresh_plugin_marketplace" => write(Plugins) => |name: String| crate::commands::refresh_plugin_marketplace,
+    "register_plugin_marketplace" => write(Plugins) => |name: String| crate::commands::register_plugin_marketplace,
+    "install_plugin" => write(Plugins) => |plugin_ref: String, scope: String, project_path: Option<String>, market_source: Option<String>| crate::commands::install_plugin,
+    "uninstall_plugin" => write(Plugins) => |plugin_ref: String, scope: String, project_path: Option<String>| crate::commands::uninstall_plugin,
+    "update_plugin" => write(Plugins) => |plugin_ref: String, scope: String, project_path: Option<String>| crate::commands::update_plugin,
     "get_mcp_server_detail" => read() => |project_path: String, server_name: String, force_refresh: bool| crate::commands::get_mcp_server_detail,
+
+    // ==== 扩展编辑（MCP / Skill / Agent / Hook 表单化新增与编辑）====
+    "save_mcp_server" => write(Mcp) => |request: crate::store_edit::SaveMcpRequest| crate::commands::save_mcp_server,
+    "delete_mcp_server" => write(Mcp) => |scope: String, name: String, project_path: Option<String>| crate::commands::delete_mcp_server,
+    "save_skill" => write(Skills) => |request: crate::store_edit::SaveSkillRequest| crate::commands::save_skill,
+    "delete_skill" => write(Skills) => |scope: String, name: String, project_path: Option<String>| crate::commands::delete_skill,
+    "get_skill_source" => read() => |scope: String, name: String, project_path: Option<String>| crate::commands::get_skill_source,
+    "save_agent" => write(Agents) => |request: crate::store_edit::SaveAgentRequest| crate::commands::save_agent,
+    "delete_agent" => write(Agents) => |scope: String, name: String, project_path: Option<String>| crate::commands::delete_agent,
+    "get_agent_source" => read() => |scope: String, name: String, project_path: Option<String>| crate::commands::get_agent_source,
+    "get_hook_list" => read() => |project_path: String| crate::commands::get_hook_list,
+    "save_hook" => write(Hooks) => |request: crate::store_edit::SaveHookRequest| crate::commands::save_hook,
+    "delete_hook" => write(Hooks) => |scope: String, event: String, key: String, project_path: Option<String>| crate::commands::delete_hook,
+    "set_hook_enabled" => write(Hooks) => |scope: String, event: String, key: String, enabled: bool, project_path: Option<String>| crate::commands::set_hook_enabled,
 
     // ==== Provider ====
     "get_providers_config" => read() => | | crate::commands::get_providers_config,

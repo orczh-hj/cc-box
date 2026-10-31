@@ -41,6 +41,12 @@
         @close="$emit('close')"
       />
 
+      <!-- Hooks 面板 -->
+      <HooksPanel
+        v-show="activePanel === 'hooks'"
+        @close="$emit('close')"
+      />
+
       <!-- 文件面板（浏览器远程模式专属；桌面模式 activePanel 不会切到 'files'） -->
       <FilesPanel
         v-show="activePanel === 'files'"
@@ -57,6 +63,7 @@ import SkillsPanel from '../skills/SkillsPanel.vue'
 import AgentsPanel from '../agents/AgentsPanel.vue'
 import McpPanel from '../mcp/McpPanel.vue'
 import PluginsPanel from '../plugins/PluginsPanel.vue'
+import HooksPanel from '../hooks/HooksPanel.vue'
 import FilesPanel from '../files/FilesPanel.vue'
 
 defineProps<{

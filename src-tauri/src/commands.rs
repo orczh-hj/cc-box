@@ -724,28 +724,63 @@ pub async fn get_all_plugins(project_path: String) -> Result<Vec<PluginInfo>, St
     crate::store::get_all_plugins(&project_path).map_err(|e| e.to_string())
 }
 
-/// 切换用户级 Skill 启用状态（移动目录到 ~/.cc-box/disabled/skills/；
-/// state-changed 广播：skills section，全端权威刷新——#[cc_command] 自动）
+/// 切换 Skill 启用状态（user：移动目录到 ~/.cc-box/disabled/skills/；
+/// project：active=<proj>/.claude/skills，disabled 按 project_key 隔离。
+/// sourceType 缺省 = user（旧前端调用兼容）；
+/// state-changed 广播：skills section——#[cc_command] 自动）
 #[cc_command(write = "skills")]
 #[tauri::command]
-pub async fn set_skill_enabled(name: String, enabled: bool) -> Result<(), String> {
-    crate::store::set_skill_enabled(&name, enabled).map_err(|e| e.to_string())
+pub async fn set_skill_enabled(
+    name: String,
+    enabled: bool,
+    source_type: Option<String>,
+    project_path: Option<String>,
+) -> Result<(), String> {
+    crate::store_edit::set_skill_enabled_scoped(
+        source_type.as_deref().unwrap_or("user"),
+        &name,
+        enabled,
+        project_path.as_deref(),
+    )
+    .map_err(|e| e.to_string())
 }
 
-/// 切换用户级 Agent 启用状态（移动文件到 ~/.cc-box/disabled/agents/；
-/// state-changed 广播：agents section，#[cc_command] 自动）
+/// 切换 Agent 启用状态（作用域语义同 set_skill_enabled）
 #[cc_command(write = "agents")]
 #[tauri::command]
-pub async fn set_agent_enabled(name: String, enabled: bool) -> Result<(), String> {
-    crate::store::set_agent_enabled(&name, enabled).map_err(|e| e.to_string())
+pub async fn set_agent_enabled(
+    name: String,
+    enabled: bool,
+    source_type: Option<String>,
+    project_path: Option<String>,
+) -> Result<(), String> {
+    crate::store_edit::set_agent_enabled_scoped(
+        source_type.as_deref().unwrap_or("user"),
+        &name,
+        enabled,
+        project_path.as_deref(),
+    )
+    .map_err(|e| e.to_string())
 }
 
-/// 切换用户级 MCP Server 启用状态（剪切 ~/.claude.json::mcpServers.<name> 条目；
-/// state-changed 广播：mcp section，#[cc_command] 自动）
+/// 切换 MCP Server 启用状态（user：剪切 ~/.claude.json::mcpServers；
+/// project：剪切 <proj>/.mcp.json；local：剪切 ~/.claude.json::projects[cwd]。
+/// scope 缺省 = user（旧前端调用兼容））
 #[cc_command(write = "mcp")]
 #[tauri::command]
-pub async fn set_mcp_server_enabled(name: String, enabled: bool) -> Result<(), String> {
-    crate::store::set_mcp_server_enabled(&name, enabled).map_err(|e| e.to_string())
+pub async fn set_mcp_server_enabled(
+    name: String,
+    enabled: bool,
+    scope: Option<String>,
+    project_path: Option<String>,
+) -> Result<(), String> {
+    crate::store_edit::set_mcp_server_enabled_scoped(
+        scope.as_deref().unwrap_or("user"),
+        &name,
+        enabled,
+        project_path.as_deref(),
+    )
+    .map_err(|e| e.to_string())
 }
 
 /// 切换 Plugin 启用状态（调用 claude plugin enable/disable；
@@ -755,6 +790,270 @@ pub async fn set_mcp_server_enabled(name: String, enabled: bool) -> Result<(), S
 #[tauri::command]
 pub async fn set_plugin_enabled(plugin_id: String, enabled: bool) -> Result<(), String> {
     crate::store::set_plugin_enabled(&plugin_id, enabled).map_err(|e| e.to_string())
+}
+
+// ---------- Plugin 市场（浏览 + 安装管理）----------
+//
+// 均为可能阻塞数十秒的 CLI 调用，统一放 spawn_blocking，避免卡死 tokio worker。
+
+/// 阻塞函数投递到 blocking 线程池并展平双层 Result
+async fn blocking<T, F>(f: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce() -> anyhow::Result<T> + Send + 'static,
+{
+    tokio::task::spawn_blocking(f)
+        .await
+        .map_err(|e| format!("task join error: {}", e))?
+        .map_err(|e| e.to_string())
+}
+
+/// 读取 Claude 已注册市场与各市场插件条目（含 installed/enabled 徽标）
+#[tauri::command]
+pub async fn get_plugin_marketplaces() -> Result<Vec<crate::store::MarketplaceInfo>, String> {
+    blocking(|| crate::store::get_plugin_marketplaces()).await
+}
+
+/// 推荐市场（OSS data/plugin-markets.json 热更新；离线回退磁盘缓存）
+#[tauri::command]
+pub async fn get_market_presets() -> Result<Vec<crate::store::MarketPreset>, String> {
+    blocking(|| crate::store::get_market_presets()).await
+}
+
+/// 添加市场：只入 CC-Box 浏览列表（不注册 Claude）；返回清单里的市场名
+#[cc_command(write = "plugins")]
+#[tauri::command]
+pub async fn add_plugin_marketplace(source: String) -> Result<String, String> {
+    log::info!("[PluginMarket] add marketplace to browse list: {}", source);
+    blocking(move || crate::store::add_plugin_marketplace(&source)).await
+}
+
+/// 移除市场：从 CC-Box 列表删除；also_unregister 时同时从 Claude 注销
+#[cc_command(write = "plugins")]
+#[tauri::command]
+pub async fn remove_plugin_marketplace(
+    name: String,
+    also_unregister: Option<bool>,
+) -> Result<(), String> {
+    log::info!(
+        "[PluginMarket] remove marketplace: {} (also_unregister={:?})",
+        name,
+        also_unregister
+    );
+    blocking(move || {
+        crate::store::remove_plugin_marketplace(&name, also_unregister.unwrap_or(false))
+    })
+    .await
+}
+
+/// 刷新市场：已注册 → Claude update；未注册 → 重拉 CC-Box 浏览缓存
+#[cc_command(write = "plugins")]
+#[tauri::command]
+pub async fn refresh_plugin_marketplace(name: String) -> Result<(), String> {
+    log::info!("[PluginMarket] refresh marketplace: {}", name);
+    blocking(move || crate::store::refresh_plugin_marketplace(&name)).await
+}
+
+/// 注册该市场（显式注册到 Claude；「卸载市场」的逆操作）
+#[cc_command(write = "plugins")]
+#[tauri::command]
+pub async fn register_plugin_marketplace(name: String) -> Result<(), String> {
+    log::info!("[PluginMarket] register marketplace: {}", name);
+    blocking(move || crate::store::register_plugin_marketplace(&name)).await
+}
+
+/// 安装插件（plugin_ref = name@marketplace；scope = user|project|local，
+/// project 必须带 project_path 作为 CLI cwd；市场未注册时按 market_source 自动注册）
+#[cc_command(write = "plugins")]
+#[tauri::command]
+pub async fn install_plugin(
+    plugin_ref: String,
+    scope: String,
+    project_path: Option<String>,
+    market_source: Option<String>,
+) -> Result<(), String> {
+    log::info!(
+        "[PluginMarket] install {}: scope={} project={:?} market_source={:?}",
+        plugin_ref,
+        scope,
+        project_path,
+        market_source
+    );
+    blocking(move || {
+        crate::store::install_plugin(
+            &plugin_ref,
+            &scope,
+            project_path.as_deref(),
+            market_source.as_deref(),
+        )
+    })
+    .await
+}
+
+#[cc_command(write = "plugins")]
+#[tauri::command]
+pub async fn uninstall_plugin(
+    plugin_ref: String,
+    scope: String,
+    project_path: Option<String>,
+) -> Result<(), String> {
+    log::info!(
+        "[PluginMarket] uninstall {}: scope={} project={:?}",
+        plugin_ref,
+        scope,
+        project_path
+    );
+    blocking(move || {
+        crate::store::uninstall_plugin(&plugin_ref, &scope, project_path.as_deref())
+    })
+    .await
+}
+
+#[cc_command(write = "plugins")]
+#[tauri::command]
+pub async fn update_plugin(
+    plugin_ref: String,
+    scope: String,
+    project_path: Option<String>,
+) -> Result<(), String> {
+    log::info!(
+        "[PluginMarket] update {}: scope={} project={:?}",
+        plugin_ref,
+        scope,
+        project_path
+    );
+    blocking(move || crate::store::update_plugin(&plugin_ref, &scope, project_path.as_deref())).await
+}
+
+// ==================== 扩展编辑（MCP / Skill / Agent / Hook 表单化新增与编辑） ====================
+
+/// 新增/更新 MCP server（user/project/local 三作用域，覆盖写语义）
+#[cc_command(write = "mcp")]
+#[tauri::command]
+pub async fn save_mcp_server(request: crate::store_edit::SaveMcpRequest) -> Result<(), String> {
+    crate::store_edit::save_mcp_server(request).map_err(|e| e.to_string())
+}
+
+/// 删除 MCP server（备份到 ~/.cc-box/disabled/mcp/，可逆）
+#[cc_command(write = "mcp")]
+#[tauri::command]
+pub async fn delete_mcp_server(
+    scope: String,
+    name: String,
+    project_path: Option<String>,
+) -> Result<(), String> {
+    crate::store_edit::delete_mcp_server(&scope, &name, project_path.as_deref())
+        .map_err(|e| e.to_string())
+}
+
+/// 新增/更新 Skill（表单模式拼 frontmatter；源码模式存全文并校验），返回文件路径
+#[cc_command(write = "skills")]
+#[tauri::command]
+pub async fn save_skill(request: crate::store_edit::SaveSkillRequest) -> Result<String, String> {
+    crate::store_edit::save_skill(request).map_err(|e| e.to_string())
+}
+
+/// 彻底删除 Skill（active 与 disabled 备份一并删除，前端二次确认）
+#[cc_command(write = "skills")]
+#[tauri::command]
+pub async fn delete_skill(
+    scope: String,
+    name: String,
+    project_path: Option<String>,
+) -> Result<(), String> {
+    crate::store_edit::delete_skill(&scope, &name, project_path.as_deref()).map_err(|e| e.to_string())
+}
+
+/// 读取 SKILL.md 全文（编辑器源码模式），返回 (source, path)
+#[tauri::command]
+pub async fn get_skill_source(
+    scope: String,
+    name: String,
+    project_path: Option<String>,
+) -> Result<(String, String), String> {
+    crate::store_edit::get_skill_source(&scope, &name, project_path.as_deref())
+        .map_err(|e| e.to_string())
+}
+
+/// 新增/更新 Agent（单 md 文件），返回文件路径
+#[cc_command(write = "agents")]
+#[tauri::command]
+pub async fn save_agent(request: crate::store_edit::SaveAgentRequest) -> Result<String, String> {
+    crate::store_edit::save_agent(request).map_err(|e| e.to_string())
+}
+
+/// 彻底删除 Agent
+#[cc_command(write = "agents")]
+#[tauri::command]
+pub async fn delete_agent(
+    scope: String,
+    name: String,
+    project_path: Option<String>,
+) -> Result<(), String> {
+    crate::store_edit::delete_agent(&scope, &name, project_path.as_deref()).map_err(|e| e.to_string())
+}
+
+/// 读取 Agent md 全文，返回 (source, path)
+#[tauri::command]
+pub async fn get_agent_source(
+    scope: String,
+    name: String,
+    project_path: Option<String>,
+) -> Result<(String, String), String> {
+    crate::store_edit::get_agent_source(&scope, &name, project_path.as_deref())
+        .map_err(|e| e.to_string())
+}
+
+/// Hook 面板列表（user/project/local 三来源 + disabled 备份合并，含 enabled 标记）
+#[tauri::command]
+pub async fn get_hook_list(project_path: String) -> Result<Vec<crate::store_edit::HookListItem>, String> {
+    crate::store_edit::get_hook_list(&project_path).map_err(|e| e.to_string())
+}
+
+/// 新增/替换 hook 条目（settings.json hooks 合并，原子写 + 跨进程锁）
+#[cc_command(write = "hooks")]
+#[tauri::command]
+pub async fn save_hook(request: crate::store_edit::SaveHookRequest) -> Result<(), String> {
+    crate::store_edit::save_hook(request).map_err(|e| e.to_string())
+}
+
+/// 删除 hook 条目（备份到 ~/.cc-box/disabled/hooks/，可逆；按列表下发的条目键定位）
+#[cc_command(write = "hooks")]
+#[tauri::command]
+pub async fn delete_hook(
+    scope: String,
+    event: String,
+    key: String,
+    project_path: Option<String>,
+) -> Result<(), String> {
+    crate::store_edit::delete_hook(&scope, &event, &key, project_path.as_deref())
+        .map_err(|e| e.to_string())
+}
+
+/// hook 启停（禁用 = 摘出存 disabled；启用 = 找回写回）
+#[cc_command(write = "hooks")]
+#[tauri::command]
+pub async fn set_hook_enabled(
+    scope: String,
+    event: String,
+    key: String,
+    enabled: bool,
+    project_path: Option<String>,
+) -> Result<(), String> {
+    crate::store_edit::set_hook_enabled(
+        &scope,
+        &event,
+        &key,
+        enabled,
+        project_path.as_deref(),
+    )
+    .map_err(|e| e.to_string())
+}
+
+/// 在系统文件管理器中打开所在目录并选中文件（agent md 等）。桌面专属（EXCLUDED，不经远程调用）
+#[tauri::command]
+pub async fn reveal_in_file_manager(path: String) -> Result<(), String> {
+    crate::store_edit::reveal_in_file_manager(&path).map_err(|e| e.to_string())
 }
 
 /// 获取 MCP Server 详情（通过 MCP 协议）
@@ -928,18 +1227,24 @@ pub async fn get_providers_config() -> Result<ProvidersConfig, String> {
     crate::providers::get_providers_config().map_err(|e| e.to_string())
 }
 
-/// 打开用户级 Claude settings.json（「打开用户配置」按钮，桌面专属）。
+/// 「打开用户配置」（桌面专属）：在文件管理器中定位用户级 settings.json
+/// （打开所在目录并选中文件）；文件尚不存在时退化为打开 `~/.claude` 目录。
 ///
-/// 必须走 Rust 侧 `Shell::open`：JS 侧 `@tauri-apps/plugin-shell` 的 open
-/// 受 scope 正则限制，只允许 http(s)/mailto/tel，本地路径会被拒绝。
+/// 必须走 Rust 侧：JS 侧 `@tauri-apps/plugin-shell` 的 open 受 scope 正则限制，
+/// 只允许 http(s)/mailto/tel，本地路径会被拒绝。
 #[tauri::command]
-pub async fn open_claude_user_settings(app: tauri::AppHandle) -> Result<(), String> {
-    use tauri_plugin_shell::ShellExt;
-
+pub async fn open_claude_user_settings() -> Result<(), String> {
     let path = crate::providers::claude_user_settings_path().map_err(|e| e.to_string())?;
-    app.shell()
-        .open(path, None)
-        .map_err(|e| format!("Failed to open user settings: {}", e))
+    let p = std::path::Path::new(&path);
+    if p.exists() {
+        return crate::platform::reveal_in_file_manager(&path);
+    }
+    if let Some(dir) = p.parent() {
+        if dir.exists() {
+            return crate::platform::open_in_file_manager(&dir.to_string_lossy());
+        }
+    }
+    Err(format!("Settings file not found: {}", path))
 }
 
 /// 保存 Provider 配置（state-changed 广播：providers section，#[cc_command] 自动）

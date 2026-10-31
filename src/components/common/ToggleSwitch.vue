@@ -76,4 +76,22 @@ function onClick() {
 .toggle-switch.on .toggle-knob {
   transform: translateX(12px);
 }
+
+/* 触屏：放大点击目标（远程手机端高频操作） */
+@media (max-width: 768px) and (hover: none) {
+  .toggle-switch {
+    width: 38px;
+    height: 22px;
+    border-radius: 11px;
+  }
+
+  .toggle-knob {
+    width: 18px;
+    height: 18px;
+  }
+
+  .toggle-switch.on .toggle-knob {
+    transform: translateX(16px);
+  }
+}
 </style>

@@ -28,8 +28,35 @@ defineProps<{ groups: Array<{ title: string; items: TocItem[] }> }>()
   position: sticky;
   top: 84px;
   align-self: start;
+  max-height: calc(100vh - 104px);
+  overflow-y: auto;
   font-size: 13.5px;
   line-height: 2;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-light) transparent;
+  padding-right: 4px;
+}
+
+/* 纤细滚动条：默认近乎隐形，悬停才显色（与参考文档页侧栏一致） */
+.toc::-webkit-scrollbar {
+  width: 4px;
+}
+
+.toc::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.toc::-webkit-scrollbar-thumb {
+  background: transparent;
+  border-radius: 2px;
+}
+
+.toc:hover::-webkit-scrollbar-thumb {
+  background: var(--border-light);
+}
+
+.toc:hover::-webkit-scrollbar-thumb:hover {
+  background: var(--text-tertiary);
 }
 
 .toc-group {

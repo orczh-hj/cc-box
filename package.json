@@ -41,11 +41,13 @@
     "test:watch": "vitest",
     "dev:relay": "node scripts/dev-relay.mjs",
     "sync:presets": "tsx scripts/sync-provider-presets.mts",
+    "sync:cc-docs": "node scripts/update-cc-docs.mjs",
     "deploy:relay": "node scripts/deploy-relay.mjs",
     "deploy:web": "node scripts/deploy-web.mjs",
     "dev:site": "vite --config website/vite.config.mts",
     "build:site": "vite build --config website/vite.config.mts",
-    "deploy:site": "node scripts/deploy-site.mjs"
+    "deploy:site": "node scripts/deploy-site.mjs",
+    "deploy:data": "node scripts/deploy-data.mjs"
   },
   "dependencies": {
     "@codemirror/lang-json": "^6.0.2",

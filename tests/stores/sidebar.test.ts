@@ -10,16 +10,19 @@ const mockSetSkillEnabled = vi.fn()
 const mockSetAgentEnabled = vi.fn()
 const mockSetMcpServerEnabled = vi.fn()
 const mockSetPluginEnabled = vi.fn()
+const mockSetHookEnabled = vi.fn()
 
 vi.mock('@/api/tauri', () => ({
   getAllSkills: (...args: unknown[]) => mockGetAllSkills(...args),
   getAllAgents: (...args: unknown[]) => mockGetAllAgents(...args),
   getAllMcpServers: (...args: unknown[]) => mockGetAllMcpServers(...args),
   getAllPlugins: (...args: unknown[]) => mockGetAllPlugins(...args),
+  getHookList: vi.fn(() => Promise.resolve([])),
   setSkillEnabled: (...args: unknown[]) => mockSetSkillEnabled(...args),
   setAgentEnabled: (...args: unknown[]) => mockSetAgentEnabled(...args),
   setMcpServerEnabled: (...args: unknown[]) => mockSetMcpServerEnabled(...args),
   setPluginEnabled: (...args: unknown[]) => mockSetPluginEnabled(...args),
+  setHookEnabled: (...args: unknown[]) => mockSetHookEnabled(...args),
 }))
 
 import { useSidebarStore } from '@/stores/sidebar'
@@ -35,6 +38,7 @@ describe('sidebar store', () => {
     mockSetAgentEnabled.mockReset()
     mockSetMcpServerEnabled.mockReset()
     mockSetPluginEnabled.mockReset()
+    mockSetHookEnabled.mockReset()
   })
 
   describe('togglePanel', () => {
@@ -139,7 +143,7 @@ describe('sidebar store', () => {
 
       await store.toggleSkillEnabled('deploy', false)
 
-      expect(mockSetSkillEnabled).toHaveBeenCalledWith('deploy', false)
+      expect(mockSetSkillEnabled).toHaveBeenCalledWith('deploy', false, undefined, undefined)
       expect(mockGetAllSkills).not.toHaveBeenCalled()
       expect(store.skills[0].enabled).toBe(false)
     })
@@ -190,6 +194,77 @@ describe('sidebar store', () => {
       expect(store.plugins[0].enabled).toBe(false)
     })
 
+    // Hook 开关：按列表下发的 key 定位，乐观更新 + 本端抑制（与其他资源一致）
+    it('ToggleHook_Success_OptimisticUpdate_001', async () => {
+      const store = useSidebarStore()
+      store.hooks = [
+        {
+          event: 'PreToolUse',
+          command: 'echo hi',
+          hookType: 'command',
+          hookCount: 1,
+          source: { type: 'user', label: 'User' },
+          enabled: true,
+          key: 'k1',
+          scope: 'user',
+        },
+      ]
+      mockSetHookEnabled.mockResolvedValue(undefined)
+
+      await store.toggleHookEnabled(store.hooks[0], false)
+
+      // 独立真值：user 作用域不带 projectPath
+      expect(mockSetHookEnabled).toHaveBeenCalledWith('user', 'PreToolUse', 'k1', false, undefined)
+      expect(store.hooks[0].enabled).toBe(false)
+      // 本端写回环已登记（state-changed 到达时跳过刷新）
+      expect(store.consumeSelfWrite('hooks')).toBe(true)
+    })
+
+    it('ToggleHook_ProjectScope_PassesLoadedCwd_001', async () => {
+      const store = useSidebarStore()
+      ;(store as unknown as { loadedCwd: string }).loadedCwd = 'D:/proj'
+      store.hooks = [
+        {
+          event: 'Stop',
+          command: 'npm test',
+          hookType: 'command',
+          hookCount: 1,
+          source: { type: 'project', label: 'Project' },
+          enabled: true,
+          key: 'k2',
+          scope: 'project',
+        },
+      ]
+      mockSetHookEnabled.mockResolvedValue(undefined)
+
+      await store.toggleHookEnabled(store.hooks[0], false)
+
+      expect(mockSetHookEnabled).toHaveBeenCalledWith('project', 'Stop', 'k2', false, 'D:/proj')
+    })
+
+    it('ToggleHook_Failure_Rollback_001', async () => {
+      const store = useSidebarStore()
+      store.hooks = [
+        {
+          event: 'Stop',
+          command: 'npm test',
+          hookType: 'command',
+          hookCount: 1,
+          source: { type: 'user', label: 'User' },
+          enabled: true,
+          key: 'k3',
+          scope: 'user',
+        },
+      ]
+      mockSetHookEnabled.mockRejectedValue(new Error('config changed externally'))
+
+      await expect(store.toggleHookEnabled(store.hooks[0], false)).rejects.toThrow(
+        'config changed externally'
+      )
+
+      expect(store.hooks[0].enabled).toBe(true) // 回滚
+    })
+
     // loadedCwd 为空时（尚未预加载过）不触发 reload，避免无 cwd 调用
     it('TogglePlugin_NoReloadWhenNoCwd_001', async () => {
       const store = useSidebarStore()
@@ -227,7 +302,7 @@ describe('sidebar store', () => {
 
       await store.toggleSkillEnabled('ghost', false)
 
-      expect(mockSetSkillEnabled).toHaveBeenCalledWith('ghost', false)
+      expect(mockSetSkillEnabled).toHaveBeenCalledWith('ghost', false, undefined, undefined)
     })
 
     // toggle plugin 失败时：plugin.enabled 回滚，且不触发子项 reload

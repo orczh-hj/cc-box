@@ -3,6 +3,10 @@
     <!-- Header -->
     <PanelHeader :title="t('agents')" @close="$emit('close')">
       <template #actions>
+        <button class="action-btn" @click="openEditor(null)" :title="t('agentNew')">
+          <img src="@/assets/icons/plus.svg" :alt="t('agentNew')" />
+        </button>
+        <DocsHelpButton anchor="Subagents" />
         <button class="action-btn" @click="handleRefresh" :title="t('refreshAgents')">
           <img src="@/assets/icons/refresh.svg" :alt="t('refreshAgents')" />
         </button>
@@ -38,6 +42,7 @@
         :count="projectAgents.length"
         :agents="projectAgents"
         @toggle="sidebarStore.toggleAgentGroup('project')"
+        @edit="openEditor"
       />
 
       <!-- User Agents -->
@@ -48,6 +53,7 @@
         :count="userAgents.length"
         :agents="userAgents"
         @toggle="sidebarStore.toggleAgentGroup('user')"
+        @edit="openEditor"
       />
 
       <!-- Plugin Agents -->
@@ -71,6 +77,8 @@
       />
     </div>
     </div>
+
+    <AgentEditor v-model:visible="editorVisible" :agent="editingAgent" @saved="onSaved" />
   </div>
 </template>
 
@@ -83,7 +91,9 @@ import { useAppStore } from '@/stores/app'
 const { t } = useI18n()
 import type { AgentInfo } from '@/types'
 import AgentGroup from './AgentGroup.vue'
+import AgentEditor from '../editor/AgentEditor.vue'
 import PanelHeader from '../sidebar/PanelHeader.vue'
+import DocsHelpButton from '../sidebar/DocsHelpButton.vue'
 
 const sidebarStore = useSidebarStore()
 const appStore = useAppStore()
@@ -113,6 +123,19 @@ const userAgents = computed(() =>
 const projectAgents = computed(() =>
   agents.value.filter(a => a.sourceType === 'project')
 )
+
+// ========== 编辑器 ==========
+const editorVisible = ref(false)
+const editingAgent = ref<AgentInfo | null>(null)
+
+function openEditor(agent: AgentInfo | null) {
+  editingAgent.value = agent
+  editorVisible.value = true
+}
+
+function onSaved() {
+  if (appStore.cwd) sidebarStore.loadAgents(appStore.cwd, { silent: true })
+}
 
 function handleRefresh() {
   if (appStore.cwd) {

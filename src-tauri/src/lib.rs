@@ -2,6 +2,7 @@ mod pty;
 mod pty_decoder;
 mod commands;
 mod store;
+mod store_edit;
 mod checks;
 mod mcp;
 mod logger;
@@ -407,6 +408,28 @@ pub fn run(initial_dir: Option<String>, new_window: bool) {
             commands::set_agent_enabled,
             commands::set_mcp_server_enabled,
             commands::set_plugin_enabled,
+            commands::get_plugin_marketplaces,
+            commands::get_market_presets,
+            commands::add_plugin_marketplace,
+            commands::remove_plugin_marketplace,
+            commands::refresh_plugin_marketplace,
+            commands::register_plugin_marketplace,
+            commands::install_plugin,
+            commands::uninstall_plugin,
+            commands::update_plugin,
+            commands::save_mcp_server,
+            commands::delete_mcp_server,
+            commands::save_skill,
+            commands::delete_skill,
+            commands::get_skill_source,
+            commands::save_agent,
+            commands::delete_agent,
+            commands::get_agent_source,
+            commands::get_hook_list,
+            commands::save_hook,
+            commands::delete_hook,
+            commands::set_hook_enabled,
+            commands::reveal_in_file_manager,
             commands::get_mcp_server_detail,
             commands::test_communication,
             commands::get_app_path,

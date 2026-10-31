@@ -270,6 +270,42 @@ pub(crate) fn open_in_file_manager(path: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// 在系统文件管理器中打开所在目录并选中该文件
+/// （Windows `explorer /select,` / macOS `open -R` / Linux 打开父目录）
+pub(crate) fn reveal_in_file_manager(path: &str) -> Result<(), String> {
+    let p = std::path::Path::new(path);
+    if !p.exists() {
+        return Err(format!("Path not found: {}", path));
+    }
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        // explorer 的 /select, 与路径必须是同一个参数；explorer 成功时也可能返回非 0，忽略退出码
+        new_command("explorer")
+            .arg(format!("/select,{}", path))
+            .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+            .spawn()
+            .map_err(|e| format!("Failed to reveal {}: {}", path, e))?;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("open")
+            .args(["-R", path])
+            .spawn()
+            .map_err(|e| format!("Failed to reveal {}: {}", path, e))?;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        // 多数文件管理器不支持"选中"参数，退化为打开父目录
+        let dir = p.parent().unwrap_or(p);
+        Command::new("xdg-open")
+            .arg(dir)
+            .spawn()
+            .map_err(|e| format!("Failed to reveal {}: {}", path, e))?;
+    }
+    Ok(())
+}
+
 // ---- 5. 进程管理 ----
 
 /// 杀死指定名称的所有进程

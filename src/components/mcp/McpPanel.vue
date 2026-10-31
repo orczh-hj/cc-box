@@ -3,6 +3,10 @@
     <!-- Header -->
     <PanelHeader :title="t('mcpServers')" @close="$emit('close')">
       <template #actions>
+        <button class="action-btn" @click="openEditor(null)" :title="t('mcpNew')">
+          <img src="@/assets/icons/plus.svg" :alt="t('mcpNew')" />
+        </button>
+        <DocsHelpButton anchor="MCP" />
         <button class="action-btn" @click="handleRefresh" :title="t('refreshMcp')">
           <img src="@/assets/icons/refresh.svg" :alt="t('refreshMcp')" />
         </button>
@@ -39,6 +43,7 @@
         :count="projectServers.length"
         :servers="projectServers"
         @toggle="sidebarStore.toggleMcpGroup('project')"
+        @edit="openEditor"
       />
 
       <!-- User Servers -->
@@ -49,6 +54,18 @@
         :count="userServers.length"
         :servers="userServers"
         @toggle="sidebarStore.toggleMcpGroup('user')"
+        @edit="openEditor"
+      />
+
+      <!-- Local Servers -->
+      <McpGroup
+        v-if="localServers.length > 0"
+        :title="t('local')"
+        :expanded="sidebarStore.mcpExpandedGroups.local"
+        :count="localServers.length"
+        :servers="localServers"
+        @toggle="sidebarStore.toggleMcpGroup('local')"
+        @edit="openEditor"
       />
 
       <!-- Plugin Servers -->
@@ -62,6 +79,8 @@
       />
     </div>
     </div>
+
+    <McpEditor v-model:visible="editorVisible" :server="editingServer" @saved="onSaved" />
   </div>
 </template>
 
@@ -74,7 +93,9 @@ import { useAppStore } from '@/stores/app'
 const { t } = useI18n()
 import type { McpServerInfo, McpServerDetail } from '@/types'
 import McpGroup from './McpGroup.vue'
+import McpEditor from '../editor/McpEditor.vue'
 import PanelHeader from '../sidebar/PanelHeader.vue'
+import DocsHelpButton from '../sidebar/DocsHelpButton.vue'
 
 const sidebarStore = useSidebarStore()
 const appStore = useAppStore()
@@ -101,9 +122,26 @@ const userServers = computed(() =>
   servers.value.filter(s => s.sourceType === 'user')
 )
 
+const localServers = computed(() =>
+  servers.value.filter(s => s.sourceType === 'local')
+)
+
 const projectServers = computed(() =>
   servers.value.filter(s => s.sourceType === 'project')
 )
+
+// ========== 编辑器 ==========
+const editorVisible = ref(false)
+const editingServer = ref<McpServerInfo | null>(null)
+
+function openEditor(server: McpServerInfo | null) {
+  editingServer.value = server
+  editorVisible.value = true
+}
+
+function onSaved() {
+  if (appStore.cwd) sidebarStore.loadMcpServers(appStore.cwd, { silent: true })
+}
 
 function handleRefresh() {
   if (appStore.cwd) {

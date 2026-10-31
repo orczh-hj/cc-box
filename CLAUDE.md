@@ -131,8 +131,10 @@ npm run release -- --bump patch --notes "### Features\n- Add feature"
 
 ### 产品官网（速查）
 
-- **官网 = `website/`**（Vue 3 独立 Vite 站点，复用根 node_modules，与主应用 `src/` 零共享、仅浅色主题），部署在 OSS bucket `cc-box` 根路径，**对外地址 `https://ccbox.orczh.top/`**（自定义域名，OSS 托管 DigiCert 免费证书；OSS 默认域名对网页文件强制 `Content-Disposition: attachment` 下载，仅可作资源直链如安装包下载）；多入口：`index.html`（主页）+ `docs.html`（使用文档），bundle 名为 `main-*`/`docs-*`
+- **官网 = `website/`**（Vue 3 独立 Vite 站点，复用根 node_modules，与主应用 `src/` 零共享、仅浅色主题），部署在 OSS bucket `cc-box` 根路径，**对外地址 `https://ccbox.orczh.top/`**（自定义域名，OSS 托管 DigiCert 免费证书；OSS 默认域名对网页文件强制 `Content-Disposition: attachment` 下载，仅可作资源直链如安装包下载）；多入口：`index.html`（主页）+ `docs.html`（使用文档）+ `reference.html`（Claude Code 参考文档），bundle 名为 `main-*`/`docs-*`/`reference-*`
 - **文档页内容存 `website/content/*.md`**（claude-code.md / cc-box.md，客观清单风格、自包含不外链），经 marked 运行时渲染（`lib/markdown.ts`：h2 生成锚点 id + 提取 TOC，DocsApp 双栏布局 + scrollspy）；客户端渲染导致 hash 定位需挂载后补跳（DocsApp onMounted）
+- **参考文档页（reference.html）分层浏览 `website/content/claude-code-docs/` 全部中文官方文档**：数据源由 **`npm run sync:cc-docs`（`scripts/update-cc-docs.mjs`）本地更新**（拉 llms.txt → 并发下载（默认 8，`--concurrency` 可调）zh-CN md → 按官方索引顺序写 order.json；默认完整更新并清理官方已下线旧文件，`--incremental` 补充模式只下载缺失不删除；需代理，默认 `http://127.0.0.1:33210`，可用 `--proxy` 覆盖；**只更新本地，不部署**，上线走 `npm run deploy:site`；228 篇 ≈15MB）；vite 虚拟模块 `virtual:cc-docs-manifest`（vite.config.mts 内插件扫描目录，标题取首个 h1）下发扁平清单，`lib/refTree.ts`（纯函数，测试 tests/website/refTree.test.ts）构建三层树（类→组→文档，中文标签映射 + kebab 兜底）；**排序以 `claude-code-docs/order.json` 为准**（插件 `applyDocOrder` 应用，类/组/文档三层按首次出现顺序，无 order.json 回退字母序）；正文用 `import.meta.glob('../content/claude-code-docs/**/*.md', {query:'?raw'})` **每篇一个懒加载 chunk**（勿全量内联）；渲染前 `stripLeadingBlockquote` 剥掉每篇开头的 `Documentation Index` 引用块；路由 `#/<相对路径>`（非 `/` 开头 hash 视为页内锚点）；正文中 code.claude.com 文档链接与英文 slug 锚点均拦截为站内导航（`resolveAnchor` 按链接文字↔标题模糊兜底）
+- **SEO**：三个页面 head 已含 keywords/canonical/Open Graph/Twitter（主页另有 JSON-LD SoftwareApplication），`public/robots.txt` + `sitemap.xml` 随 dist 根上传并由 deploy-site 校验；改入口或域名需同步 sitemap 与 canonical
 - 版本号/下载链接**动态 fetch `/cc-box/latest.json`**（同 bucket 同源无 CORS；本地 dev 走 vite proxy，port 4173）——发版后官网自动更新，无需重新部署
 - 命令：`npm run dev:site` / `build:site` / `deploy:site`（构建 → ossutil 上传 assets 先、index.html 后 → HEAD 校验；`--skip-build`、`--clean-assets` 可选）
 - **安全红线**：bucket 根下有更新通道 `cc-box/` 与依赖 `deps/`，绝不 `rm -r oss://cc-box/`；清旧 hash 产物只能 `--clean-assets`（上传前清 `assets/`，勿在上传后手动 rm）
@@ -156,6 +158,7 @@ npm run release -- --bump patch --notes "### Features\n- Add feature"
 | [docs/interaction.md](docs/interaction.md)                   | **快捷键处理架构**、三场景输入处理、DOM 捕获期监听                         |
 | [docs/capabilities.md](docs/capabilities.md)                 | **Tauri 权限管理**、查询/确认/添加 capabilities 权限的方法            |
 | [docs/data-persistence.md](docs/data-persistence.md)         | 数据存储架构、文件路径、JSON 结构                                   |
+| [docs/extensions.md](docs/extensions.md)                     | **扩展管理正本**：四类表单编辑器、Hook 面板、Plugin 标准市场、项目级开关 |
 | [docs/env-injection.md](docs/env-injection.md)               | **环境变量注入**：PTY 启动时注入环境变量、注入顺序、扩展方式       |
 | [docs/startup-checks.md](docs/startup-checks.md)             | 启动先决条件检查、路径检测与自动保存                                    |
 | [docs/roadmap.md](docs/roadmap.md)                           | 开发路线图、进度跟踪、待办事项                                       |
@@ -177,12 +180,31 @@ npm run release -- --bump patch --notes "### Features\n- Add feature"
 - **macOS 原生编辑快捷键（焦点驱动 Edit 菜单）**：WKWebView 粘贴无 keydown 默认行为，输入框 Cmd+V 依赖原生 Edit 菜单（paste:/copy: selector）；但菜单 key equivalent 会在按键到达 WebView 前被系统拦截，故 `useAppShortcuts` focusin 联动——xterm-helper-textarea 持焦时 `set_native_edit_menu(false)` 切空菜单，其余焦点切回 Edit 菜单。**菜单必须每次现建**（`commands.rs` 内构建）：Menu clone 共享底层原生对象，被挂载过的实例复挂会 attach 冲突静默失败（曾致输入框编辑键全失效）；**终端按键处理永不经菜单**；判定逻辑见 `src/utils/mac-edit-keys.ts`，禁止在前端 JS 模拟编辑键（execCommand 仿真）
 - **离散操作必广播**：用户离散操作（建/关/重命名会话）经 Rust 广播事件让对端走同一个原生函数；远程安全守卫（白名单/并发上限/独占）作为前置检查包住共用核心，不因统一而放宽
 - **面向用户的后端文案走稳定 code**：Rust 结果不内嵌展示文本，返回稳定结论码/i18n 键（如 `CheckResult.code`/`action`），前端按 locale 渲染（`utils/check-i18n.ts`，未知或缺失 code 回退原文，兼容旧桌面后端）；`message` 仅作日志与回退 → [docs/startup-checks.md](docs/startup-checks.md)「检查文案与双语」
+- **i18n 文案里的字面大括号必须转义**（`{'{'}` / `{'}'}`）：vue-i18n 运行时把裸 `{...}` 当插值编译，非法形态（如 `${VAR:-default}`、`{ matcher, … }`）会抛 SyntaxError 并在渲染时打崩所在组件（曾致 MCP 新建/Hook JSON 模式弹窗整窗消失）；`tests/i18n` 的 MessageCompile 测试是守卫，新增文案过不了它就是写错了。
 - **用户级资源开关（skills/agents/mcp/plugins）**：后端单点 `store.rs` 的 `set_*_enabled`（桌面/远程同一函数）。skill/agent 禁用=移入 `~/.cc-box/disabled/<category>`，必须 **symlink 感知**（相对链接按目标位置重算、存在性用 `symlink_metadata`、disabled 扫描列出断链以便恢复）；前端 `state-changed` 刷新必须**静默**（`loadXxx(cwd, { silent: true })`，不切 loading 分支，否则整列表卸载重建）；**本端写回环必须抑制**（`markSelfWrite` 登记 → `applyStateSection` 消费并跳过该 section，条目原地响应；plugin 仍级联子项），后端列表按名称**稳定排序**（顺序与 enabled 解耦）；开关按 `(sourceType=user, name)` 定位，禁止裸 name。providers 系写命令同样登记抑制（activate/delete/create/update/reorder/updateCommon），激活返回更新后的 `appliedSettings` 供发起端精确同步、免全量刷新
 - 每次修改后：通用规则速查更新到 CLAUDE.md，定向细节更新到 docs/development.md 或对应正本文档
 - Rust 结构体返回前端时统一使用 `#[serde(rename_all = "camelCase")]`
 - **生产构建安全**：`npm run build` 末尾自动跑 `scripts/verify-dist-safety.ts` 扫描 dist 坏产物；`scripts/lib/patch-xterm-enum.ts` 修补 xterm 死枚举 IIFE 的 esbuild 压缩缺陷（终端写队列永久卡死的根因）。**该类问题 dev 不复现**，升级 xterm/esbuild/Vite 后必须跑生产构建；整个构建零命中告警时复核补丁 → [docs/development.md](docs/development.md)「生产构建安全」
 - 添加新 Tauri Command：commands.rs 定义 → lib.rs 注册 → api/tauri.ts 封装（并完成下方检查清单登记）
 - 添加新 Tauri JS API 调用时，必须确认 `capabilities/default.json` 中有对应权限（`<plugin>:default` 不包含大部分写操作，需显式添加）→ 详见 [docs/capabilities.md](docs/capabilities.md)
+
+### 扩展编辑与 Plugin 市场（速查）
+
+四类资源（skill/agent/mcp/hook）表单化新增与编辑 + plugin 标准市场浏览安装。**正本 → [docs/extensions.md](docs/extensions.md)**。要点：
+
+- **五面板来源分组统一命名「个人 / 项目 / 本地 / 插件」**（英文 Personal/Project/Local/Plugins）：agents/mcp 用裸键 `user/project/local/plugin`，skills/plugins 用后缀键（值同单词），hooks 用 `hookGroup_*`；plugin 来源条目一律「插件」组只读（MCP 面板含 local 组）。
+- **Plugins 面板管理**：条目悬停「更新/卸载」（`update_plugin`/`uninstall_plugin` CLI 包装，project 作用域 cwd=projectPath；卸载 uiConfirm 二次确认）；组件明细列全七类 skills/agents/mcp/hooks/lsp/monitors/themes（`parse_plugin_commands_hooks` + `parse_plugin_extra_components`，每类覆盖默认位置文件与 plugin.json 内联/路径双形态；**commands 是老版 skill 形态，并入 skills 展示不区分**）；Hooks 面板末尾「插件」组只读列出插件 hooks 事件。
+
+- 编辑直接写 Claude 原生文件，**不建第二份状态**；hook 条目保持原生结构（无 `_ccbox` 标记）。**市场与注册解耦**：添加 = 只入 CC-Box 列表（`config.json::customMarkets`，可浏览不碰 Claude）；浏览缓存仅未注册市场自管（`~/.cc-box/cache/markets/src-<hash>`：git clone --depth 1 / json URL 下载 / 本地目录直读；注册后切到 Claude 克隆并清缓存）；**安装插件懒注册**（市场未注册时先 `marketplace add`）；市场栏三段分组（我的/Claude 注册/精选推荐），移除语义分流（仅列表/列表+注销/仅注销）。
+- 命令在 `store_edit.rs`；hook 定位键 = `hash(event|matcher|hook0签名)`（command 类型签名=命令原文，兼容老备份；其他类型=canonical JSON），前端一律传列表下发的 `key`；失配报「已被外部修改」不做模糊匹配；启停 = 摘出存 `~/.cc-box/disabled/hooks/`；hook 类型支持 command/http/prompt/agent（mcp_tool 走 JSON 模式）。
+- 跨进程锁文件集中 `~/.cc-box/locks/<hash>.lock`——**禁止在用户项目根目录落任何锁/临时文件**。
+- 项目级开关：`set_skill/agent/mcp_enabled` 可选 `sourceType/scope + projectPath`（缺省 user 兼容旧调用）；前端 `findToggleIndex` 按点击行 `sourceType` 精确定位（未传来源只匹配 user）。
+- **删除一律彻底删**：四类资源二次确认后直接移除并清理 disabled 备份（可逆性由开关承担）；确认框统一走前端 `uiConfirm`（`ConfirmDialog.vue`，App.vue 挂载一份），禁止 `window.confirm`。插件卸载本就是真实卸载（CLI）。
+- **推荐市场不写死在代码里**：OSS `data/plugin-markets.json`（仓库 `data/`，`npm run deploy:data` 上传；`data/` 独立于官网与 `cc-box/`、`deps/`）。后端 `get_market_presets` 拉取（5s 超时，内存 6h + 磁盘缓存 `~/.cc-box/cache/plugin-markets.json` 兜底），失败返回空列表。
+- **市场仓库缓存由 Claude 负责**（克隆在 `known_marketplaces.json::installLocation` 并记 `lastUpdated`）：CC-Box 只读本地副本，不建下载缓存；仅把解析结果内存缓存 60s。刷新 = `marketplace update <当前市场>`（git pull，需访问 GitHub），UI 用 `lastUpdated` 展示缓存时间。
+- 插件列表**排序 = 精选 → 热度 → 名称**：条目可写 `"ccbox": { "pinned": true, "order": 10, "category": "文档处理", "icon": "📄" }`（置顶 / 升序 / 分类 / 图标=emoji 或 http(s) URL；OSS 推荐清单用顶层同名字段）；热度取自 Claude 的 `plugins/plugin-catalog-cache.json::catalog.plugins[*].unique_installs`（键 `name@marketplace`），缺数据排最后；行尾 `↓ 3.4k`，置顶带 ★。
+- 自有精选市场 `ccbox-market`：**源始终为 Gitee 远程** `https://gitee.com/orczh/ccbox-market.git`（OSS 推荐清单首位、CC-Box 默认选中）。`C:/ccbox-plugins` 是**公开仓库**（Gitee `ccbox-market` 的本地开发工作副本，结构 = `.claude-plugin/marketplace.json` + `plugins/<name>/`）——该仓库面向公开读者，README 与内容**不写 CC-Box 侧实现细节**（精选字段等约定只记录在本仓库文档）。精选条目多为 GitHub 源（`git-subdir`/`url` 指向原仓库，中文介绍 + `ccbox` 分类/图标字段），安装需能访问 GitHub。**ccbox-market 在市场列表中置顶并作为默认选中项**（`orderMarkets`）。
+- 市场详情「包含内容」= 清单声明 → plugin.json 声明 → 扫描插件目录（commands/agents/*.md、skills/*/SKILL.md、hooks/hooks.json 事件、.mcp.json 服务器）；远程源未安装时退到 `~/.claude/plugins/cache/<市场>/<插件>/<版本>/`。
 
 ### 新增功能检查清单（速查）
 

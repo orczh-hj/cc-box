@@ -3,6 +3,10 @@
     <!-- Header -->
     <PanelHeader :title="t('skills')" @close="$emit('close')">
       <template #actions>
+        <button class="action-btn" @click="openEditor(null)" :title="t('skillNew')">
+          <img src="@/assets/icons/plus.svg" :alt="t('skillNew')" />
+        </button>
+        <DocsHelpButton anchor="Skills" />
         <button class="action-btn" @click="handleRefresh" :title="t('refreshSkills')">
           <img src="@/assets/icons/refresh.svg" :alt="t('refreshSkills')" />
         </button>
@@ -39,6 +43,7 @@
         :count="projectSkills.length"
         :skills="projectSkills"
         @toggle="sidebarStore.toggleSkillGroup('project')"
+        @edit="openEditor"
       />
 
       <!-- User Skills -->
@@ -49,6 +54,7 @@
         :count="userSkills.length"
         :skills="userSkills"
         @toggle="sidebarStore.toggleSkillGroup('user')"
+        @edit="openEditor"
       />
 
       <!-- Plugin Skills -->
@@ -62,6 +68,8 @@
       />
     </div>
     </div>
+
+    <SkillEditor v-model:visible="editorVisible" :skill="editingSkill" @saved="onSaved" />
   </div>
 </template>
 
@@ -74,7 +82,9 @@ import { useAppStore } from '@/stores/app'
 const { t } = useI18n()
 import type { SkillInfo } from '@/types'
 import SkillGroup from './SkillGroup.vue'
+import SkillEditor from '../editor/SkillEditor.vue'
 import PanelHeader from '../sidebar/PanelHeader.vue'
+import DocsHelpButton from '../sidebar/DocsHelpButton.vue'
 
 const sidebarStore = useSidebarStore()
 const appStore = useAppStore()
@@ -100,6 +110,19 @@ const userSkills = computed(() =>
 const pluginSkills = computed(() =>
   skills.value.filter(s => s.sourceType === 'plugin')
 )
+
+// ========== 编辑器 ==========
+const editorVisible = ref(false)
+const editingSkill = ref<SkillInfo | null>(null)
+
+function openEditor(skill: SkillInfo | null) {
+  editingSkill.value = skill
+  editorVisible.value = true
+}
+
+function onSaved() {
+  if (appStore.cwd) sidebarStore.loadSkills(appStore.cwd, { silent: true })
+}
 
 function handleRefresh() {
   if (appStore.cwd) {

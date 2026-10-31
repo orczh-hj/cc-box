@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest'
+import { baseCompile } from '@intlify/message-compiler'
 import en from '@/i18n/locales/en'
 import zh from '@/i18n/locales/zh'
 
@@ -32,6 +33,19 @@ describe('i18n 翻译文件一致性', () => {
       const enPlaceholders = [...(en[key] as string).matchAll(placeholderPattern)].map(m => m[1]).sort()
       const zhPlaceholders = [...(zh[key] as string).matchAll(placeholderPattern)].map(m => m[1]).sort()
       expect(zhPlaceholders, `zh.${key} placeholders should match en`).toEqual(enPlaceholders)
+    }
+  })
+
+  // 每条文案都能通过 vue-i18n 消息编译器：字面 { } 会抛 SyntaxError 且在渲染时
+  // 打崩所在组件（曾致 MCP 新建弹窗、Hook JSON 模式整窗消失），必须用 {'{'} 转义
+  it('I18n_MessageCompile_001', () => {
+    const locales: Array<[string, Record<string, unknown>]> = [['zh', zh], ['en', en]]
+    for (const [name, messages] of locales) {
+      for (const [key, value] of Object.entries(messages)) {
+        const errors: string[] = []
+        baseCompile(value as string, { onError: e => errors.push(e.message) })
+        expect(errors, `${name}.${key}: ${String(value)}`).toEqual([])
+      }
     }
   })
 })

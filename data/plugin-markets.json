@@ -1,0 +1,23 @@
+{
+  "version": 2,
+  "updatedAt": "2026-10-30",
+  "markets": [
+    {
+      "name": "ccbox-market",
+      "source": "https://gitee.com/orczh/ccbox-market.git",
+      "description": "CC-Box 精选插件市场：中文说明、精选置顶、国内直连（Gitee）",
+      "pinned": true,
+      "order": 1,
+      "icon": "🧩",
+      "category": "精选"
+    },
+    {
+      "name": "claude-plugins-official",
+      "source": "anthropics/claude-plugins-official",
+      "description": "Anthropic 官方插件市场：skills / agents / hooks / MCP 的官方集合",
+      "order": 2,
+      "icon": "🏛️",
+      "category": "官方"
+    }
+  ]
+}

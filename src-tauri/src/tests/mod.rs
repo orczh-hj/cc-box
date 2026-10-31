@@ -32,6 +32,10 @@ mod dir_listing;
 mod state_broadcast;
 #[cfg(test)]
 mod file_transfer;
+#[cfg(test)]
+mod plugin_market;
+#[cfg(test)]
+mod store_edit;
 
 /// EVENT_HOOK 全局单例的测试互斥锁：整体 set/clear hook 的测试（remote_state
 /// 的 rename 半链、state_broadcast 的宏出口锚定）必须串行执行——并行时互相
@@ -52,6 +56,14 @@ pub(crate) static REMOTE_SERVER_TEST_LOCK: std::sync::LazyLock<parking_lot::Mute
 /// 8747 等，测试随环境漂移）
 #[cfg(test)]
 pub(crate) static CONFIG_DIR_TEST_LOCK: std::sync::LazyLock<parking_lot::Mutex<()>> =
+    std::sync::LazyLock::new(|| parking_lot::Mutex::new(()));
+
+/// UPLINK 全局单例（remote_state 静态上行通道）的测试互斥锁：设置方
+/// （成员模式跳过本地广播测试会 set_uplink(Some)）与一切依赖「uplink 为
+/// None」行为的测试（如订阅后 remove_pty 期望本地 SessionExit 广播）都必须
+/// 持锁——remove_pty 的本地广播被 `!has_uplink()` 守卫，并行时帧会被静默吞掉
+#[cfg(test)]
+pub(crate) static UPLINK_TEST_LOCK: std::sync::LazyLock<parking_lot::Mutex<()>> =
     std::sync::LazyLock::new(|| parking_lot::Mutex::new(()));
 
 /// GUI 配置目录隔离（RAII）：指向独立临时目录，Drop 还原并清理。落盘类
