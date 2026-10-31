@@ -1239,7 +1239,7 @@
 
 ## 终端渲染（xterm 6 升级）
 
-> 背景：升级 `@xterm/xterm@6.1.0-beta.303` + `@xterm/addon-webgl@0.20.0-beta.299`，根治 WebGL glyph atlas corruption（[docs/webgl-corruption-fix.md](webgl-corruption-fix.md)），同时适配 xterm 6 滚动条重做与快捷键变化。
+> 背景：升级 `@xterm/xterm@6.1.0-beta.303` + `@xterm/addon-webgl@0.20.0-beta.299`，根治 WebGL glyph atlas corruption（xtermjs/xterm.js#6038，上游已修复），同时适配 xterm 6 滚动条重做与快捷键变化。
 
 ### TerminalRender_LongCjkSession_001 — 长中文会话无乱码
 

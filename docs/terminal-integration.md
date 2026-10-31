@@ -18,7 +18,7 @@
 | portable-pty | ^0.8 | 伪终端进程管理（Rust） |
 | tauri | ^2 | 应用框架 |
 
-> xterm 6.1.0-beta 线包含 WebGL glyph atlas corruption 上游修复（见 [webgl-corruption-fix.md](webgl-corruption-fix.md)）；beta 依赖使用精确版本号锁定。
+> xterm 6.1.0-beta 线包含 WebGL glyph atlas corruption 上游修复（xtermjs/xterm.js#6038，上游已修复）；beta 依赖使用精确版本号锁定。
 
 ## Rust 后端 PTY 模块 (src-tauri/src/pty.rs)
 
