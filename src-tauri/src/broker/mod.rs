@@ -83,19 +83,30 @@ pub async fn run_headless(autostart: bool) {
             return;
         }
     };
-    // 登录自启是新的用户会话：清除上次“退出 CC-Box”的持久抑制。
+    // 登录自启是新的用户会话；终端里手动 `cc-box --broker` 同样是明确的用户意图
+    // （GUI 拉起 Broker 时 stdio 重定向为空，is_terminal 为 false，不会误清除）。
+    // 两者都应解除上次“退出 CC-Box”的持久抑制。
+    use std::io::IsTerminal;
+    let interactive = std::io::stdin().is_terminal() || std::io::stderr().is_terminal();
     if autostart {
+        lifecycle::clear_user_quit();
+    } else if interactive {
+        log::info!("[broker] interactive launch: clearing previous user_quit marker");
         lifecycle::clear_user_quit();
     }
     // 竞态兜底：托盘 user_quit / 更新标记有效时，即使被并发拉起也不覆盖标记。
     // user_quit 是持久抑制 → 直接退出；更新标记是瞬态（安装器替换文件期间）→
     // 等待其过期而不是放弃，否则更新完成后无人重新拉起 Broker。
+    let mut announced_update_wait = false;
     loop {
         match lifecycle::suppression() {
             lifecycle::Suppression::None => break,
             lifecycle::Suppression::UpdateInProgress => {
-                log::info!("[broker] update in progress; waiting before start");
-                eprintln!("[cc-box] update in progress, waiting for it to finish...");
+                if !announced_update_wait {
+                    announced_update_wait = true;
+                    log::info!("[broker] update in progress; waiting before start");
+                    eprintln!("[cc-box] update in progress, waiting for it to finish...");
+                }
                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;
             }
             lifecycle::Suppression::UserQuit => {
