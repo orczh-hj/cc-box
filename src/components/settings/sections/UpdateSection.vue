@@ -335,7 +335,8 @@ function hasActivePtys(): boolean {
 }
 
 function openReleases() {
-  openExternal('https://github.com/orczh-hj/cc-box/releases')
+  // 「手动下载」跳官网下载页（官网按 latest.json 动态给出各平台最新包）
+  openExternal('https://ccbox.orczh.top/')
 }
 
 async function handleDownloadAndInstall() {

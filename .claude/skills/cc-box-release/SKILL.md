@@ -85,19 +85,45 @@ done
 
 资产名与大小用 `gh api repos/orczh-hj/cc-box/releases/tags/vX.Y.Z --jq '.assets[] | "\(.name) \(.size)"'` 对照。下全后回到仓库根执行 `npm run release -- --oss-only vX.Y.Z`。
 
-### Notes 格式
+### Notes 格式（**纯文本，不用 Markdown**）
 
-```markdown
-### Features
-- 新增<用户可感知的能力>
+设置页的更新说明**不渲染 Markdown**：只会把换行转成 `<br>`，并把行首的 `#` 当加粗。写 `### Features`、`- 列表` 会原样显示成 `### Features` 和连字符列表，很难看。
 
-### Fixed
-- 修复<用户可感知的问题>
+正确写法 = 一句标题行 + 「新增 / 修复 / 调整」分组词独占一行 + 每条一行：
+
+```
+本次更新
+
+新增
+新增自动更新：检测到新版本自动下载，无窗口运行时无人值守完成安装升级
+托盘菜单新增「检查更新」；有新版本时显示「更新到 vX.Y.Z」，二次确认后直接更新
+
+修复
+修复更新完成后后台服务没有自动重新启动的问题
+
+提示：手机/浏览器请刷新页面获取新前端。
 ```
 
-**传参必须用单行 + `\n` 转义**（`--notes '### Features\n- ...'`）：多行字符串经 `npm run` 传参只会保留首行，其余行被丢弃——CHANGELOG 与 Release notes 会变成只有标题的空段。若已发生：补全 CHANGELOG 后 `git commit --amend --no-edit`（未推送时），再用正确的单行 notes 重跑即可，`updateChangelog` 会跳过已存在的段、只补用 Release notes。
+- 每条以「新增 / 修复 / 调整 / 移除」开头（会自然读成一句话）
+- **不用** `#` 标题、`-` / `*` 列表、`**加粗**`、代码块、链接语法
+- 空行仅用于分组；中文全角标点
 
-中文、`\n` 换行、动词开头（新增/修复/调整/移除），从用户使用角度写，不写模块与实现细节。含远程改动时末尾加提示行（如 `提示：刷新浏览器获取新前端。`）。
+**传参必须用单行 + `\n` 转义**（`--notes '本次更新\n\n新增\n...'`）：多行字符串经 `npm run` 传参只会保留首行，其余行被丢弃——CHANGELOG 与 Release notes 会变成只有标题的空段。若已发生：补全 CHANGELOG 后 `git commit --amend --no-edit`（未推送时），再用正确的单行 notes 重跑即可，`updateChangelog` 会跳过已存在的段、只补用 Release notes。
+
+### 已发布后修正 notes
+
+Release 已上线但 notes 需要改（格式/错别字）：
+
+```bash
+# 1) 写纯文本到文件，改 GitHub Release
+gh release edit vX.Y.Z --notes-file notes.txt
+# 2) 同步 OSS latest.json（--oss-only 因幂等会跳过，需直接改字段再上传）
+curl -s https://cc-box.oss-cn-beijing.aliyuncs.com/cc-box/latest.json -o latest.json
+node -e "const fs=require('fs');const j=JSON.parse(fs.readFileSync('latest.json','utf8'));j.notes=fs.readFileSync('notes.txt','utf8').trim();fs.writeFileSync('latest.json',JSON.stringify(j,null,2))"
+./ossutil64.exe cp latest.json "oss://cc-box/cc-box/latest.json" -f
+```
+
+`--oss-only` 的幂等判据只看 version + 三产物，**不会**发现 notes 变化。
 
 ### 删除/回滚已发布版本
 
