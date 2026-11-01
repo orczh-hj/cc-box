@@ -275,6 +275,7 @@ import { useSessionStore } from '@/stores/session'
 import { useUpdateStore } from '@/stores/update'
 import { getClaudePlatformKey } from '@/utils/platform'
 import { isMissingUpdatePlatform } from '@/utils/update-error'
+import { renderReleaseNotes } from '@/utils/release-notes'
 import type { ClaudeVersionEntry } from '@/types'
 
 const { t } = useI18n()
@@ -295,12 +296,10 @@ const currentPlatformKey = getClaudePlatformKey()
 // 监听 Claude CLI 历史版本下载进度
 let unlistenHistoryProgress: (() => void) | null = null
 
-const renderedNotes = computed(() => {
-  if (!updateStore.updateInfo?.releaseNotes) return ''
-  return updateStore.updateInfo.releaseNotes
-    .replace(/\n/g, '<br>')
-    .replace(/#{1,3}\s(.+)/g, '<strong>$1</strong>')
-})
+// 发布说明按 Markdown 子集渲染（先转义再解析，见 utils/release-notes）
+const renderedNotes = computed(() =>
+  renderReleaseNotes(updateStore.updateInfo?.releaseNotes ?? '')
+)
 
 function formatSize(bytes: number): string {
   if (bytes === 0) return '0 B'
@@ -840,6 +839,46 @@ onUnmounted(() => {
   background: var(--bg-primary);
   border-radius: 6px;
   border: 1px solid var(--border-color);
+}
+
+/* 渲染后的 Markdown：标题紧凑、列表缩进、行内代码等宽 */
+.notes-content :deep(h2),
+.notes-content :deep(h3),
+.notes-content :deep(h4),
+.notes-content :deep(h5),
+.notes-content :deep(h6) {
+  margin: 10px 0 4px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.notes-content :deep(h2:first-child),
+.notes-content :deep(h3:first-child),
+.notes-content :deep(h4:first-child) {
+  margin-top: 0;
+}
+
+.notes-content :deep(p) {
+  margin: 6px 0;
+}
+
+.notes-content :deep(ul),
+.notes-content :deep(ol) {
+  margin: 4px 0 8px;
+  padding-left: 20px;
+}
+
+.notes-content :deep(li) {
+  margin: 2px 0;
+}
+
+.notes-content :deep(code) {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 12px;
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: var(--bg-secondary);
 }
 
 .update-actions {
