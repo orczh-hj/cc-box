@@ -4,12 +4,13 @@
 //! - macOS：`~/Library/LaunchAgents/com.cc-box.broker.plist`
 //! - Linux：`$XDG_CONFIG_HOME/autostart/cc-box-broker.desktop`
 //!
-//! 统一命令：`<exe> --broker --autostart`。`--autostart` 让 Broker 忽略上次
-//! “退出 CC-Box”留下的 user_quit 标记。
+//! 统一命令：`<exe> --broker`。Broker 启动不再读取 user_quit 标记（该标记
+//! 只约束 GUI 后台循环的自动拉起），所以登录自启与手动启动行为一致。
+//! 旧版注册项仍带 `--autostart`：未知参数被忽略，无需迁移。
 
 use std::path::{Path, PathBuf};
 
-const ARGS: &str = "--broker --autostart";
+const ARGS: &str = "--broker";
 const WINDOWS_VALUE_NAME: &str = "CC-Box";
 
 /// 自启动应指向的可执行文件。Linux AppImage 的临时挂载路径每次变化，
@@ -53,7 +54,6 @@ pub(crate) fn launch_agent_plist(exe: &Path) -> String {
   <array>
     <string>{}</string>
     <string>--broker</string>
-    <string>--autostart</string>
   </array>
   <key>RunAtLoad</key>
   <true/>
@@ -299,13 +299,14 @@ mod tests {
         let exe = Path::new("/tmp/CC Box/cc-box");
         assert_eq!(
             windows_run_value(exe),
-            "\"/tmp/CC Box/cc-box\" --broker --autostart"
+            "\"/tmp/CC Box/cc-box\" --broker"
         );
         let plist = launch_agent_plist(exe);
         assert!(plist.contains("<key>RunAtLoad</key>"));
-        assert!(plist.contains("--autostart"));
+        assert!(plist.contains("<string>--broker</string>"));
+        assert!(!plist.contains("--autostart"));
         let desktop = xdg_desktop_entry(exe);
-        assert!(desktop.contains("Exec=\"/tmp/CC Box/cc-box\" --broker --autostart"));
+        assert!(desktop.contains("Exec=\"/tmp/CC Box/cc-box\" --broker"));
         assert!(desktop.contains("X-GNOME-Autostart-enabled=true"));
     }
 
@@ -319,7 +320,7 @@ mod tests {
     fn Autostart_DesktopExecEscape_3() {
         let desktop = xdg_desktop_entry(Path::new("/tmp/A B/\\$X%Y\"Z"));
         assert!(
-            desktop.contains(r#"Exec="/tmp/A B/\\\$X%%Y\"Z" --broker --autostart"#),
+            desktop.contains(r#"Exec="/tmp/A B/\\\$X%%Y\"Z" --broker"#),
             "unexpected desktop entry: {}",
             desktop
         );

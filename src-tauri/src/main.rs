@@ -16,7 +16,7 @@ fn main() {
                 std::process::exit(1);
             }
         }
-        Invocation::Broker { autostart } => cc_box::run_broker(autostart),
+        Invocation::Broker => cc_box::run_broker(),
         Invocation::Gui {
             initial_dir,
             new_window,

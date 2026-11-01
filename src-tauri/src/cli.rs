@@ -16,8 +16,8 @@ pub enum Invocation {
     Version,
     /// `--quit-broker`：关闭所有窗口并退出后台 Broker
     QuitBroker,
-    /// `--broker`（可带 `--autostart`）：无窗口常驻后台
-    Broker { autostart: bool },
+    /// `--broker`：无窗口常驻后台
+    Broker,
     /// 默认：GUI；可带初始项目目录与「新开窗口」
     Gui {
         initial_dir: Option<String>,
@@ -36,7 +36,6 @@ pub fn help_text(version: &str) -> String {
   -h, --help        显示本帮助并退出
   -V, --version     显示版本号并退出
   --broker          以常驻后台 Broker 模式运行（无窗口，托盘常驻）
-  --autostart       与 --broker 同用，表示由系统登录项自动启动
   --quit-broker     关闭所有窗口并退出后台 Broker（脚本 / 无托盘环境）
   --new-window      新开一个窗口，停在项目页不自动进入终端
 
@@ -61,9 +60,7 @@ pub fn parse(args: &[String]) -> Invocation {
         return Invocation::QuitBroker;
     }
     if has("--broker") {
-        return Invocation::Broker {
-            autostart: has("--autostart"),
-        };
+        return Invocation::Broker;
     }
     let initial_dir = args
         .iter()
@@ -129,13 +126,11 @@ mod tests {
 
     #[test]
     fn Cli_BrokerModes_2() {
-        assert_eq!(
-            parse(&args(&["--broker"])),
-            Invocation::Broker { autostart: false }
-        );
+        assert_eq!(parse(&args(&["--broker"])), Invocation::Broker);
+        // 旧版注册的登录项仍带 --autostart：未知参数忽略，行为不变
         assert_eq!(
             parse(&args(&["--broker", "--autostart"])),
-            Invocation::Broker { autostart: true }
+            Invocation::Broker
         );
         assert_eq!(parse(&args(&["--quit-broker"])), Invocation::QuitBroker);
     }
@@ -168,8 +163,7 @@ mod tests {
     fn Cli_HelpListsAllFlags_4() {
         let text = help_text("1.2.3");
         for flag in [
-            "-h, --help", "-V, --version", "--broker", "--autostart", "--quit-broker",
-            "--new-window",
+            "-h, --help", "-V, --version", "--broker", "--quit-broker", "--new-window",
         ] {
             assert!(text.contains(flag), "help text missing {flag}");
         }

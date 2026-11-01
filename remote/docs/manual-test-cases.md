@@ -281,7 +281,7 @@
 7. **开机自启动（设置 → 启动）**
    - 打开 设置 → 启动 → 勾选「开机自启动（后台服务）」→ Windows `HKCU\...\Run` 出现 `CC-Box`；取消后消失（macOS 对应 LaunchAgent，Linux 对应 `~/.config/autostart`）
    - 托盘勾选状态与设置页一致；远程面板**不应**出现该开关
-   - 带 `--broker --autostart` 启动时，即使上次是「退出 CC-Box」也会启动 Broker，且不自动开窗口；Linux 无托盘时用设置页操作
+   - 托盘退出后：开机自启/手动 `cc-box --broker` 都应正常启动 Broker 且不自动开窗口；只有残留 GUI 的自动拉起被抑制（手动打开 GUI 会清除标记）；Linux 无托盘时用设置页操作
 8. **`--quit-broker`**
    - 命令行执行 `cc-box --quit-broker` → 所有窗口关闭、Broker 退出；无 Broker 时返回非零并提示
 9. **LAN 端口被第三方占用**

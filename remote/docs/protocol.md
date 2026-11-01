@@ -207,7 +207,7 @@
 `~/.cc-box/broker.state.json` 记录 `running | user_quit | update_in_progress`（旧版可能残留 `idle_exit`，仅按允许拉起读取）：
 
 - `running`：Broker 常驻；所有窗口关闭也不退出。
-- `user_quit`：「退出 CC-Box」写入，持久抑制自动拉起；手动打开 GUI 或 `--broker --autostart` 清除。
+- `user_quit`：「退出 CC-Box」写入，仅抑制 GUI 后台循环的自动拉起；Broker 自身启动不读它（手动 / 登录自启 / 更新重拉均直接运行，单实例由 broker.lock 保证）；手动打开 GUI 清除。
 - `update_in_progress`：安装前退出，释放可执行文件；版本变化或 5 分钟后解除。
 - `remote.enabled=false` 不是生命周期状态：Broker 继续运行，仅停止 LAN/relay。
 

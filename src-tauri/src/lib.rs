@@ -144,23 +144,23 @@ pub fn rerun_checks() -> Vec<checks::CheckResult> {
 }
 
 /// Broker 模式：纯 tokio 无头进程（无 Tauri 窗口/托盘初始化）。
-pub fn run_broker_headless(autostart: bool) {
+pub fn run_broker_headless() {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .expect("failed to build broker runtime");
-    rt.block_on(broker::run_headless(autostart));
+    rt.block_on(broker::run_headless());
 }
 
 /// Broker 模式入口：Windows/macOS 带托盘，Linux 无头（托盘缺失时优雅降级）。
-pub fn run_broker(autostart: bool) {
+pub fn run_broker() {
     #[cfg(any(target_os = "windows", target_os = "macos"))]
     {
-        run_broker_with_tray(autostart);
+        run_broker_with_tray();
     }
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
-        run_broker_headless(autostart);
+        run_broker_headless();
     }
 }
 
@@ -186,13 +186,13 @@ fn app_context() -> tauri::Context<tauri::Wry> {
 }
 
 #[cfg(any(target_os = "windows", target_os = "macos"))]
-fn run_broker_with_tray(autostart: bool) {
+fn run_broker_with_tray() {
     tauri::Builder::default()
         // 托盘破坏性操作的原生确认对话框
         .plugin(tauri_plugin_dialog::init())
         // 托盘更新提示：Broker 常驻期间定期检查新版本
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .setup(move |app| {
+        .setup(|app| {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
@@ -211,7 +211,7 @@ fn run_broker_with_tray(autostart: bool) {
                     .build()
                     .expect("failed to build broker runtime");
                 rt.block_on(async move {
-                    broker::run_headless(autostart).await;
+                    broker::run_headless().await;
                     handle.exit(0);
                 });
             });

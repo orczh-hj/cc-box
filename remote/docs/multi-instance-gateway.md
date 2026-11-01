@@ -60,7 +60,7 @@
 ```
 cc-box                 → GUI 模式（创建一个窗口，PTY/hook 留在本进程）
 cc-box --broker        → Broker 模式（无 GUI 窗口）
-cc-box --broker --autostart → 登录项启动（忽略上次 user_quit）
+cc-box --broker → 登录项启动（Broker 启动不读 user_quit）
 cc-box --quit-broker   → 通过 IPC 退出 Broker（会关闭所有窗口）
   Windows/macOS        → Tauri 托盘/菜单栏 + 后台服务线程
   Linux                → 纯 tokio 无头进程（当前构建不链接 libappindicator）
@@ -94,7 +94,7 @@ cc-box --quit-broker   → 通过 IPC 退出 Broker（会关闭所有窗口）
 | 状态 | 语义 | GUI 自动拉起 |
 |---|---|---|
 | `running` | 后台服务在线（远程可开可关），窗口全关也保持 | 是 |
-| `user_quit` | 用户从托盘「退出 CC-Box」，持久抑制 | 否；手动打开 GUI 或 `--autostart` 清除 |
+| `user_quit` | 用户从托盘「退出 CC-Box」，抑制 GUI 后台循环的自动拉起 | 否；显式启动（手动/登录/更新重拉）不受影响，手动打开 GUI 清除 |
 | `update_in_progress` | 安装前退出，释放可执行文件 | 同版本且 5 分钟内抑制；版本变化/超时后清除 |
 
 > 旧版本留下的 `idle_exit` 标记仍可读取（视为允许拉起），但新版 Broker 不再写它。

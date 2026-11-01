@@ -129,17 +129,17 @@ UI 已浏览器化（一套 UI 走桌面 Tauri / 宽屏浏览器 / 手机浏览�
 远程设备入口从「GUI 实例竞选 Gateway」改为「独立后台 Broker」：
 
 - **进程**：`cc-box --broker`；Windows/macOS 带托盘（标题 `CC-Box`），Linux 纯 tokio 无头（托盘缺失优雅降级）。GUI 启动时按需拉起；`broker.lock` OS 排他锁保证单实例；**所有窗口关闭后常驻**，不再空闲退出；`cc-box --quit-broker` 可退出。
-- **命令行参数（`-h` 可查）**：`-h/--help`、`-V/--version`、`--broker`、`--autostart`（配合 `--broker`，登录自启）、`--quit-broker`、`--new-window`，以及结尾的项目目录参数。解析集中在 `src/cli.rs`（纯函数 + 单测）。发布构建是 GUI 子系统（`windows_subsystem = "windows"`）**默认没有控制台**，`println!/eprintln!` 在终端里看不到；需要用户可见输出时用 `cli::print_console`（附加父控制台 → 写 `CONOUT$` → 立即 `FreeConsole`，不长期占用，避免 Broker 随终端关闭收到 CTRL_CLOSE 退出）。终端里手动 `cc-box --broker` 视为明确意图，会清除 `user_quit` 抑制；GUI 拉起时 stdio 为空、`is_terminal()` 为 false，不会误清除。
+- **命令行参数（`-h` 可查）**：`-h/--help`、`-V/--version`、`--broker`、`--quit-broker`、`--new-window`，以及结尾的项目目录参数（`--autostart` 已废弃：旧注册项仍带该参数，作为未知参数忽略）。解析集中在 `src/cli.rs`（纯函数 + 单测）。发布构建是 GUI 子系统（`windows_subsystem = "windows"`）**默认没有控制台**，`println!/eprintln!` 在终端里看不到；需要用户可见输出时用 `cli::print_console`（附加父控制台 → 写 `CONOUT$` → 立即 `FreeConsole`，不长期占用，避免 Broker 随终端关闭收到 CTRL_CLOSE 退出）。`user_quit` 标记只约束 **GUI 后台循环的自动拉起**（`broker_client`）；Broker 自身启动不读它——手动终端、登录自启、安装器更新后重拉都会直接运行，单实例由 `broker.lock` 保证。
 - **窗口管理**：成员 `member.hello` 带 pid/windowTitle，项目切换经 `window.title` 更新；托盘顶部只有 `CC-Box`，**每个窗口直接是一级菜单项，单击显示/聚焦**；不再提供单窗口关闭/重启；`window.command{close|show|openRemote}` 仍用于整体退出/更新/远程连接。新建窗口带 `--new-window`，停在项目页；Windows 用 `CreateProcessW` + `CREATE_NO_WINDOW` 避免 debug 控制台与句柄继承。零窗口时远程 `rpc.call "spawn_new_instance"` 由 Broker 拉起空窗口（12 上限 + 2s 冷却）。
 - **远程快捷动作**：托盘「远程连接」显示第一个可控制窗口并打开面板（无窗口先新建）；顺序为 远程连接 → 刷新远程密钥 → 关闭/开启远程连接。破坏性操作弹原生确认对话框（关闭远程连接、刷新密钥、退出 CC-Box）。
 - **跨窗口状态**：成员写命令的 `state-changed` 经 `GwUp::StateChanged` 上行，Broker 重分配 revision 后扇出所有 v2 成员与手机；PtyInput/PtyResize 只校验该会话 active 归属、无控制面副作用；PTY 退出只上行 `SessionRemove`，Broker 统一广播一次 `SessionExit`。
 - **退出/更新可靠性**：Quit/PrepareForUpdate 先写回 admin 响应再退出；更新安装失败调用 `resume_broker_connection` 清除 update 标记/抑制并恢复 Broker；gateway.lock 心跳校验 owner + 原子写；IPC server 创建失败直接退出释放锁。
 - **客户端细节**：`tailSeq` 在 claim/重 attach 时只抬高不降低；Linux AppImage 拉起 Broker 优先 `$APPIMAGE`；设置页自启动状态每 5s 校准。
-- **开机自启动**：仅 Broker；入口在**设置 → 启动**与托盘勾选项，不在远程面板；Windows Run / macOS LaunchAgent / Linux XDG autostart，命令 `<exe> --broker --autostart`。
+- **开机自启动**：仅 Broker；入口在**设置 → 启动**与托盘勾选项，不在远程面板；Windows Run / macOS LaunchAgent / Linux XDG autostart，命令 `<exe> --broker`。
 - **IPC**：Windows Named Pipe（显式 DACL）/ Unix UDS（0700 + 0600 + peer UID），4 字节长度 + JSON；v2 首帧 `member.hello`（含 pid）+ `broker.secret`；旧版 GUI 仍走 `/internal/gw-ws` + `gateway.secret`。
 - **路由**：`gateway.rs` 不再有 Role/选举/Waiting；Broker 永远是路由中心。`SessionCreated` 先登记路由再回手机；未知 `pty_id` 拒绝并推行快照；成员断连清理待处理 RPC/创建并重置远端视图。
 - **队列**：每成员/连接单一有序队列；输入/控制面可靠（超时断开重同步），`PtyOutput` 带 `seq`，客户端显示缺口。
-- **生命周期**：`broker.state.json` 区分 `user_quit`/`update_in_progress`（旧 `idle_exit` 仅兼容读取）；`remote.enabled=false` 只是停 LAN/relay，不退出进程。手动打开 GUI 或 `--autostart` 清除 `user_quit`；更新安装前调用 `prepare_for_update`（保留发起窗口、关闭其余窗口）释放 exe。
+- **生命周期**：`broker.state.json` 区分 `user_quit`/`update_in_progress`（旧 `idle_exit` 仅兼容读取）；`remote.enabled=false` 只是停 LAN/relay，不退出进程。手动打开 GUI 清除 `user_quit`（仅影响后台自动拉起）；更新安装前调用 `prepare_for_update`（保留发起窗口、关闭其余窗口）释放 exe。
 - **统一面板**：所有窗口远程面板读同一份 Broker 镜像，不显示宿主角色/在线数量。
 - **测试**：`cargo test`（`tests/gateway.rs`、`broker_ipc.rs`、`broker_lifecycle.rs`）+ `npm test`；macOS/Linux 行为需在对应平台本地构建验证（macOS 注意 locale 相关的排序断言需显式指定 locale）。
 - **本地手工验证**：启动两个 GUI → 确认只有一个 `cc-box --broker`；任务管理器结束 Broker → GUI 自动恢复；托盘关闭单个/全部窗口 → Broker 仍存活；手机零窗口「启动窗口」；「退出 CC-Box」关闭全部窗口；开机自启动项开/关；LAN 端口被第三方占用时 relay 仍可用；旧版占口时面板显示 legacy 警告。

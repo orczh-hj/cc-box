@@ -1,8 +1,9 @@
 //! Broker 生命周期标记：区分 user_quit / update_in_progress。
 //!
-//! 文件 `~/.cc-box/broker.state.json` 由 Broker 原子写；所有 GUI 在自动拉起
-//! Broker 前读取该标记，避免“退出 CC-Box 后又被残留 GUI 立刻拉起”和
-//! “更新期间重新锁住待替换的可执行文件”。Broker 常驻，不再写 idle_exit；
+//! 文件 `~/.cc-box/broker.state.json` 由 Broker 原子写；**GUI 后台循环**在自动
+//! 拉起 Broker 前读取该标记，避免“退出 CC-Box 后又被残留 GUI 立刻拉起”；
+//! 更新标记用于避免安装器替换文件期间重新锁住可执行文件。Broker 自身启动
+//! 不读 `user_quit`（单实例由 broker.lock 保证）。Broker 常驻，不再写 idle_exit；
 //! 该状态仅为读取旧版本遗留标记而保留。
 
 use std::path::PathBuf;
@@ -80,8 +81,6 @@ pub(crate) fn clear() -> std::io::Result<()> {
     }
 }
 
-/// GUI 自动拉起判定。`update_in_progress` 只在版本未变化且 5 分钟内有效；
-/// `user_quit` 需要用户显式开启远程/启动后台服务来清除。
 /// 更新中标记的抑制窗口：安装器替换文件期间防止重复拉起 Broker
 const UPDATE_SUPPRESS_WINDOW_MS: u128 = 5 * 60 * 1000;
 
@@ -136,6 +135,9 @@ pub(crate) fn suppression() -> Suppression {
     reason
 }
 
+/// GUI 自动拉起判定（仅 `broker_client` 与「显式开启远程」等路径使用）。
+/// `user_quit` 需手动打开 GUI 或显式开启远程服务清除；
+/// `update_in_progress` 只在版本未变化且 5 分钟内有效。
 pub(crate) fn should_autostart() -> bool {
     suppression() == Suppression::None
 }

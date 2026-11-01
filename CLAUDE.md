@@ -256,14 +256,14 @@ UI 已浏览器化（一套 UI 走桌面 Tauri / 宽屏浏览器 / 手机浏览�
 - **窗口管理**：Broker 记录成员 pid 与真实窗口标题；托盘顶部只有 `CC-Box`，**每个窗口直接是一级菜单项，单击即显示/聚焦**（不再有「窗口」父级，也不提供单窗口关闭/重启）；`window.command{close|show|openRemote}` 仍用于整体退出/更新/远程连接。新建窗口带 `--new-window`，停在项目页不自动进终端，Windows 用 `CreateProcessW(bInheritHandles=FALSE, CREATE_NO_WINDOW)` 避免控制台与句柄泄漏。零窗口时手机/桌面可 `rpc.call "spawn_new_instance"` 拉起空窗口；手机终端页有 stopped Tab 时也显示「启动窗口」覆盖层。
 - **窗口名**：托盘与手机分组/实例选择器统一使用真实窗口标题（打开项目=项目名，项目页/未打开=`CC-Box`；`window.title` 更新时同步 `MemberEntry.name` 与已有会话 `instanceName`，同名去重）。
 - **远程快捷动作**：托盘「远程连接」显示第一个可控制窗口并打开面板（无窗口先新建）；菜单顺序为 远程连接 → 刷新远程密钥 → 关闭/开启远程连接。**自动更新（Broker 单点流水线「下载→判窗口→安装」）**：启动即检查 + 每 2h 一次；检查到新版本**无条件下载**；「自动更新」开关（`config.json::autoUpdate` 缺省=开）开启且零窗口时安装重启；托盘「更新到 vX」原生二次确认后直接执行同链（先关窗），无更新显示「检查更新」。**破坏性操作统一用原生确认对话框**：关闭远程连接、刷新远程密钥、退出 CC-Box、更新 CC-Box；窗口单击显示/新建/开启远程/自启动/检查更新不确认。
-- **开机自启动**：仅 Broker（不开窗口）；入口在**设置 → 启动**与托盘勾选项，不在远程面板；Windows Run / macOS LaunchAgent / Linux XDG autostart，命令带 `--broker --autostart`；无托盘环境用 `cc-box --quit-broker`。
+- **开机自启动**：仅 Broker（不开窗口）；入口在**设置 → 启动**与托盘勾选项，不在远程面板；Windows Run / macOS LaunchAgent / Linux XDG autostart，命令为 `--broker`；无托盘环境用 `cc-box --quit-broker`。
 - **IPC**（`gateway_proto.rs` / `broker/ipc.rs`）：Windows Named Pipe（显式 DACL）/ Unix UDS（0700+0600+peer UID）；v2 首帧 `member.hello`（含 pid/windowTitle）+ `broker.secret`；成员上行 `window.title`/`state.changed`；管理操作独立 `admin` 首帧。旧版 GUI 仍走 `/internal/gw-ws` + `gateway.secret`（v1），无 pid/窗口指令。
 - **状态同步**：成员本地写命令的 `state-changed` 经 `state.changed` 上行，Broker 重分配设备级 revision 后扇出其他 v2 成员与手机（窗口 A 修改刷新 B/C）；**发起成员不回发**（其本端已有 Tauri 本地通知 + 写回环抑制，二次回环会击穿抑制触发全量刷新——隐藏项目列表闪动回归），**成员经 Broker 时不再本地广播手机**（本地 revision + 设备级 revision 双发会让手机判 revision 跳变触发 state-resync-needed 全量重拉）；`PtyInput/PtyResize` 只校验该会话 active 归属、无控制面副作用（必须已有 attach）；PTY 退出由成员上行 `session.remove`，Broker 只广播一次 `session.exit`。
 - **退出/更新**：Quit/PrepareForUpdate 先写回 `admin.result` 再退出；更新安装失败调用 `resume_broker_connection` 清除 update 标记/抑制并恢复；gateway.lock 心跳校验 owner + 原子写，解析失败按 mtime 判 stale；IPC server 创建失败直接退出释放 broker.lock。
 - **客户端细节**：`tailSeq` 基线 claim/重 attach 时只抬高不降低；Linux AppImage 拉起 Broker 优先 `$APPIMAGE`；设置页开机自启动每 5s 校准。
 - **单一有序队列**：每成员/连接一条队列；控制面与 `PtyInput` 可靠投递（`send().await`，5s 超时断开重同步），**绝不 try_send 静默丢输入**；`PtyOutput` 可丢但带 `seq`，客户端检测缺口并提示。
 - **路由**：`gateway::dispatch` 分类 DeviceGlobal / SessionScoped / Create；`SessionCreated` **先登记路由再投递手机**；未知 pty_id 拒绝 + 推 `sessions` 快照，绝不回退 Broker 本地；成员断连清理路由/缓存/粘连/待处理 RPC/创建；重连全量快照 + `reset_remote_views`。
-- **生命周期**：`broker.state.json` 区分 `user_quit`（退出 CC-Box，持久抑制；手动 GUI/`--autostart` 清除）、`update_in_progress`（安装前退出，版本变化后解除）；`remote.enabled=false` 不是生命周期状态（Broker 继续运行，仅停 LAN/relay）。旧 `idle_exit` 标记仅兼容读取。
+- **生命周期**：`broker.state.json` 区分 `user_quit`（退出 CC-Box 后抑制**GUI 后台循环的自动拉起**；Broker 自身启动不读它，任何显式启动都直接运行，单实例靠 broker.lock）、`update_in_progress`（安装前退出，版本变化后解除）；`remote.enabled=false` 不是生命周期状态（Broker 继续运行，仅停 LAN/relay）。旧 `idle_exit` 标记仅兼容读取。
 - **所有窗口内容一致**：远程面板一律读 Broker 镜像，不区分宿主角色、不显示在线窗口数量；三个操作（更新连接码/刷新密钥/停止远程）与开机自启动都经 Broker 执行。
 - 正本 → [remote/docs/protocol.md](remote/docs/protocol.md)「设备级 Broker IPC」；实施细节 → [remote/docs/multi-instance-gateway.md](remote/docs/multi-instance-gateway.md)
 

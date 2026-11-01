@@ -72,7 +72,11 @@ fn sync_status() {
 }
 
 /// Broker 主入口：纯 tokio，无 Tauri。由 main.rs 在 `--broker` 时分派。
-pub async fn run_headless(autostart: bool) {
+///
+/// **不读 `user_quit`**：该标记只约束「GUI 后台循环的自动拉起」（见
+/// `broker_client`）。任何显式启动（手动终端、登录自启、安装器更新后重拉）
+/// 都应当直接运行——单实例由 `broker.lock` 保证，不靠标记。
+pub async fn run_headless() {
     crate::logger::init();
     let _guard = match ownership::BrokerInstanceGuard::acquire() {
         Ok(g) => g,
@@ -84,40 +88,18 @@ pub async fn run_headless(autostart: bool) {
             return;
         }
     };
-    // 登录自启是新的用户会话；终端里手动 `cc-box --broker` 同样是明确的用户意图
-    // （GUI 拉起 Broker 时 stdio 重定向为空，is_terminal 为 false，不会误清除）。
-    // 两者都应解除上次“退出 CC-Box”的持久抑制。
-    use std::io::IsTerminal;
-    let interactive = std::io::stdin().is_terminal() || std::io::stderr().is_terminal();
-    if autostart {
-        lifecycle::clear_user_quit();
-    } else if interactive {
-        log::info!("[broker] interactive launch: clearing previous user_quit marker");
-        lifecycle::clear_user_quit();
-    }
-    // 竞态兜底：托盘 user_quit / 更新标记有效时，即使被并发拉起也不覆盖标记。
-    // user_quit 是持久抑制 → 直接退出；更新标记是瞬态（安装器替换文件期间）→
-    // 等待其过期而不是放弃，否则更新完成后无人重新拉起 Broker。
+    // 更新标记是瞬态（安装器替换文件期间）：等待其过期而不是放弃，
+    // 否则更新完成后无人重新拉起 Broker。
     let mut announced_update_wait = false;
-    loop {
-        match lifecycle::suppression() {
-            lifecycle::Suppression::None => break,
-            lifecycle::Suppression::UpdateInProgress => {
-                if !announced_update_wait {
-                    announced_update_wait = true;
-                    log::info!("[broker] update in progress; waiting before start");
-                    crate::cli::print_console(
-                        "[cc-box] update in progress, waiting for it to finish...\n",
-                    );
-                }
-                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-            }
-            lifecycle::Suppression::UserQuit => {
-                log::info!("[broker] lifecycle marker suppresses startup; exiting");
-                eprintln!("[cc-box] broker not started: CC-Box was quit by the user");
-                return;
-            }
+    while let lifecycle::Suppression::UpdateInProgress = lifecycle::suppression() {
+        if !announced_update_wait {
+            announced_update_wait = true;
+            log::info!("[broker] update in progress; waiting before start");
+            crate::cli::print_console(
+                "[cc-box] update in progress, waiting for it to finish...\n",
+            );
         }
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     }
     crate::remote_state::set_broker_mode(true);
     if let Err(e) = ownership::ensure_broker_secret() {
