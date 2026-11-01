@@ -66,6 +66,24 @@ npm run release -- --bump <level> --notes "<notes>"
 | CI 已完成的重发 | `--exact --skip-ci` |
 | 指定级别 | `--bump patch/minor/major`（**major/minor 仅在用户明确要求时使用**） |
 | 没有变更 | 提示用户，中止 |
+| 撤回某版本后重发下一版 | **先清 CHANGELOG 顶部段 + 三处 tag**，见「删除/回滚已发布版本」 |
+| 产物下载失败（CDN `PROTOCOL_ERROR` / 代理不通） | 手动断点续传预下载到 `releases/vX.Y.Z/`，再 `--oss-only`（脚本按 size+digest 校验，完整即跳过下载） |
+
+**产物下载失败时的补救**（代理长期不可用、CDN 间歇性中断）：
+
+```bash
+mkdir -p releases/vX.Y.Z && cd releases/vX.Y.Z
+# 逐个文件断点续传循环，直连 + HTTP/1.1 比 HTTP/2 稳
+for f in <资产名...>; do
+  for i in $(seq 1 40); do
+    curl -sSL --http1.1 -C - --max-time 120 --speed-time 20 --speed-limit 1024 \
+      -o "$f" "https://github.com/orczh-hj/cc-box/releases/download/vX.Y.Z/$f" && break
+    sleep 2
+  done
+done
+```
+
+资产名与大小用 `gh api repos/orczh-hj/cc-box/releases/tags/vX.Y.Z --jq '.assets[] | "\(.name) \(.size)"'` 对照。下全后回到仓库根执行 `npm run release -- --oss-only vX.Y.Z`。
 
 ### Notes 格式
 
@@ -76,6 +94,8 @@ npm run release -- --bump <level> --notes "<notes>"
 ### Fixed
 - 修复<用户可感知的问题>
 ```
+
+**传参必须用单行 + `\n` 转义**（`--notes '### Features\n- ...'`）：多行字符串经 `npm run` 传参只会保留首行，其余行被丢弃——CHANGELOG 与 Release notes 会变成只有标题的空段。若已发生：补全 CHANGELOG 后 `git commit --amend --no-edit`（未推送时），再用正确的单行 notes 重跑即可，`updateChangelog` 会跳过已存在的段、只补用 Release notes。
 
 中文、`\n` 换行、动词开头（新增/修复/调整/移除），从用户使用角度写，不写模块与实现细节。含远程改动时末尾加提示行（如 `提示：刷新浏览器获取新前端。`）。
 
@@ -96,6 +116,15 @@ git tag -d vX.Y.Z
 ```
 
 删除 `latest.json` 期间更新通道不可用，应尽快重新发布以恢复。**安全红线**：只删 `cc-box/vX.Y.Z/` 前缀与 `latest.json`，绝不 `rm oss://cc-box/cc-box/` 或 `oss://cc-box/` 整体。
+
+**撤回后立即发下一版：必须先清干净，否则会被锁回被删版本。** `resolveTargetVersion` 的断点锁定判据是「版本文件 == CHANGELOG 顶部版本 且该版本未完整发布」——撤回后版本文件仍是旧版本、CHANGELOG 顶部段还在，会被误判为「在途发布」并**重新打上被删版本的 tag**（实测：删 0.17.3 后 `--bump patch` 又发了 0.17.3）。正确顺序：
+
+1. 删除 CHANGELOG 顶部的该版本段（或改成下一版应有的内容）
+2. 删除本地 / GitHub / Gitee 三处 tag（`git tag -d` + 两条 `git push <url> :refs/tags/vX.Y.Z`）
+3. 确认 `gh release list` 已无该版本
+4. 再执行 `--bump patch`
+
+若已经误锁并推出了 run：先 `gh run cancel`，再按上面 1–3 清理，然后重来。
 
 ---
 
