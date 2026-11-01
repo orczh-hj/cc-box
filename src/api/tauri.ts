@@ -837,6 +837,9 @@ export const checkClaudeCliUpdate = (): Promise<ClaudeCliUpdateInfo> =>
   invoke<ClaudeCliUpdateInfo>('check_claude_cli_update');
 
 // 获取本地已安装 Claude CLI 版本号（无 HTTP）
+export const getClaudeConfigDir = (): Promise<string> =>
+  invoke<string>('get_claude_config_dir');
+
 export const getInstalledClaudeVersion = (): Promise<string | null> =>
   invoke<string | null>('get_installed_claude_version');
 

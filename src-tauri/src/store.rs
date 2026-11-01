@@ -263,6 +263,24 @@ fn get_claude_dir() -> Result<PathBuf> {
 /// Claude 配置目录：尊重 `CLAUDE_CONFIG_DIR`（CLI 支持自定义配置目录），
 /// 未设置时回退 `~/.claude`。硬编码 home 会让自定义配置目录的用户
 /// 在 GUI 里改到另一份数据（操作对 CLI 完全无效）。
+/// 展示用：Claude CLI **实际**使用的配置目录，优先级与 PTY 注入顺序一致：
+/// 1. `~/.cc-box/config.json::claudeEnvVars.CLAUDE_CONFIG_DIR`（启动 CLI 时最后注入，
+///    覆盖进程环境）
+/// 2. 本进程环境变量 `CLAUDE_CONFIG_DIR`
+/// 3. 回退 `~/.claude`
+pub(crate) fn effective_claude_config_dir() -> Result<PathBuf> {
+    if let Ok(cfg) = get_app_config() {
+        if let Some(dir) = cfg
+            .claude_env_vars
+            .and_then(|vars| vars.get("CLAUDE_CONFIG_DIR").cloned())
+            .filter(|v| !v.trim().is_empty())
+        {
+            return Ok(PathBuf::from(dir));
+        }
+    }
+    claude_config_dir()
+}
+
 pub(crate) fn claude_config_dir() -> Result<PathBuf> {
     if let Some(dir) = std::env::var_os("CLAUDE_CONFIG_DIR") {
         let dir = PathBuf::from(dir);

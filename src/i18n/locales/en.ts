@@ -130,6 +130,10 @@ export default {
   languageZh: '中文',
 
   // Startup section
+  notDetected: 'Not detected',
+  claudeCliPath: 'Claude Code path',
+  claudeCliVersion: 'Claude Code version',
+  claudeConfigDir: 'Config dir (CLAUDE_CONFIG_DIR)',
   startupDefaults: 'Startup Defaults',
   startupDefaultsDesc: 'Default arguments applied when starting a new Claude session.',
   skipPermissions: 'Skip permissions',

@@ -130,6 +130,10 @@ export default {
   languageZh: '中文',
 
   // Startup section
+  notDetected: '未检测到',
+  claudeCliPath: 'Claude Code 路径',
+  claudeCliVersion: 'Claude Code 版本',
+  claudeConfigDir: '配置目录（CLAUDE_CONFIG_DIR）',
   startupDefaults: '启动默认值',
   startupDefaultsDesc: '启动新 Claude 会话时应用的默认参数。',
   skipPermissions: '跳过权限',

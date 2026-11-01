@@ -168,6 +168,8 @@ registry! {
     // 本地已装 Claude 版本号（纯本地只读，无 HTTP 无副作用）：手机端
     // Claude CLI 版本页展示需要；下载/安装类 installer 命令仍排除
     "get_installed_claude_version" => read() => | | crate::installer::get_installed_claude_version,
+    // 配置目录（只读展示）：启动设置页展示 CLAUDE_CONFIG_DIR 生效值
+    "get_claude_config_dir" => read() => | | crate::commands::get_claude_config_dir,
     // 前端日志上报（高频调用，浏览器端统一进桌面日志）
     "log_message" => read() => |level: String, message: String| log_message_rpc,
 

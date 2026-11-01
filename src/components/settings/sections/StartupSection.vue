@@ -3,6 +3,22 @@
     <h2 class="section-heading">{{ t('startupDefaults') }}</h2>
     <p class="section-desc">{{ t('startupDefaultsDesc') }}</p>
 
+    <!-- 当前运行环境（只读展示，不可修改） -->
+    <div class="runtime-card">
+      <div class="runtime-row">
+        <span class="runtime-label">{{ t('claudeCliPath') }}</span>
+        <code class="runtime-value" :title="claudePath || ''">{{ claudePath || t('notDetected') }}</code>
+      </div>
+      <div class="runtime-row">
+        <span class="runtime-label">{{ t('claudeCliVersion') }}</span>
+        <code class="runtime-value">{{ claudeVersion ? `v${claudeVersion}` : t('notDetected') }}</code>
+      </div>
+      <div class="runtime-row">
+        <span class="runtime-label">{{ t('claudeConfigDir') }}</span>
+        <code class="runtime-value" :title="configDir || ''">{{ configDir || t('notDetected') }}</code>
+      </div>
+    </div>
+
     <div class="setting-group">
       <label class="setting-card">
         <div class="card-left">
@@ -116,7 +132,7 @@ import { ref, reactive, watch, onMounted, onUnmounted } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useAppStore, DEFAULT_CLAUDE_ENV_VARS } from '@/stores/app'
 import { isTauriEnv } from '@/api/platform'
-import { getRemoteStatus, setBrokerAutostart } from '@/api/tauri'
+import { getRemoteStatus, setBrokerAutostart, getCheckResults, getInstalledClaudeVersion, getClaudeConfigDir } from '@/api/tauri'
 
 const { t } = useI18n()
 const appStore = useAppStore()
@@ -134,6 +150,32 @@ const autostartError = ref('')
 
 let autostartPollTimer: number | null = null
 
+/** 当前运行环境（只读）：Claude CLI 生效路径 / 版本 / 配置目录 */
+const claudePath = ref('')
+const claudeVersion = ref('')
+const configDir = ref('')
+
+async function loadRuntimeInfo() {
+  // 路径取环境检查里的 "Claude CLI" 项（与执行层共用 platform::cli_target：
+  // 配置的可执行路径优先，否则 PATH 检测结果）
+  try {
+    const results = await getCheckResults()
+    claudePath.value = results.find(r => r.name === 'Claude CLI')?.detectedPath ?? ''
+  } catch {
+    claudePath.value = ''
+  }
+  try {
+    claudeVersion.value = (await getInstalledClaudeVersion()) ?? ''
+  } catch {
+    claudeVersion.value = ''
+  }
+  try {
+    configDir.value = await getClaudeConfigDir()
+  } catch {
+    configDir.value = ''
+  }
+}
+
 async function loadAutostartStatus() {
   if (autostartBusy.value) return
   try {
@@ -146,6 +188,7 @@ async function loadAutostartStatus() {
 }
 
 onMounted(() => {
+  void loadRuntimeInfo()
   if (!isTauriEnv) return
   void loadAutostartStatus()
   // Broker 可能尚在启动，或托盘侧改了勾选：面板打开期间周期校准
@@ -226,6 +269,42 @@ function handleReset() {
 </script>
 
 <style scoped>
+/* 当前运行环境（只读）：等宽展示路径，单行省略，悬停看完整值 */
+.runtime-card {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  padding: 12px 14px;
+  margin-bottom: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.runtime-row {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  min-width: 0;
+}
+
+.runtime-label {
+  flex-shrink: 0;
+  width: 120px;
+  font-size: 12px;
+  color: var(--text-tertiary);
+}
+
+.runtime-value {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .section-content {
   padding: 8px 0;
 }

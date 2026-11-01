@@ -450,6 +450,7 @@ pub fn run(initial_dir: Option<String>, new_window: bool) {
             installer::cancel_auto_install,
             // 本地只读版本查询经 commands.rs 统一入口（远程 RPC 白名单同源）
             commands::get_installed_claude_version,
+            commands::get_claude_config_dir,
             installer::list_claude_versions,
             installer::download_claude_version,
             installer::cancel_claude_download,

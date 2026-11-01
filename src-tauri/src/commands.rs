@@ -158,6 +158,16 @@ pub async fn get_installed_claude_version() -> Result<Option<String>, String> {
     crate::installer::get_installed_claude_version().await
 }
 
+/// Claude Code 实际使用的配置目录（只读展示；优先级见
+/// `store::effective_claude_config_dir`：cc-box 注入的 CLAUDE_CONFIG_DIR
+/// → 进程环境变量 → ~/.claude）
+#[tauri::command]
+pub async fn get_claude_config_dir() -> Result<String, String> {
+    crate::store::effective_claude_config_dir()
+        .map(|p| p.display().to_string())
+        .map_err(|e| e.to_string())
+}
+
 // ==================== Store Commands ====================
 
 /// 获取环境检查结果

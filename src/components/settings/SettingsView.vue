@@ -80,9 +80,9 @@ defineEmits<{ close: [] }>()
 const sidebarStore = useSidebarStore()
 
 const navItems = computed(() => [
-  { id: 'appearance', label: t('appearance') },
   { id: 'startup', label: t('startup') },
   { id: 'providers', label: t('providers') },
+  { id: 'appearance', label: t('appearance') },
   { id: 'shortcuts', label: t('shortcuts') },
   // 更新/安装器为系统级操作，仅桌面可用
   ...(isTauriEnv ? [{ id: 'update', label: t('update') }] : []),
