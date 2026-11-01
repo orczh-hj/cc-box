@@ -78,8 +78,9 @@ pub async fn run_headless(autostart: bool) {
         Ok(g) => g,
         Err(e) => {
             log::info!("[broker] not starting: {}", e);
-            // `cc-box --broker` 从终端启动时给一句可见反馈，否则表现为「无反应」
-            eprintln!("[cc-box] broker not started: {}", e);
+            // `cc-box --broker` 从终端启动时给一句可见反馈，否则表现为「无反应」。
+            // 发布构建是 GUI 子系统，eprintln! 无控制台可写 → 走附加父控制台。
+            crate::cli::print_console(&format!("[cc-box] broker not started: {}\n", e));
             return;
         }
     };
@@ -105,7 +106,9 @@ pub async fn run_headless(autostart: bool) {
                 if !announced_update_wait {
                     announced_update_wait = true;
                     log::info!("[broker] update in progress; waiting before start");
-                    eprintln!("[cc-box] update in progress, waiting for it to finish...");
+                    crate::cli::print_console(
+                        "[cc-box] update in progress, waiting for it to finish...\n",
+                    );
                 }
                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;
             }
