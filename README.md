@@ -10,6 +10,10 @@
 </p>
 
 <p align="center">
+  <a href="https://ccbox.orczh.top/"><strong>🌐 Official website · ccbox.orczh.top</strong></a>
+</p>
+
+<p align="center">
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-blue" alt="Platform">
   <img src="https://img.shields.io/badge/Tauri-2.x-orange" alt="Tauri">
   <img src="https://img.shields.io/badge/Vue-3-green" alt="Vue">
@@ -103,7 +107,7 @@ The app runs the real Claude CLI binary through a pseudo-terminal. Everything wo
 
 ### 1. Download & Install
 
-Head to the [**Releases**](https://github.com/orczh-hj/cc-box/releases) page and grab the installer for your platform:
+Grab the latest installer from **[ccbox.orczh.top](https://ccbox.orczh.top/)** — the site always serves the current version for your platform:
 
 | Platform | File |
 |----------|------|
@@ -111,7 +115,7 @@ Head to the [**Releases**](https://github.com/orczh-hj/cc-box/releases) page and
 | **macOS** | `.dmg` (universal binary) |
 | **Linux** | `.deb` or `.AppImage` |
 
-Users in China can download from [Gitee Releases](https://gitee.com/orczh/cc-box/releases).
+Alternate: [GitHub Releases](https://github.com/orczh-hj/cc-box/releases).
 
 ### 2. Launch & Go
 

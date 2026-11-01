@@ -399,6 +399,7 @@ export default {
   refreshAgents: 'Refresh agents',
   loadingAgents: 'Loading agents...',
   noAgentsAvailable: 'No agents available',
+  addAgentsHint: 'Add agents to ~/.claude/agents/ or .claude/agents/',
   builtin: 'Built-in',
 
   // Plugins panel
@@ -631,6 +632,7 @@ export default {
   editorCopyPath: 'Copy Path',
   editorJsonInvalid: 'Failed to parse JSON',
   editorJsonMustBeObject: 'JSON must be an object',
+  editorMcpFormUnsupported: 'This JSON cannot be represented by the form (e.g. type is not a listed option). Original kept; you can stay in JSON mode and save, or fix it before switching to form',
   mcpNew: 'New MCP Server',
   editorMcpNewTitle: 'New MCP Server',
   editorMcpEditTitle: 'Edit MCP Server: {name}',
@@ -653,6 +655,7 @@ export default {
   editorSkillDescHint: 'Claude loads skills by description — describe when it applies',
   editorSkillDescRequired: 'Description is required (Claude uses it to decide loading)',
   editorSkillContent: 'Content (Markdown)',
+  editorSourceInvalid: 'Invalid source: frontmatter must be wrapped in ---. The form was not updated; fix the source before switching or saving.',
   editorSkillSourceHint: 'Full SKILL.md (frontmatter + body), validated on save',
   editorSkillDeleteConfirm: 'Permanently delete skill "{name}"? (including disabled backup; the folder will be really removed)',
   agentNew: 'New Agent',

@@ -529,6 +529,8 @@ export interface HookListItem {
   /** 原始作用域（停用条目启用时回到原 settings 文件） */
   scope: 'user' | 'project' | 'local';
   projectPath?: string;
+  /** 原始 matcher 层条目（编辑器保留未知字段用） */
+  raw?: Record<string, unknown>;
 }
 
 export const saveMcpServer = (request: SaveMcpRequest): Promise<void> =>

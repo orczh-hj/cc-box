@@ -28,10 +28,13 @@
       </div>
 
       <!-- Empty -->
-      <div v-else-if="allSkills.length === 0" class="empty-state">
-        <span class="empty-text">{{ t('noSkillsAvailable') }}</span>
-        <span class="empty-hint">{{ t('addSkillsHint') }}</span>
-      </div>
+      <PanelEmpty
+        v-else-if="allSkills.length === 0"
+        :text="t('noSkillsAvailable')"
+        :hint="t('addSkillsHint')"
+        :cta="t('skillNew')"
+        @action="openEditor(null)"
+      />
 
       <!-- Skills List (按顺序: Project -> User -> Plugin) -->
       <div v-else class="skills-list">
@@ -85,6 +88,7 @@ import SkillGroup from './SkillGroup.vue'
 import SkillEditor from '../editor/SkillEditor.vue'
 import PanelHeader from '../sidebar/PanelHeader.vue'
 import DocsHelpButton from '../sidebar/DocsHelpButton.vue'
+import PanelEmpty from '../sidebar/PanelEmpty.vue'
 
 const sidebarStore = useSidebarStore()
 const appStore = useAppStore()
@@ -210,6 +214,7 @@ onMounted(() => {
   font-size: 12px;
   color: var(--text-tertiary);
 }
+
 
 .skills-list {
   display: flex;

@@ -24,11 +24,13 @@
         <span class="error-text">{{ error }}</span>
       </div>
 
-      <div v-else-if="hooks.length === 0 && pluginHookRows.length === 0" class="empty-state">
-        <span class="empty-text">{{ t('noHooksConfigured') }}</span>
-        <span class="empty-hint">{{ t('addHooksHint') }}</span>
-        <button class="empty-cta" @click="openEditor(null)">{{ t('hookNew') }}</button>
-      </div>
+      <PanelEmpty
+        v-else-if="hooks.length === 0 && pluginHookRows.length === 0"
+        :text="t('noHooksConfigured')"
+        :hint="t('addHooksHint')"
+        :cta="t('hookNew')"
+        @action="openEditor(null)"
+      />
 
       <div v-else class="hooks-list">
         <template v-if="hooks.length > 0">
@@ -112,10 +114,12 @@ import { useI18n } from 'vue-i18n'
 import { useSidebarStore } from '@/stores/sidebar'
 import { useAppStore } from '@/stores/app'
 import type { HookListItem } from '@/api/tauri'
+import { collectPluginHookRows } from '@/utils/plugin-hooks'
 import HookGroup from './HookGroup.vue'
 import HookEditor from '../editor/HookEditor.vue'
 import PanelHeader from '../sidebar/PanelHeader.vue'
 import DocsHelpButton from '../sidebar/DocsHelpButton.vue'
+import PanelEmpty from '../sidebar/PanelEmpty.vue'
 
 const { t } = useI18n()
 const sidebarStore = useSidebarStore()
@@ -152,38 +156,8 @@ function toggleGroup(key: string) {
   sidebarStore.toggleHookGroup(key as keyof typeof sidebarStore.hooksExpandedGroups)
 }
 
-// Plugin 提供的 hooks（来自已安装插件，只读展示 + 点击展开详情）
-interface PluginHookRow {
-  plugin: string
-  event: string
-  matcher?: string
-  type?: string
-  summary?: string
-  timeout?: unknown
-}
-
-const pluginHookRows = computed<PluginHookRow[]>(() => {
-  const rows: PluginHookRow[] = []
-  for (const p of sidebarStore.plugins) {
-    for (const h of p.hooks ?? []) {
-      rows.push({
-        plugin: p.name,
-        event: h.event,
-        matcher: h.matcher,
-        type: h.type,
-        summary: h.summary,
-        timeout: h.timeout,
-      })
-    }
-  }
-  // 排序：先 plugin 名称，再 hook 类型（command/http/prompt/agent），同类型内按事件名稳定排序
-  return rows.sort(
-    (a, b) =>
-      a.plugin.localeCompare(b.plugin) ||
-      (a.type ?? '').localeCompare(b.type ?? '') ||
-      a.event.localeCompare(b.event)
-  )
-})
+// Plugin 提供的 hooks：被禁用的插件不贡献子项（与 skills/agents/mcp 一致）
+const pluginHookRows = computed(() => collectPluginHookRows(sidebarStore.plugins))
 
 const pluginExpanded = ref<Record<number, boolean>>({})
 
@@ -294,20 +268,6 @@ onMounted(() => {
   color: var(--text-tertiary);
 }
 
-.empty-cta {
-  margin-top: 6px;
-  padding: 6px 16px;
-  border: 1px solid var(--border-color);
-  border-radius: 8px;
-  background: var(--bg-primary);
-  color: var(--text-primary);
-  font-size: 12px;
-  cursor: pointer;
-}
-
-.empty-cta:hover {
-  background: var(--hover-bg);
-}
 
 .hooks-list {
   display: flex;

@@ -28,10 +28,13 @@
       </div>
 
       <!-- Empty -->
-      <div v-else-if="allServers.length === 0" class="empty-state">
-        <span class="empty-text">{{ t('noMcpConfigured') }}</span>
-        <span class="empty-hint">{{ t('addMcpHint') }}</span>
-      </div>
+      <PanelEmpty
+        v-else-if="allServers.length === 0"
+        :text="t('noMcpConfigured')"
+        :hint="t('addMcpHint')"
+        :cta="t('mcpNew')"
+        @action="openEditor(null)"
+      />
 
       <!-- Servers List -->
       <div v-else class="servers-list">
@@ -96,6 +99,7 @@ import McpGroup from './McpGroup.vue'
 import McpEditor from '../editor/McpEditor.vue'
 import PanelHeader from '../sidebar/PanelHeader.vue'
 import DocsHelpButton from '../sidebar/DocsHelpButton.vue'
+import PanelEmpty from '../sidebar/PanelEmpty.vue'
 
 const sidebarStore = useSidebarStore()
 const appStore = useAppStore()
@@ -229,6 +233,7 @@ onMounted(() => {
   font-size: 12px;
   color: var(--text-tertiary);
 }
+
 
 .servers-list {
   display: flex;

@@ -55,7 +55,15 @@
 
     <div v-else class="editor-field">
       <span class="editor-label">{{ originalName }}.md</span>
-      <textarea v-model="sourceText" class="editor-textarea" rows="16" spellcheck="false"></textarea>
+      <!-- 错误提示放 textarea 上方：文本超长时下方提示在滚动视口外看不见 -->
+      <div v-if="sourceError" class="editor-error">{{ sourceError }}</div>
+      <textarea
+        v-model="sourceText"
+        class="editor-textarea"
+        rows="16"
+        spellcheck="false"
+        @blur="onSourceBlur"
+      ></textarea>
       <span class="editor-hint">{{ t('editorAgentSourceHint') }}</span>
     </div>
 
@@ -76,9 +84,15 @@ import {
 } from '@/api/tauri'
 import { copyText, isTauriEnv } from '@/api/platform'
 import { uiConfirm } from '@/composables/useConfirm'
+import { useEditorFormSync } from '@/composables/useEditorFormSync'
 import EditorModal from './EditorModal.vue'
 import ModeSwitch from './ModeSwitch.vue'
-import { parseFrontmatter } from './model'
+import {
+  parseFrontmatter,
+  buildAgentSource,
+  pickExtras,
+  agentKnownKeys,
+} from './model'
 
 const { t } = useI18n()
 const appStore = useAppStore()
@@ -157,6 +171,7 @@ watch(
           // 表单模式只持正文（保存时后端重新拼 frontmatter，剥离防嵌套）
           content: fm ? fm.body : source,
         }
+        extras.value = fm ? pickExtras(fm.fields, agentKnownKeys()) : {}
       } catch (e) {
         error.value = String(e)
       }
@@ -164,31 +179,49 @@ watch(
       originalName.value = ''
       loadedSource.value = ''
       form.value = { scope: 'user', name: '', description: '', tools: '', model: '', content: '' }
+      extras.value = {}
     }
-    sourceText.value = ''
+    sourceError.value = ''
+    regenerateSource()
     baseline = JSON.stringify(form.value)
   }
 )
 
-// 表单 ↔ 源码双向同步：切到源码由表单生成全文；切回解析全文
-watch(mode, m => {
-  if (m === 'source') {
-    const lines = ['---', `name: ${form.value.name}`, `description: ${JSON.stringify(form.value.description)}`]
-    if (form.value.tools.trim()) lines.push(`tools: ${form.value.tools.trim()}`)
-    if (form.value.model.trim()) lines.push(`model: ${form.value.model.trim()}`)
-    lines.push('---', '', form.value.content.trimEnd())
-    sourceText.value = lines.join('\n') + '\n'
-    baseline = sourceText.value
-  } else {
-    const fm = parseFrontmatter(sourceText.value)
-    if (fm) {
-      form.value.description = fm.fields.description ?? ''
-      form.value.tools = fm.fields.tools ?? ''
-      form.value.model = fm.fields.model ?? ''
-      form.value.content = fm.body
+// 表单 ↔ 源码实时双向同步（同一时间只有一侧可见，另一侧随时跟上）
+const extras = ref<Record<string, string>>({})
+/** 源码结构非法时的提示（此时不回填表单） */
+const sourceError = ref('')
+
+const { regenerate: regenerateSource, commitFromText } = useEditorFormSync({
+  form,
+  text: sourceText,
+  isFormMode: () => mode.value === 'form',
+  build: f => buildAgentSource(f, extras.value),
+  parse: (text, current) => {
+    const fm = parseFrontmatter(text)
+    if (!fm) return null
+    extras.value = pickExtras(fm.fields, agentKnownKeys())
+    // name 也从源码同步（frontmatter name 与文件名一致是后端约束）
+    return {
+      ...current,
+      name: fm.fields.name ?? current.name,
+      description: fm.fields.description ?? '',
+      tools: fm.fields.tools ?? '',
+      model: fm.fields.model ?? '',
+      content: fm.body,
     }
-    baseline = JSON.stringify(form.value)
-  }
+  },
+})
+
+/** 源码 → 表单：失焦时校验并转换，非法则提示且保留上一次有效值 */
+function onSourceBlur() {
+  if (mode.value !== 'source') return
+  sourceError.value = commitFromText() ? '' : t('editorSourceInvalid')
+}
+
+// 切换模式：两侧已同步，只重置脏检查基线
+watch(mode, m => {
+  baseline = m === 'source' ? sourceText.value : JSON.stringify(form.value)
 })
 
 /** 可选入口：打开文件（桌面 = 系统默认应用）；远程降级为复制路径 */
@@ -207,6 +240,19 @@ async function openPath() {
 
 async function onSave() {
   error.value = ''
+  // 先定稿全文（校验之前）：源码模式可能未经 blur，name 等字段要靠提交同步进表单
+  const asSource = mode.value === 'source'
+  let fullSource: string
+  if (asSource) {
+    if (!commitFromText()) {
+      // 源码结构非法：拒绝保存，避免写出无法解析的 .md
+      sourceError.value = t('editorSourceInvalid')
+      return
+    }
+    fullSource = sourceText.value
+  } else {
+    fullSource = buildAgentSource(form.value, extras.value)
+  }
   const name = form.value.name.trim()
   if (!name) {
     error.value = t('editorNameRequired')
@@ -220,13 +266,14 @@ async function onSave() {
     error.value = t('editorAgentDescRequired')
     return
   }
-  const asSource = mode.value === 'source'
   if (!asSource && !form.value.content.trim()) {
     error.value = t('editorContentRequired')
     return
   }
   busy.value = true
   try {
+    // 一律整文写入（asSource=true）：未知 frontmatter 键经 extras 保留在 fullSource 里，
+    // 走表单重建路径会全部丢失
     await saveAgent({
       scope: form.value.scope,
       name,
@@ -234,11 +281,11 @@ async function onSave() {
       originalName: isEdit.value && name !== originalName.value ? originalName.value : undefined,
       originalScope:
         isEdit.value && form.value.scope !== originalScope.value ? originalScope.value : undefined,
-      asSource,
+      asSource: true,
       description: form.value.description.trim(),
       tools: form.value.tools.trim() || undefined,
       model: form.value.model.trim() || undefined,
-      content: asSource ? sourceText.value : form.value.content,
+      content: fullSource,
     })
     emit('saved')
     emit('update:visible', false)

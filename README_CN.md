@@ -10,6 +10,10 @@
 </p>
 
 <p align="center">
+  <a href="https://ccbox.orczh.top/"><strong>🌐 产品官网 · ccbox.orczh.top</strong></a>
+</p>
+
+<p align="center">
   <img src="https://img.shields.io/badge/平台-Windows%20%7C%20macOS%20%7C%20Linux-blue" alt="Platform">
   <img src="https://img.shields.io/badge/Tauri-2.x-orange" alt="Tauri">
   <img src="https://img.shields.io/badge/Vue-3-green" alt="Vue">
@@ -103,7 +107,7 @@ CLI hook 事件实时汇入状态机——运行中/思考中/等待输入——
 
 ### 1. 下载安装
 
-前往 [**Releases**](https://github.com/orczh-hj/cc-box/releases) 页面下载对应平台的安装包：
+从 **[ccbox.orczh.top](https://ccbox.orczh.top/)** 下载最新安装包——官网会自动给出当前版本与对应平台的下载链接：
 
 | 平台 | 文件 |
 |------|------|
@@ -111,7 +115,7 @@ CLI hook 事件实时汇入状态机——运行中/思考中/等待输入——
 | **macOS** | `.dmg` (通用二进制) |
 | **Linux** | `.deb` 或 `.AppImage` |
 
-国内用户可从 [Gitee Releases](https://gitee.com/orczh/cc-box/releases) 下载。
+备用渠道：[GitHub Releases](https://github.com/orczh-hj/cc-box/releases)。
 
 ### 2. 启动使用
 

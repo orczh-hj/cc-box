@@ -28,9 +28,13 @@
       </div>
 
       <!-- Empty -->
-      <div v-else-if="allAgents.length === 0" class="empty-state">
-        <span class="empty-text">{{ t('noAgentsAvailable') }}</span>
-      </div>
+      <PanelEmpty
+        v-else-if="allAgents.length === 0"
+        :text="t('noAgentsAvailable')"
+        :hint="t('addAgentsHint')"
+        :cta="t('agentNew')"
+        @action="openEditor(null)"
+      />
 
       <!-- Agents List -->
       <div v-else class="agents-list">
@@ -94,6 +98,7 @@ import AgentGroup from './AgentGroup.vue'
 import AgentEditor from '../editor/AgentEditor.vue'
 import PanelHeader from '../sidebar/PanelHeader.vue'
 import DocsHelpButton from '../sidebar/DocsHelpButton.vue'
+import PanelEmpty from '../sidebar/PanelEmpty.vue'
 
 const sidebarStore = useSidebarStore()
 const appStore = useAppStore()
@@ -223,6 +228,7 @@ onMounted(() => {
   font-size: 12px;
   color: var(--text-tertiary);
 }
+
 
 .agents-list {
   display: flex;

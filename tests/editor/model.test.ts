@@ -57,6 +57,24 @@ describe('Frontmatter_Parse', () => {
     expect(fm.fields.description).toBe('a --- b')
     expect(fm.body).toBe('body')
   })
+
+  // YAML 语法错误必须判非法（回归：blur 无提示——tab 缩进是 YAML 非法语法）
+  it('Parse_005_tab缩进判非法', () => {
+    const src = ['---', 'name: demo', '\tdescription: bad', '---', 'body'].join('\n')
+    expect(parseFrontmatter(src)).toBeNull()
+  })
+
+  // 引号未闭合是 YAML 非法语法
+  it('Parse_006_引号未闭合判非法', () => {
+    const src = '---\nname: demo\ndescription: "unterminated\n---\nbody'
+    expect(parseFrontmatter(src)).toBeNull()
+  })
+
+  // 坏映射（值里再冒号）是 YAML 非法语法
+  it('Parse_007_坏映射判非法', () => {
+    const src = '---\nname: a: b\n---\nbody'
+    expect(parseFrontmatter(src)).toBeNull()
+  })
 })
 
 // ==================== MCP 表单 ↔ 配置 ====================

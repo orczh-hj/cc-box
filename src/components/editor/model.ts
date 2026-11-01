@@ -2,6 +2,7 @@
  * 扩展编辑器纯函数模型：表单 ↔ 配置转换、市场列表聚合。
  * 全部无副作用，供组件与 Vitest 共用（真值对拍见 tests/editor/model.test.ts）。
  */
+import { load as yamlLoad } from 'js-yaml'
 import type { SaveHookRequest } from '@/api/tauri'
 
 // ==================== Markdown frontmatter ====================
@@ -93,12 +94,78 @@ export function parseFrontmatter(source: string): {
     }
   }
   if (i >= lines.length) return null // 未闭合
+  // YAML 语法校验：结构对但语法错（tab 缩进、引号未闭合、坏映射等）同样判非法，
+  // 否则失焦/保存时静默放行写出 Claude 读不了的文件
+  const block = lines.slice(1, i).join('\n')
+  try {
+    const doc = yamlLoad(block)
+    if (doc === null || typeof doc !== 'object' || Array.isArray(doc)) return null
+  } catch {
+    return null
+  }
   const body = lines
     .slice(i + 1)
     .join('\n')
     .replace(/^\n+/, '')
     .trimEnd()
   return { fields, body }
+}
+
+// ==================== Skill / Agent 源码生成 ====================
+
+/** frontmatter 已知字段之外的其它键（编辑时原样保留，避免静默丢配置） */
+export type ExtraFields = Record<string, string>
+
+/** 已知字段 → 源码时保持的键顺序（其余键按原顺序追加） */
+const SKILL_KNOWN_KEYS = ['name', 'description']
+const AGENT_KNOWN_KEYS = ['name', 'description', 'tools', 'model']
+
+function appendExtras(lines: string[], extras: ExtraFields, known: string[]): void {
+  for (const [k, v] of Object.entries(extras)) {
+    if (known.includes(k)) continue
+    lines.push(`${k}: ${JSON.stringify(v)}`)
+  }
+}
+
+/** 收集解析结果里已知键之外的字段 */
+export function pickExtras(fields: Record<string, string>, known: string[]): ExtraFields {
+  const out: ExtraFields = {}
+  for (const [k, v] of Object.entries(fields)) {
+    if (!known.includes(k)) out[k] = v
+  }
+  return out
+}
+
+export function skillKnownKeys(): string[] {
+  return SKILL_KNOWN_KEYS
+}
+
+export function agentKnownKeys(): string[] {
+  return AGENT_KNOWN_KEYS
+}
+
+/** 表单 → SKILL.md 全文（与后端 build_skill_md 同构；extras 保留未知 frontmatter 键） */
+export function buildSkillSource(
+  form: { name: string; description: string; content: string },
+  extras: ExtraFields = {}
+): string {
+  const lines = ['---', `name: ${form.name}`, `description: ${JSON.stringify(form.description)}`]
+  appendExtras(lines, extras, SKILL_KNOWN_KEYS)
+  lines.push('---', '', form.content.trimEnd())
+  return lines.join('\n') + '\n'
+}
+
+/** 表单 → Agent .md 全文（extras 保留未知 frontmatter 键） */
+export function buildAgentSource(
+  form: { name: string; description: string; tools: string; model: string; content: string },
+  extras: ExtraFields = {}
+): string {
+  const lines = ['---', `name: ${form.name}`, `description: ${JSON.stringify(form.description)}`]
+  if (form.tools.trim()) lines.push(`tools: ${form.tools.trim()}`)
+  if (form.model.trim()) lines.push(`model: ${form.model.trim()}`)
+  appendExtras(lines, extras, AGENT_KNOWN_KEYS)
+  lines.push('---', '', form.content.trimEnd())
+  return lines.join('\n') + '\n'
 }
 
 // ==================== Hook ====================

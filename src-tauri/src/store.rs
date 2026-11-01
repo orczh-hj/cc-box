@@ -213,8 +213,8 @@ pub struct HookItem {
     #[serde(default)]
     pub timeout: Option<u64>,
     pub source: ConfigSource,
-    /// 原始 matcher 层条目（get_hook_list 计算定位键用，不下发前端）
-    #[serde(default, skip_serializing)]
+    /// 原始 matcher 层条目（编辑器回显未知字段用）
+    #[serde(default)]
     pub raw: Option<serde_json::Value>,
 }
 
@@ -5009,21 +5009,24 @@ pub fn get_market_presets() -> Result<Vec<MarketPreset>> {
         }
     }
 
-    let result = match fetch_and_cache_presets() {
-        Ok(list) => list,
+    match fetch_and_cache_presets() {
+        Ok(list) => {
+            if let Ok(mut guard) = PRESET_MEM_CACHE.lock() {
+                *guard = Some((std::time::Instant::now(), list.clone()));
+            }
+            Ok(list)
+        }
         Err(e) => {
-            log::warn!("[Market] fetch presets failed: {}", e);
-            preset_cache_file()
+            // {:#} 才打印 anyhow 的完整错误链（reqwest 的真实原因在最内层）
+            log::warn!("[Market] fetch presets failed: {:#}", e);
+            // **失败结果不进内存缓存**：启动瞬间一次网络抖动会让市场列表
+            // 空 6 小时。回退磁盘缓存只为本次展示，下次调用重新尝试网络。
+            Ok(preset_cache_file()
                 .and_then(|p| fs::read_to_string(p).ok())
                 .and_then(|s| parse_market_presets(&s).ok())
-                .unwrap_or_default()
+                .unwrap_or_default())
         }
-    };
-
-    if let Ok(mut guard) = PRESET_MEM_CACHE.lock() {
-        *guard = Some((std::time::Instant::now(), result.clone()));
     }
-    Ok(result)
 }
 
 pub(crate) fn validate_marketplace_source(source: &str) -> Result<String> {

@@ -88,8 +88,16 @@
 
     <div v-else class="editor-field">
       <span class="editor-label">JSON</span>
-      <textarea v-model="jsonText" class="editor-textarea" rows="14" spellcheck="false"></textarea>
-      <span v-if="jsonError" class="editor-error" style="margin: 6px 0 0">{{ jsonError }}</span>
+      <!-- 错误提示放 textarea 上方：文本超长时下方提示在滚动视口外看不见 -->
+      <div v-if="jsonError" class="editor-error">{{ jsonError }}</div>
+      <div v-if="jsonHint" class="editor-hint" style="color: var(--warning-color, #d97706)">{{ jsonHint }}</div>
+      <textarea
+        v-model="jsonText"
+        class="editor-textarea"
+        rows="14"
+        spellcheck="false"
+        @blur="onJsonBlur"
+      ></textarea>
     </div>
 
     <div v-if="error" class="editor-error">{{ error }}</div>
@@ -97,14 +105,15 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useAppStore } from '@/stores/app'
 import { deleteMcpServer, saveMcpServer, type McpServerInfo } from '@/api/tauri'
+import { useEditorFormSync } from '@/composables/useEditorFormSync'
 import { uiConfirm } from '@/composables/useConfirm'
 import EditorModal from './EditorModal.vue'
 import ModeSwitch from './ModeSwitch.vue'
-import { argsJoin, mcpFormToConfig, type McpForm } from './model'
+import { argsJoin, mcpConfigToForm, mcpFormToConfig, type McpForm } from './model'
 
 const { t } = useI18n()
 const appStore = useAppStore()
@@ -150,7 +159,12 @@ const originalName = ref('')
 const originalScope = ref<McpForm['scope']>('user')
 const jsonText = ref('')
 const jsonError = ref('')
+/** 结构性提示（JSON 合法但表单无法表达，如 type 不在选项内）：展示但不阻断保存 */
+const jsonHint = ref('')
 const error = ref('')
+/** 表单无法管理的未知顶层键（region/ttl 等）：表单流转时原样保留 */
+const MANAGED_CONFIG_KEYS = ['type', 'command', 'args', 'url', 'env', 'headers']
+let lastConfig: Record<string, unknown> | null = null
 const busy = ref(false)
 
 /** 表单基线（脏检查） */
@@ -177,11 +191,10 @@ watch(
     if (!v) return
     error.value = ''
     busy.value = false
-    // 程序化切模式（含未知形态的 form→json）不触发 watch(mode) 的 jsonText 生成，
-    // 否则会覆盖未知形态分支精心拼装的配置（打开即丢字段 + 误报 dirty）
-    restoring.value = true
     mode.value = 'form'
     jsonError.value = ''
+    jsonHint.value = ''
+    lastConfig = null
     if (props.server) {
       originalName.value = props.server.name
       const scope = (props.server.sourceType as McpForm['scope']) ?? 'user'
@@ -203,17 +216,15 @@ watch(
         // 未知形态（plugin 内嵌 server 等）：JSON 模式展示已知字段
         form.value = { ...emptyForm(), scope, name: props.server.name }
         mode.value = 'json'
-        jsonText.value = JSON.stringify(
-          {
-            ...(props.server.command ? { type: 'stdio', command: props.server.command } : {}),
-            ...(props.server.args?.length ? { args: props.server.args } : {}),
-            ...(props.server.url ? { type: props.server.serverType ?? 'http', url: props.server.url } : {}),
-            ...(props.server.env && Object.keys(props.server.env).length ? { env: props.server.env } : {}),
-            ...(props.server.headers && Object.keys(props.server.headers).length ? { headers: props.server.headers } : {}),
-          },
-          null,
-          2
-        )
+        const dumped = {
+          ...(props.server.command ? { type: 'stdio', command: props.server.command } : {}),
+          ...(props.server.args?.length ? { args: props.server.args } : {}),
+          ...(props.server.url ? { type: props.server.serverType ?? 'http', url: props.server.url } : {}),
+          ...(props.server.env && Object.keys(props.server.env).length ? { env: props.server.env } : {}),
+          ...(props.server.headers && Object.keys(props.server.headers).length ? { headers: props.server.headers } : {}),
+        }
+        jsonText.value = JSON.stringify(dumped, null, 2)
+        lastConfig = dumped
       }
     } else {
       originalName.value = ''
@@ -224,44 +235,65 @@ watch(
       jsonText.value = JSON.stringify(currentFormConfig(), null, 2)
     }
     baseline = snapshot()
-    void nextTick().then(() => {
-      restoring.value = false
-    })
   }
 )
 
 function currentFormConfig(): Record<string, unknown> {
-  return mcpFormToConfig(form.value) ?? { type: form.value.type }
+  const known = mcpFormToConfig(form.value)
+  if (!known) return { type: form.value.type }
+  // 表单管理的字段之外，保留 JSON 侧出现过的未知顶层键
+  const out: Record<string, unknown> = { ...known }
+  if (lastConfig) {
+    for (const [k, v] of Object.entries(lastConfig)) {
+      if (!MANAGED_CONFIG_KEYS.includes(k) && !(k in out)) out[k] = v
+    }
+  }
+  return out
 }
 
 function snapshot(): string {
   return mode.value === 'json' ? jsonText.value : (currentConfigJson() ?? '') + form.value.name
 }
 
-// 表单 → JSON 同步（用户切模式时带过去；打开时的程序化切换跳过）
-const restoring = ref(false)
-watch(mode, m => {
-  if (restoring.value) return
-  if (m === 'json') {
-    jsonError.value = ''
-    jsonText.value = JSON.stringify(currentFormConfig(), null, 2)
-  }
-})
-
-// JSON 编辑错误提示（实时）
-watch(jsonText, text => {
-  if (mode.value !== 'json') return
-  try {
-    const parsed = JSON.parse(text)
+// 表单 ↔ JSON 同步：表单改动实时生成 JSON；JSON 失焦时校验并回填表单
+const { commitFromText } = useEditorFormSync({
+  form,
+  text: jsonText,
+  isFormMode: () => mode.value === 'form',
+  build: () => JSON.stringify(currentFormConfig(), null, 2),
+  parse: (text, current) => {
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(text)
+    } catch (e) {
+      jsonError.value = String(e instanceof Error ? e.message : e)
+      return null
+    }
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
       jsonError.value = t('editorJsonMustBeObject')
-    } else {
-      jsonError.value = ''
+      return null
     }
-  } catch (e) {
-    jsonError.value = String(e instanceof Error ? e.message : e)
-  }
+    lastConfig = parsed as Record<string, unknown>
+    const next = mcpConfigToForm(lastConfig, {
+      scope: current.scope,
+      name: current.name,
+    })
+    if (!next) {
+      // JSON 合法但表单无法表达（type 不在选项内等）：提示但不阻断 JSON 模式保存
+      jsonError.value = ''
+      jsonHint.value = t('editorMcpFormUnsupported')
+      return null
+    }
+    jsonHint.value = ''
+    return next
+  },
 })
+
+/** JSON → 表单：失焦时校验并回填 */
+function onJsonBlur() {
+  if (mode.value !== 'json') return
+  if (commitFromText()) jsonError.value = ''
+}
 
 async function onSave() {
   error.value = ''

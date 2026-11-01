@@ -399,6 +399,7 @@ export default {
   refreshAgents: '刷新 Agents',
   loadingAgents: '加载 Agents...',
   noAgentsAvailable: '暂无可用 Agents',
+  addAgentsHint: '将 Agents 添加到 ~/.claude/agents/ 或 .claude/agents/',
   builtin: '内置',
 
   // Plugins panel
@@ -631,6 +632,7 @@ export default {
   editorCopyPath: '复制路径',
   editorJsonInvalid: 'JSON 解析失败',
   editorJsonMustBeObject: 'JSON 必须是对象',
+  editorMcpFormUnsupported: 'JSON 结构表单无法表达（如 type 不在选项内），已保留原文；可保持 JSON 模式直接保存，或修正后再切表单',
   mcpNew: '新建 MCP Server',
   editorMcpNewTitle: '新建 MCP 服务器',
   editorMcpEditTitle: '编辑 MCP 服务器：{name}',
@@ -653,6 +655,7 @@ export default {
   editorSkillDescHint: 'Claude 依据描述自动加载 skill，请写清触发场景',
   editorSkillDescRequired: '描述不能为空（Claude 靠它决定何时加载）',
   editorSkillContent: '内容（Markdown）',
+  editorSourceInvalid: '源码格式不正确：frontmatter 需要用 --- 包裹。表单未同步，请修正后再切换或保存。',
   editorSkillSourceHint: 'SKILL.md 全文（frontmatter + 正文），保存时校验',
   editorSkillDeleteConfirm: '彻底删除 Skill「{name}」？（含停用备份，目录会被真正删除）',
   agentNew: '新建 Agent',

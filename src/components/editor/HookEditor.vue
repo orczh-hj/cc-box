@@ -96,9 +96,16 @@
 
     <div v-else class="editor-field">
       <span class="editor-label">JSON</span>
-      <textarea v-model="jsonText" class="editor-textarea" rows="12" spellcheck="false"></textarea>
+      <!-- 错误提示放 textarea 上方：文本超长时下方提示在滚动视口外看不见 -->
+      <div v-if="jsonError" class="editor-error">{{ jsonError }}</div>
+      <textarea
+        v-model="jsonText"
+        class="editor-textarea"
+        rows="12"
+        spellcheck="false"
+        @blur="onJsonBlur"
+      ></textarea>
       <span class="editor-hint">{{ t('editorHookJsonHint') }}</span>
-      <span v-if="jsonError" class="editor-error" style="margin: 6px 0 0">{{ jsonError }}</span>
     </div>
 
     <div v-if="error" class="editor-error">{{ error }}</div>
@@ -115,6 +122,7 @@ import {
   type HookListItem,
 } from '@/api/tauri'
 import { uiConfirm } from '@/composables/useConfirm'
+import { useEditorFormSync } from '@/composables/useEditorFormSync'
 import EditorModal from './EditorModal.vue'
 import ModeSwitch from './ModeSwitch.vue'
 import {
@@ -181,14 +189,33 @@ function snapshot(): string {
   return JSON.stringify(form.value)
 }
 
-watch(jsonText, text => {
-  if (mode.value !== 'json') return
-  const parsed = hookEntryToForm(text, { scope: form.value.scope, event: form.value.event })
-  jsonError.value = parsed ? '' : t('editorHookJsonInvalid')
-  if (parsed) {
-    form.value = { ...parsed, scope: form.value.scope, event: form.value.event }
-  }
+// 表单改动实时生成 JSON；JSON 失焦时校验并回填表单
+const { regenerate, commitFromText } = useEditorFormSync({
+  form,
+  text: jsonText,
+  isFormMode: () => mode.value === 'form',
+  build: f => JSON.stringify(regeneratedEntry(f), null, 2),
+  parse: (text, current) => {
+    const parsed = hookEntryToForm(text, { scope: current.scope, event: current.event })
+    if (!parsed) {
+      jsonError.value = t('editorHookJsonInvalid')
+      return null
+    }
+    jsonError.value = ''
+    try {
+      lastEntry = JSON.parse(text)
+    } catch {
+      lastEntry = null
+    }
+    return { ...parsed, scope: current.scope, event: current.event }
+  },
 })
+
+/** JSON → 表单：失焦时校验并回填 */
+function onJsonBlur() {
+  if (mode.value !== 'json') return
+  commitFromText()
+}
 
 watch(
   () => props.visible,
@@ -212,7 +239,9 @@ watch(
       form.value = emptyForm()
       original.value = undefined
     }
-    jsonText.value = JSON.stringify(entryJson(form.value), null, 2)
+    // 以列表下发的原始条目为底：未知字段（async、自定义键等）在表单流转中不丢
+    lastEntry = props.hook?.raw ? (JSON.parse(JSON.stringify(props.hook.raw)) as Record<string, unknown>) : null
+    regenerate()
     baseline = snapshot()
   }
 )
@@ -243,18 +272,25 @@ function scopeOf(h: HookListItem): HookForm['scope'] {
   return s === 'project' || s === 'local' ? s : 'user'
 }
 
-function entryJson(f: HookForm): Record<string, unknown> {
-  const entry: Record<string, unknown> = { hooks: [hookFormToObject(f)] }
-  if (f.matcher.trim()) entry.matcher = f.matcher.trim()
-  return entry
+/** 最近一次 JSON 对象：表单改动回写时以它为底，未知字段（async/statusMessage 等）不丢 */
+let lastEntry: Record<string, unknown> | null = null
+
+function regeneratedEntry(f: HookForm): Record<string, unknown> {
+  const base = lastEntry ? JSON.parse(JSON.stringify(lastEntry)) : {}
+  const prevHook = Array.isArray(base.hooks) && base.hooks[0] && typeof base.hooks[0] === 'object'
+    ? base.hooks[0]
+    : {}
+  base.hooks = [{ ...prevHook, ...hookFormToObject(f) }]
+  if (f.matcher.trim()) base.matcher = f.matcher.trim()
+  else delete base.matcher
+  return base
 }
 
-// 表单 → JSON 同步
+
+// 切到 JSON：以最近一次解析结果为底再生成一次（保证与表单一致）
+// 切到 JSON：清掉上一次的结构提示（两侧内容本已实时同步）
 watch(mode, m => {
-  if (m === 'json') {
-    jsonError.value = ''
-    jsonText.value = JSON.stringify(entryJson(form.value), null, 2)
-  }
+  if (m === 'json') jsonError.value = ''
 })
 
 async function onSave() {
