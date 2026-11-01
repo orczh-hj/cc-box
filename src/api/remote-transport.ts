@@ -16,6 +16,8 @@ import {
   type ServerMessage,
 } from '../../remote/protocol/protocol'
 import { transportEnv } from './env'
+import { isCommandNotAllowedError } from '@/utils/rpc-errors'
+import { notifyDesktopOutdated } from '@/utils/desktop-outdated'
 import type { Transport, Unlisten, InvokeOpts } from './transport'
 import {
   addDesktop,
@@ -385,7 +387,10 @@ class RemoteTransportImpl implements Transport {
           if (msg.ok) {
             p.resolve(msg.data)
           } else {
-            p.reject(new Error(msg.error ?? 'rpc failed'))
+            const err = new Error(msg.error ?? 'rpc failed')
+            // 新前端 + 旧桌面：命令不在旧版白名单 → 提示更新桌面端（每次会话一次）
+            if (isCommandNotAllowedError(err)) notifyDesktopOutdated()
+            p.reject(err)
           }
         }
         return

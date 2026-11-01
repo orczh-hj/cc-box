@@ -147,6 +147,7 @@ export default {
   updateMoreSettings: 'More settings',
   autoUpdateLabel: 'Auto update',
   autoUpdateDesc: 'Download new versions automatically; install and restart when no window is open.',
+  desktopOutdatedHint: 'The desktop app is outdated for this action. Please update CC-Box on your computer and try again.',
   ccBoxUpdate: 'CC-Box Update',
   currentVersion: 'Current Version',
   checking: 'Checking...',
