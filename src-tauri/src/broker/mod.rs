@@ -78,6 +78,8 @@ pub async fn run_headless(autostart: bool) {
         Ok(g) => g,
         Err(e) => {
             log::info!("[broker] not starting: {}", e);
+            // `cc-box --broker` 从终端启动时给一句可见反馈，否则表现为「无反应」
+            eprintln!("[cc-box] broker not started: {}", e);
             return;
         }
     };
@@ -85,10 +87,23 @@ pub async fn run_headless(autostart: bool) {
     if autostart {
         lifecycle::clear_user_quit();
     }
-    // 竞态兜底：托盘 user_quit / 更新标记有效时，即使被并发拉起也不覆盖标记
-    if !lifecycle::should_autostart() {
-        log::info!("[broker] lifecycle marker suppresses startup; exiting");
-        return;
+    // 竞态兜底：托盘 user_quit / 更新标记有效时，即使被并发拉起也不覆盖标记。
+    // user_quit 是持久抑制 → 直接退出；更新标记是瞬态（安装器替换文件期间）→
+    // 等待其过期而不是放弃，否则更新完成后无人重新拉起 Broker。
+    loop {
+        match lifecycle::suppression() {
+            lifecycle::Suppression::None => break,
+            lifecycle::Suppression::UpdateInProgress => {
+                log::info!("[broker] update in progress; waiting before start");
+                eprintln!("[cc-box] update in progress, waiting for it to finish...");
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            }
+            lifecycle::Suppression::UserQuit => {
+                log::info!("[broker] lifecycle marker suppresses startup; exiting");
+                eprintln!("[cc-box] broker not started: CC-Box was quit by the user");
+                return;
+            }
+        }
     }
     crate::remote_state::set_broker_mode(true);
     if let Err(e) = ownership::ensure_broker_secret() {

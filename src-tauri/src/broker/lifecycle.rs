@@ -82,23 +82,105 @@ pub(crate) fn clear() -> std::io::Result<()> {
 
 /// GUI 自动拉起判定。`update_in_progress` 只在版本未变化且 5 分钟内有效；
 /// `user_quit` 需要用户显式开启远程/启动后台服务来清除。
-pub(crate) fn should_autostart() -> bool {
-    let Some(rec) = read() else {
-        return true;
-    };
-    match rec.state {
-        LifecycleState::UserQuit => false,
+/// 更新中标记的抑制窗口：安装器替换文件期间防止重复拉起 Broker
+const UPDATE_SUPPRESS_WINDOW_MS: u128 = 5 * 60 * 1000;
+
+/// 启动抑制原因。
+/// - `UserQuit`：用户显式退出 CC-Box，持久抑制（调用方应停止重试）
+/// - `UpdateInProgress`：安装进行中，**瞬态**（调用方应等待而非放弃）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Suppression {
+    None,
+    UserQuit,
+    UpdateInProgress,
+}
+
+/// 纯函数判定（可单测）：何时抑制、抑制是持久还是瞬态
+fn classify(
+    state: LifecycleState,
+    from_version: Option<&str>,
+    age_ms: u128,
+    current: &str,
+) -> Suppression {
+    match state {
+        LifecycleState::UserQuit => Suppression::UserQuit,
         LifecycleState::UpdateInProgress => {
-            let same_version = rec.from_version.as_deref() == Some(env!("APP_VERSION"));
-            let fresh = now_ms().saturating_sub(rec.ts) < 5 * 60 * 1000;
-            if same_version && fresh {
-                false
+            // 只有「同一版本仍在更新窗口内」才说明安装器可能还在替换文件；
+            // 版本已变 = 新版本已在运行，标记必然过期
+            let same_version = from_version == Some(current);
+            if same_version && age_ms < UPDATE_SUPPRESS_WINDOW_MS {
+                Suppression::UpdateInProgress
             } else {
-                let _ = clear();
-                true
+                Suppression::None
             }
         }
-        LifecycleState::Running | LifecycleState::IdleExit => true,
+        LifecycleState::Running | LifecycleState::IdleExit => Suppression::None,
+    }
+}
+
+/// 当前启动抑制原因（读标记文件；过期的更新标记顺手清除）
+pub(crate) fn suppression() -> Suppression {
+    let Some(rec) = read() else {
+        return Suppression::None;
+    };
+    let age = now_ms().saturating_sub(rec.ts);
+    let reason = classify(
+        rec.state,
+        rec.from_version.as_deref(),
+        age,
+        env!("APP_VERSION"),
+    );
+    if reason == Suppression::None && rec.state == LifecycleState::UpdateInProgress {
+        let _ = clear();
+    }
+    reason
+}
+
+pub(crate) fn should_autostart() -> bool {
+    suppression() == Suppression::None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn Lifecycle_ClassifyUserQuit_1() {
+        assert_eq!(
+            classify(LifecycleState::UserQuit, None, 0, "1.0.0"),
+            Suppression::UserQuit
+        );
+    }
+
+    #[test]
+    fn Lifecycle_ClassifyUpdateWindow_2() {
+        // 同版本 + 窗口内：安装器可能仍在替换文件 → 瞬态抑制
+        assert_eq!(
+            classify(LifecycleState::UpdateInProgress, Some("1.0.0"), 1000, "1.0.0"),
+            Suppression::UpdateInProgress
+        );
+        // 版本已变（新版本已在运行）：标记过期，可启动
+        assert_eq!(
+            classify(LifecycleState::UpdateInProgress, Some("0.9.0"), 1000, "1.0.0"),
+            Suppression::None
+        );
+        // 超过 5 分钟窗口：即使版本相同也放行，避免安装失败导致永久不可用
+        assert_eq!(
+            classify(LifecycleState::UpdateInProgress, Some("1.0.0"), 5 * 60 * 1000, "1.0.0"),
+            Suppression::None
+        );
+    }
+
+    #[test]
+    fn Lifecycle_ClassifyRunning_3() {
+        assert_eq!(
+            classify(LifecycleState::Running, None, 0, "1.0.0"),
+            Suppression::None
+        );
+        assert_eq!(
+            classify(LifecycleState::IdleExit, None, 0, "1.0.0"),
+            Suppression::None
+        );
     }
 }
 

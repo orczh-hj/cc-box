@@ -108,9 +108,19 @@ async fn run_loop(gen: u64) {
         if !is_current_gen(gen) || SUPPRESSED.load(Ordering::SeqCst) {
             return;
         }
-        if !crate::broker::lifecycle::should_autostart() {
-            log::info!("[broker-client] autostart suppressed by lifecycle marker");
-            return;
+        // 抑制分两类：user_quit 持久（停止循环），update_in_progress 瞬态
+        // （等待过期后继续）——否则更新完成后本进程再也不会拉起 Broker
+        match crate::broker::lifecycle::suppression() {
+            crate::broker::lifecycle::Suppression::None => {}
+            crate::broker::lifecycle::Suppression::UpdateInProgress => {
+                log::info!("[broker-client] update in progress; retrying broker start shortly");
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                continue;
+            }
+            crate::broker::lifecycle::Suppression::UserQuit => {
+                log::info!("[broker-client] autostart suppressed by lifecycle marker");
+                return;
+            }
         }
         ensure_running();
 
