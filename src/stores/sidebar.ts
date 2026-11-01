@@ -10,9 +10,10 @@ export const useSidebarStore = defineStore('sidebar', () => {
   const activePanel = ref<SidebarPanelType>(null)
   const panelVisible = ref(false)
 
-  // 设置模式
+  // 设置模式：默认落在「启动」页
+  const DEFAULT_SETTINGS_SECTION = 'startup'
   const showSettings = ref(false)
-  const activeSettingsSection = ref<string>('appearance')
+  const activeSettingsSection = ref<string>(DEFAULT_SETTINGS_SECTION)
   const updateInfo = ref<UpdateInfo | null>(null)
   const claudeCliUpdateInfo = ref<ClaudeCliUpdateInfo | null>(null)
   const updateAvailable = computed(() => {
@@ -391,7 +392,9 @@ export const useSidebarStore = defineStore('sidebar', () => {
     panelVisible.value = false
     activePanel.value = null
     showSettings.value = true
-    if (section) activeSettingsSection.value = section
+    // 未指定板块时总是回到默认页（不记忆上次停留的板块）；
+    // 指定板块的入口（托盘更新跳转、快捷键打开快捷键页等）保持原语义
+    activeSettingsSection.value = section ?? DEFAULT_SETTINGS_SECTION
   }
 
   function closeSettings() {

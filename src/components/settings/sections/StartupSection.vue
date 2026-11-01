@@ -14,7 +14,7 @@
         <code class="runtime-value">{{ claudeVersion ? `v${claudeVersion}` : t('notDetected') }}</code>
       </div>
       <div class="runtime-row">
-        <span class="runtime-label">{{ t('claudeConfigDir') }}</span>
+        <span class="runtime-label" title="CLAUDE_CONFIG_DIR">{{ t('claudeConfigDir') }}</span>
         <code class="runtime-value" :title="configDir || ''">{{ configDir || t('notDetected') }}</code>
       </div>
     </div>
@@ -290,7 +290,8 @@ function handleReset() {
 
 .runtime-label {
   flex-shrink: 0;
-  width: 120px;
+  /* 不设固定宽度：标签单行不换行，宽度随文案自适应，值区占剩余空间 */
+  white-space: nowrap;
   font-size: 12px;
   color: var(--text-tertiary);
 }
