@@ -91,20 +91,20 @@
           </div>
         </div>
       </template>
-    </div>
 
-    <!-- 更多设置（折叠）：自动更新开关 -->
-    <div class="update-card">
-      <button class="advanced-header" @click="showAdvanced = !showAdvanced">
-        <span class="chevron" :class="{ expanded: showAdvanced }">›</span>
-        <span>{{ t('updateMoreSettings') }}</span>
-      </button>
-      <div v-if="showAdvanced" class="advanced-body">
-        <label class="option-item">
-          <input type="checkbox" v-model="autoUpdate" @change="handleAutoUpdateChange" />
-          <span class="option-label">{{ t('autoUpdateLabel') }}</span>
-        </label>
-        <div class="option-desc">{{ t('autoUpdateDesc') }}</div>
+      <!-- 更多设置（折叠）：自动更新开关 -->
+      <div class="advanced-block">
+        <button class="advanced-header" @click="showAdvanced = !showAdvanced">
+          <span class="chevron" :class="{ expanded: showAdvanced }">›</span>
+          <span>{{ t('updateMoreSettings') }}</span>
+        </button>
+        <div v-if="showAdvanced" class="advanced-body">
+          <label class="option-item">
+            <input type="checkbox" v-model="autoUpdate" @change="handleAutoUpdateChange" />
+            <span class="option-label">{{ t('autoUpdateLabel') }}</span>
+          </label>
+          <div class="option-desc">{{ t('autoUpdateDesc') }}</div>
+        </div>
       </div>
     </div>
 
@@ -642,7 +642,13 @@ onUnmounted(() => {
   margin-top: 20px;
 }
 
-/* 更多设置（折叠区） */
+/* 更多设置（折叠区）：并入 CC-Box 更新卡片，用分隔线与上方内容区隔 */
+.advanced-block {
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border-color);
+}
+
 .advanced-header {
   display: flex;
   align-items: center;
@@ -670,8 +676,6 @@ onUnmounted(() => {
 
 .advanced-body {
   margin-top: 12px;
-  padding-top: 12px;
-  border-top: 1px solid var(--border-color);
 }
 
 .advanced-body .option-item {

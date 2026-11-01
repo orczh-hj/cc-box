@@ -84,6 +84,12 @@ enum Decision {
     Install,
 }
 
+/// 下载完成后的即时安装判定：下载期间窗口可能已全部关闭，
+/// 此时零窗口且开关开就该立即安装（不等下次周期检查）。
+fn should_install_after_download(auto_enabled: bool, window_count: usize, installing: bool) -> bool {
+    auto_enabled && window_count == 0 && !installing
+}
+
 /// 启动周期检查：启动立即检查一次，之后每 2h 一次。
 /// Update 对象非 Send，不能进 tauri::async_runtime::spawn 的 future；
 /// 流水线整体跑在专用线程（自带 runtime，block_on 非 Send future 合法）。
@@ -153,12 +159,29 @@ async fn run_cycle(app: &tauri::AppHandle, allow_install: bool) {
             if let Some(update) = fetch_update(app).await {
                 match update.download(|_, _| {}, || {}).await {
                     Ok(bytes) => {
-                        log::info!(
-                            "[broker-update] downloaded v{} ({} windows open, install deferred)",
-                            update.version,
-                            window_count
-                        );
-                        *DOWNLOADED.lock() = Some((update.version.clone(), bytes));
+                        let version = update.version.clone();
+                        log::info!("[broker-update] downloaded v{}", version);
+                        *DOWNLOADED.lock() = Some((version.clone(), bytes.clone()));
+                        // 下载完成后立即按最新窗口数重新评估：零窗口且开关开就当场安装
+                        // （下载期间用户可能已关闭所有窗口；有窗口则等下次周期检查）
+                        let windows_now = crate::gateway::window_roster().len();
+                        let installing_now = INSTALLING.load(Ordering::SeqCst);
+                        if allow_install
+                            && should_install_after_download(
+                                auto_update_enabled(),
+                                windows_now,
+                                installing_now,
+                            )
+                        {
+                            install_downloaded(app, &version, &bytes).await;
+                        } else {
+                            log::info!(
+                                "[broker-update] install deferred: {} windows open, auto={}, allow_install={}",
+                                windows_now,
+                                auto_update_enabled(),
+                                allow_install
+                            );
+                        }
                     }
                     Err(e) => log::warn!("[broker-update] download failed: {}", e),
                 }
@@ -173,21 +196,27 @@ async fn run_cycle(app: &tauri::AppHandle, allow_install: bool) {
                 );
                 return;
             }
-            // 写侧互斥：与手动更新共用 InstallGuard，decide 的 installing 输入只是快速路径
-            let Some(_guard) = InstallGuard::acquire() else {
-                log::warn!("[broker-update] auto install skipped: another install in progress");
+            let Some((version, bytes)) = DOWNLOADED.lock().clone() else {
                 return;
             };
-            if let Some((version, bytes)) = DOWNLOADED.lock().take() {
-                if let Some(update) = fetch_update(app).await {
-                    install_and_restart(app, &version, &update, &bytes).await;
-                } else {
-                    // Update 对象取回失败：字节放回，下次检查再试
-                    *DOWNLOADED.lock() = Some((version, bytes));
-                }
-            }
+            install_downloaded(app, &version, &bytes).await;
         }
     }
+}
+
+/// 安装已下载的更新（自动路径）：获取互斥 guard 后安装重启。
+/// 失败时 DOWNLOADED 保留，下次检查会重试。
+async fn install_downloaded(app: &tauri::AppHandle, version: &str, bytes: &[u8]) {
+    // 写侧互斥：与手动更新共用 InstallGuard
+    let Some(_guard) = InstallGuard::acquire() else {
+        log::warn!("[broker-update] auto install skipped: another install in progress");
+        return;
+    };
+    let Some(update) = fetch_update(app).await else {
+        log::warn!("[broker-update] auto install skipped: fetch update failed");
+        return;
+    };
+    install_and_restart(app, version, &update, bytes).await;
 }
 
 /// 托盘「更新到 vX」手动更新：预检并备好安装包 → 关窗 → 安装重启。
@@ -293,6 +322,18 @@ mod tests {
         drop(_g1);
         assert!(!INSTALLING.load(Ordering::SeqCst), "drop must reset the flag");
         assert!(InstallGuard::acquire().is_some(), "re-acquire after drop must succeed");
+    }
+
+    // 下载完成即刻评估：零窗口且开关开 → 立即安装（不等下次周期检查）
+    #[test]
+    fn Update_InstallImmediatelyAfterDownload_4() {
+        assert!(should_install_after_download(true, 0, false));
+        // 有窗口 → 等下次检查
+        assert!(!should_install_after_download(true, 2, false));
+        // 开关关 → 不自动装
+        assert!(!should_install_after_download(false, 0, false));
+        // 安装中 → 不重入
+        assert!(!should_install_after_download(true, 0, true));
     }
 
     #[test]
