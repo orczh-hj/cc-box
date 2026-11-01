@@ -129,6 +129,7 @@ UI 已浏览器化（一套 UI 走桌面 Tauri / 宽屏浏览器 / 手机浏览�
 远程设备入口从「GUI 实例竞选 Gateway」改为「独立后台 Broker」：
 
 - **进程**：`cc-box --broker`；Windows/macOS 带托盘（标题 `CC-Box`），Linux 纯 tokio 无头（托盘缺失优雅降级）。GUI 启动时按需拉起；`broker.lock` OS 排他锁保证单实例；**所有窗口关闭后常驻**，不再空闲退出；`cc-box --quit-broker` 可退出。
+- **命令行参数（`-h` 可查）**：`-h/--help`、`-V/--version`、`--broker`、`--autostart`（配合 `--broker`，登录自启）、`--quit-broker`、`--new-window`，以及结尾的项目目录参数。解析集中在 `src/cli.rs`（纯函数 + 单测）。发布构建是 GUI 子系统（`windows_subsystem = "windows"`）**默认没有控制台**，`println!/eprintln!` 在终端里看不到；需要用户可见输出时用 `cli::print_console`（附加父控制台 → 写 `CONOUT$` → 立即 `FreeConsole`，不长期占用，避免 Broker 随终端关闭收到 CTRL_CLOSE 退出）。终端里手动 `cc-box --broker` 视为明确意图，会清除 `user_quit` 抑制；GUI 拉起时 stdio 为空、`is_terminal()` 为 false，不会误清除。
 - **窗口管理**：成员 `member.hello` 带 pid/windowTitle，项目切换经 `window.title` 更新；托盘顶部只有 `CC-Box`，**每个窗口直接是一级菜单项，单击显示/聚焦**；不再提供单窗口关闭/重启；`window.command{close|show|openRemote}` 仍用于整体退出/更新/远程连接。新建窗口带 `--new-window`，停在项目页；Windows 用 `CreateProcessW` + `CREATE_NO_WINDOW` 避免 debug 控制台与句柄继承。零窗口时远程 `rpc.call "spawn_new_instance"` 由 Broker 拉起空窗口（12 上限 + 2s 冷却）。
 - **远程快捷动作**：托盘「远程连接」显示第一个可控制窗口并打开面板（无窗口先新建）；顺序为 远程连接 → 刷新远程密钥 → 关闭/开启远程连接。破坏性操作弹原生确认对话框（关闭远程连接、刷新密钥、退出 CC-Box）。
 - **跨窗口状态**：成员写命令的 `state-changed` 经 `GwUp::StateChanged` 上行，Broker 重分配 revision 后扇出所有 v2 成员与手机；PtyInput/PtyResize 只校验该会话 active 归属、无控制面副作用；PTY 退出只上行 `SessionRemove`，Broker 统一广播一次 `SessionExit`。
