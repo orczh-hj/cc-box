@@ -22,7 +22,8 @@ static DOWNLOADED: Mutex<Option<(String, Vec<u8>)>> = Mutex::new(None);
 static INSTALLING: AtomicBool = AtomicBool::new(false);
 
 /// 安装互斥 guard：获取成功 = INSTALLING 置位（已被占用返回 None），
-/// Drop 复位；成功安装路径 restart 不返回，无需手动复位。
+/// Drop 复位；成功安装路径进程不返回（Windows `install()` 内 exit /
+/// 其他平台 `app.restart()`），无需手动复位。
 struct InstallGuard;
 impl InstallGuard {
     fn acquire() -> Option<Self> {
@@ -268,7 +269,15 @@ async fn manual_update(app: &tauri::AppHandle) {
     install_and_restart(app, &version, &update, &bytes).await;
 }
 
-/// 写 update_in_progress → 安装 → 重启（成功时 restart 不返回）。
+/// 写 update_in_progress → 安装 → 重启。
+///
+/// 平台差异（tauri-plugin-updater 2.x）：
+/// - Windows：`install()` 内部 `ShellExecuteW` 拉起 NSIS 后**无条件
+///   `process::exit(0)`**，本函数不会再返回；重启由安装器完成——它带着
+///   `/UPDATE /ARGS <原进程参数>`，因此 Broker 会以 `--broker` 重新拉起。
+///   下面的 `app.restart()` 在 Windows 上是防御性死代码。
+/// - macOS/Linux：`install()` 返回后由 `app.restart()` 重拉进程。
+///
 /// 安装失败：清标记继续运行（INSTALLING 复位由调用方 guard 负责）。
 async fn install_and_restart(
     app: &tauri::AppHandle,

@@ -8,6 +8,9 @@ fn main() {
         .join("package.json");
 
     if package_json_path.exists() {
+        // 版本源变化必须触发重编，否则 APP_VERSION 会停留在旧值
+        // （与 tauri 包版本不一致时，更新标记的 fromVersion 判等会失效）
+        println!("cargo:rerun-if-changed={}", package_json_path.display());
         let content = std::fs::read_to_string(&package_json_path).unwrap();
         let json: serde_json::Value = serde_json::from_str(&content).unwrap();
         let version = json["version"].as_str().unwrap();
