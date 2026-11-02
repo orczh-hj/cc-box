@@ -6,7 +6,8 @@ use std::path::Path;
 
 use crate::store::{
     get_plugin_marketplaces_in, install_plugin, install_scope_cwd, run_command_with_timeout,
-    validate_install_scope, validate_marketplace_source, validate_plugin_ref,
+    validate_install_scope, validate_marketplace_source, validate_plugin_ref, with_builtin_market,
+    CustomMarket, MarketPreset,
 };
 
 // ---------- 输入校验 ----------
@@ -793,4 +794,56 @@ fn GetPluginMarketplacesIn_已安装置顶优先于精选与热度() {
         out[0].plugins.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
         vec!["installed-plain", "plain", "hot"]
     );
+}
+
+// ---------- ccbox-market 内置个人市场 ----------
+
+fn preset_of(name: &str, source: &str) -> MarketPreset {
+    MarketPreset {
+        name: name.into(),
+        source: source.into(),
+        description: None,
+        pinned: false,
+        order: None,
+        icon: None,
+        category: None,
+    }
+}
+
+/// ccbox-market 默认进入个人市场：列表为空时按 preset 来源合成（preset 缺失回退内置源），
+/// 已存在（含同名不同大小写）不重复添加——对应全新机器打开市场看不到官方市场、
+/// 点精选「＋」被保留名守卫拒绝的 bug
+#[test]
+fn WithBuiltinMarket_为空时合成且不重复() {
+    // 空列表 + preset 提供来源 → 合成，用 preset 的源（可热更新换仓库）
+    let presets = vec![preset_of("ccbox-market", "https://gitee.com/orczh/ccbox-market.git")];
+    let out = with_builtin_market(&[], &presets);
+    assert_eq!(out.len(), 1);
+    assert_eq!(out[0].name, "ccbox-market");
+    assert_eq!(out[0].source, "https://gitee.com/orczh/ccbox-market.git");
+
+    // preset 拉取失败（离线）→ 回退内置 Gitee 直连源
+    let out = with_builtin_market(&[], &[]);
+    assert_eq!(out.len(), 1);
+    assert_eq!(out[0].name, "ccbox-market");
+    assert_eq!(out[0].source, "https://gitee.com/orczh/ccbox-market.git");
+
+    // 已在列表（大小写不同）→ 原样返回，不重复、不改写用户条目
+    let custom = vec![CustomMarket {
+        name: "CCBox-Market".into(),
+        source: "https://example.com/other.git".into(),
+    }];
+    let out = with_builtin_market(&custom, &presets);
+    assert_eq!(out.len(), 1);
+    assert_eq!(out[0].name, "CCBox-Market");
+    assert_eq!(out[0].source, "https://example.com/other.git");
+
+    // 与其他市场共存：只追加内置条目
+    let custom = vec![CustomMarket {
+        name: "alpha".into(),
+        source: "anthropics/claude-plugins-official".into(),
+    }];
+    let out = with_builtin_market(&custom, &[]);
+    assert_eq!(out.len(), 2);
+    assert!(out.iter().any(|m| m.name == "ccbox-market"));
 }

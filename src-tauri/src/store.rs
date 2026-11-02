@@ -4470,7 +4470,26 @@ fn load_plugin_marketplaces() -> Result<Vec<MarketplaceInfo>> {
     let custom = get_app_config()?.custom_markets.unwrap_or_default();
     // 推荐清单获取失败不阻塞市场列表（只影响 preset 分组）
     let presets = get_market_presets().unwrap_or_default();
-    get_plugin_marketplaces_in(&claude_config_dir()?, &installed, &custom, &presets)
+    // ccbox-market 内置为默认个人市场（全新环境也能直接浏览官方精选，不依赖用户手动添加）
+    let custom = with_builtin_market(&custom, &presets);
+    let mut list = get_plugin_marketplaces_in(&claude_config_dir()?, &installed, &custom, &presets)?;
+    // 内置条目沿用推荐清单的描述/图标（走 custom 路径本身不带这些展示字段）
+    if let (Some(p), Some(m)) = (
+        presets
+            .iter()
+            .find(|p| p.name.eq_ignore_ascii_case(CCBOX_MARKET_NAME)),
+        list.iter_mut().find(|m| {
+            m.name.eq_ignore_ascii_case(CCBOX_MARKET_NAME) && m.origin == "user"
+        }),
+    ) {
+        if m.description.is_none() {
+            m.description = p.description.clone();
+        }
+        if m.icon.is_none() {
+            m.icon = p.icon.clone();
+        }
+    }
+    Ok(list)
 }
 
 /// 市场来源分类（未注册市场的浏览方式）
@@ -5079,15 +5098,54 @@ fn market_registered(name: &str) -> Result<bool> {
         .unwrap_or(false))
 }
 
-/// 用户市场列表中按名找来源
+/// 用户市场列表中按名找来源；ccbox-market 为内置条目（不在 customMarkets 时回退官方源）
 fn custom_market_source(name: &str) -> Option<String> {
-    get_app_config()
-        .ok()?
-        .custom_markets
+    if let Some(src) = get_app_config()
+        .ok()
+        .and_then(|c| c.custom_markets)
         .unwrap_or_default()
         .into_iter()
         .find(|m| m.name.eq_ignore_ascii_case(name))
         .map(|m| m.source)
+    {
+        return Some(src);
+    }
+    if name.eq_ignore_ascii_case(CCBOX_MARKET_NAME) {
+        return Some(builtin_ccbox_market_source());
+    }
+    None
+}
+
+/// 内置官方市场来源：优先取 OSS 推荐清单里的当前源（可热更新），离线回退硬编码 Gitee 直连
+fn builtin_ccbox_market_source() -> String {
+    get_market_presets()
+        .unwrap_or_default()
+        .into_iter()
+        .find(|p| p.name.eq_ignore_ascii_case(CCBOX_MARKET_NAME))
+        .map(|p| p.source)
+        .unwrap_or_else(|| CCBOX_MARKET_SOURCE.to_string())
+}
+
+/// 个人市场有效列表：ccbox-market 为内置精选市场，即使用户从未添加也默认在列
+/// （不写回 config；来源优先用推荐清单当前值，离线回退内置源）
+pub(crate) fn with_builtin_market(custom: &[CustomMarket], presets: &[MarketPreset]) -> Vec<CustomMarket> {
+    if custom
+        .iter()
+        .any(|m| m.name.eq_ignore_ascii_case(CCBOX_MARKET_NAME))
+    {
+        return custom.to_vec();
+    }
+    let mut list = custom.to_vec();
+    let source = presets
+        .iter()
+        .find(|p| p.name.eq_ignore_ascii_case(CCBOX_MARKET_NAME))
+        .map(|p| p.source.clone())
+        .unwrap_or_else(|| CCBOX_MARKET_SOURCE.to_string());
+    list.push(CustomMarket {
+        name: CCBOX_MARKET_NAME.to_string(),
+        source,
+    });
+    list
 }
 
 fn set_custom_markets(list: &[CustomMarket]) -> Result<()> {
@@ -5135,6 +5193,8 @@ pub fn add_plugin_marketplace(source: &str) -> Result<String> {
 ///   （列表条目保留，仍可浏览；未注册报错）。
 /// CC-Box 官方精选市场名：不可移除/卸载
 pub(crate) const CCBOX_MARKET_NAME: &str = "ccbox-market";
+/// 内置官方市场兜底来源（首选 OSS 推荐清单中的当前值）
+pub(crate) const CCBOX_MARKET_SOURCE: &str = "https://gitee.com/orczh/ccbox-market.git";
 
 pub fn remove_plugin_marketplace(name: &str, also_unregister: bool) -> Result<()> {
     validate_simple_name(name)?;
