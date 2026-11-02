@@ -5,6 +5,7 @@ import SiteFooter from './components/SiteFooter.vue'
 import SiteHeader from './components/SiteHeader.vue'
 import { renderMarkdown, stripLeadingBlockquote, type TocEntry } from './lib/markdown'
 import { buildRefTree, type RefCategory } from './lib/refTree'
+import { resolveInternalDocLink } from './lib/internalLinks'
 import { enhanceBlocks } from './lib/tabs'
 
 // 文档正文按需懒加载：每篇 md 一个独立 chunk，首屏只带清单
@@ -101,8 +102,7 @@ function onContentClick(e: MouseEvent) {
   const anchorId = decodeURIComponent(url.hash.slice(1))
   const anchor = anchorId ? { id: anchorId, text: a.textContent ?? '' } : undefined
   if (url.hostname === 'code.claude.com') {
-    const m = url.pathname.match(/^\/docs\/(?:zh-CN\/|en\/)?([a-z0-9-]+)\.md$/)
-    const hit = m && manifest.find((en) => en.key === m[1] || en.key.endsWith(`/${m[1]}`))
+    const hit = resolveInternalDocLink(url, manifest)
     if (hit) {
       e.preventDefault()
       openDoc(hit.key, anchor)

@@ -20,7 +20,7 @@
 - vite 虚拟模块 `virtual:cc-docs-manifest`（vite.config.mts 内插件扫描目录，标题取首个 h1）下发扁平清单；`lib/refTree.ts`（纯函数，测试 tests/website/refTree.test.ts）构建三层树（类→组→文档，中文标签映射 + kebab 兜底）
 - **排序以 `claude-code-docs/order.json` 为准**（插件 `applyDocOrder` 应用，类/组/文档三层按首次出现顺序，无 order.json 回退字母序）
 - 正文用 `import.meta.glob('../content/claude-code-docs/**/*.md', {query:'?raw'})` **每篇一个懒加载 chunk**（勿全量内联）；渲染前 `stripLeadingBlockquote` 剥掉每篇开头的 `Documentation Index` 引用块
-- 路由 `#/<相对路径>`（非 `/` 开头 hash 视为页内锚点）；正文中 code.claude.com 文档链接与英文 slug 锚点均拦截为站内导航（`resolveAnchor` 按链接文字↔标题模糊兜底）
+- 路由 `#/<相对路径>`（非 `/` 开头 hash 视为页内锚点）；正文中 code.claude.com 文档链接与英文 slug 锚点均拦截为站内导航（`resolveAnchor` 按链接文字↔标题模糊兜底）；链接解析在 `lib/internalLinks.ts` 纯函数（**slug 允许多段嵌套路径**如 `plugins/mods/interface.md`，单段正则会漏拦截致跳外链，测试 tests/website/internalLinks.test.ts）
 
 ## SEO 与版本号
 
