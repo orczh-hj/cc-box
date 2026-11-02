@@ -111,7 +111,9 @@ function onContentClick(e: MouseEvent) {
     // 同页锚点：默认跳转只认 id，英文 slug 会静默失效，统一走 resolveAnchor
     e.preventDefault()
     scrollToAnchor(anchor)
-  } else if (url.hostname !== location.hostname) {
+  }
+  if (url.hostname !== location.hostname) {
+    // 所有外链（含 code.claude.com 但清单未命中的）统一新标签打开，避免 SPA 被同页跳走
     a.target = '_blank'
     a.rel = 'noopener'
   }
