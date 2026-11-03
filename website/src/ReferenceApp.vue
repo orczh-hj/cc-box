@@ -153,6 +153,12 @@ async function loadDoc(key: string) {
   if (seq === loadSeq && !loadError.value) {
     await nextTick()
     if (seq === loadSeq && mdBodyEl.value) enhanceBlocks(mdBodyEl.value)
+    // 锚点只在「当前加载批次」落定后消费：并发加载时被放弃的批次不能提前抢走/清空它
+    if (seq === loadSeq && pendingAnchor) {
+      const anchor = pendingAnchor
+      pendingAnchor = undefined
+      scrollToAnchor(anchor)
+    }
   }
 }
 
@@ -182,23 +188,14 @@ function onHashChange() {
 
 watch(currentKey, (key) => {
   expandTo(key)
-  loadDoc(key).then(() => {
-    const anchor = pendingAnchor
-    pendingAnchor = undefined
-    nextTick(() => scrollToAnchor(anchor))
-  })
+  // 锚点由 loadDoc 在成功渲染后消费（首屏与切文档同一路径）
+  loadDoc(key)
 })
 
 onMounted(() => {
   syncFromHash()
   expandTo(currentKey.value)
-  loadDoc(currentKey.value).then(() => {
-    // 同 key 深链（#/<默认文档>?a=）不触发 watch，首屏加载完必须在这里补一次滚动
-    const anchor = pendingAnchor
-    if (!anchor) return
-    pendingAnchor = undefined
-    nextTick(() => scrollToAnchor(anchor))
-  })
+  loadDoc(currentKey.value)
   window.addEventListener('hashchange', onHashChange)
 })
 

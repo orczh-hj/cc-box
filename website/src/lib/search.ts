@@ -71,7 +71,8 @@ export function parseCorpus(text: string): { corpus: string; sections: CorpusSec
       closeSection(offset)
       doc = { ty: m[1] as 'reference' | 'docs', key: m[2], title: m[3] }
       sectionTitle = doc.title
-      sectionStart = offset
+      // 首章节从正文开始：分隔头是语料格式，不能被搜索命中或出现在摘要里
+      sectionStart = offset + line.length + 1
     } else if (doc && /^## /.test(line)) {
       closeSection(offset)
       sectionTitle = line.replace(/^## /, '').trim()

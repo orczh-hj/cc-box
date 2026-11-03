@@ -96,6 +96,12 @@ describe('buildCorpusText / parseCorpus round-trip', () => {
     ])
     expect(parseCorpus(tricky).sections).toHaveLength(1)
   })
+
+  it('ParseCorpus_6 首章节从正文开始，不含语料分隔头', () => {
+    const a = sections.filter((s) => s.key === 'getting-started/overview')
+    expect(corpus.slice(a[0].start, a[0].end).startsWith('@@@CCBOXDOC')).toBe(false)
+    expect(corpus.slice(a[0].start, a[0].end).trimStart().startsWith('# 概述')).toBe(true)
+  })
 })
 
 describe('searchCorpus', () => {
@@ -142,6 +148,10 @@ describe('searchCorpus', () => {
   it('SearchCorpus_5 空白查询与单字查询返回空', () => {
     expect(searchCorpus(corpus, sections, '')).toEqual([])
     expect(searchCorpus(corpus, sections, '   ')).toEqual([])
+  })
+
+  it('SearchCorpus_7 语料内部标记不参与搜索（分隔头不是正文）', () => {
+    expect(searchCorpus(corpus, sections, 'CCBOXDOC')).toEqual([])
   })
 
   it('SearchCorpus_6 结果最多 12 条且带摘要', () => {

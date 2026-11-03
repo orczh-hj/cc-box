@@ -151,7 +151,11 @@ export function renderMarkdown(md: string): RenderedDoc {
     renderer: {
       heading(token: Tokens.Heading) {
         const inline = this.parser.parseInline(token.tokens)
-        if (token.depth === 1) return `<h1>${inline}</h1>`
+        if (token.depth === 1) {
+          // h1 也带 id：站内搜索命中文档首章节时用 h1 slug 深链到文档开头
+          const label = token.raw.replace(/^#+\s*/, '').trim()
+          return `<h1 id="${slug(label)}">${inline}</h1>`
+        }
         if (token.depth === 2) {
           const label = token.raw.replace(/^#+\s*/, '').trim()
           const id = slug(label)

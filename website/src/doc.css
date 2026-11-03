@@ -15,7 +15,8 @@
   overflow-wrap: anywhere;
 }
 
-/* 锚点跳转预留 sticky 顶栏高度 */
+/* 锚点跳转预留 sticky 顶栏高度（h1 也带 id：搜索命中文档首章节时深链到标题） */
+.md-body h1,
 .md-body h2 {
   scroll-margin-top: 84px;
 }
