@@ -6,6 +6,7 @@ import SiteHeader from './components/SiteHeader.vue'
 import { renderMarkdown, stripLeadingBlockquote, type TocEntry } from './lib/markdown'
 import { buildRefTree, type RefCategory } from './lib/refTree'
 import { resolveInternalDocLink } from './lib/internalLinks'
+import { parseRefHash } from './lib/refHash'
 import { enhanceBlocks } from './lib/tabs'
 
 // 文档正文按需懒加载：每篇 md 一个独立 chunk，首屏只带清单
@@ -156,12 +157,16 @@ async function loadDoc(key: string) {
 }
 
 function syncFromHash() {
-  const hash = decodeURIComponent(location.hash.slice(1))
-  if (hash.startsWith('/')) {
-    const key = hash.slice(1).replace(/\/+$/, '')
-    if (key && key !== currentKey.value) {
-      currentKey.value = key
-    }
+  // 传原始 hash（不预 decode）：?a= 由 URLSearchParams 正确解码，避免 +/% 二次解码踩坑
+  const { key, anchor } = parseRefHash(location.hash)
+  if (!key) return
+  if (anchor) {
+    // 站内搜索跳转（#/<key>?a=<章节标题>）：id/text 同值，resolveAnchor 走文字兜底
+    pendingAnchor = { id: anchor, text: anchor }
+    if (key === currentKey.value) scrollToAnchor(pendingAnchor)
+  }
+  if (key !== currentKey.value) {
+    currentKey.value = key
   }
 }
 
