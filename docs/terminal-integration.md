@@ -93,6 +93,10 @@ PTY reader → PtyDecoder::decode()（跨 read 状态 + 贪心解码）→ emit(
 PTY exit → PtyDecoder::flush() 刷出残留 → emit('pty-exit', { id, exit_code }) → frontend
 ```
 
+**pty-exit 保留报错现场**（`XTermTerminal.vue` 的 `onPtyExit`）：CLI 退出时前端**不销毁** Terminal 实例，仅把实例降级为占位（`ptyId` 置空，输入不再转发），Tab 照旧转 stopped。CLI 临终输出（如未配置 Provider 的报错）留在 scrollback 可见——销毁实例会让报错随 DOM 消失、终端区一片空白（Mac 新装用户白屏无提示的根因）。清理复用既有路径：重启由 `restartTab` 的 stale 占位替换，关闭 Tab 由 `watch(tabs.keys())` 兜底回收。
+
+**OSC 52 剪贴板**（`src/utils/osc52-clipboard.ts`，`createTerminal` 里 load）：Claude CLI 的 TUI 自管选区，终端内 Cmd+C 由 CLI 发 OSC 52 转义序列（`ESC]52;c;<base64>`）、**由终端负责写入系统剪贴板**——xterm 默认不处理该序列，不装 `@xterm/addon-clipboard` 时复制静默失败（Mac 终端选中 + Cmd+C 剪贴板为空的根因）。自定义 provider 要点：写入委托 `platform.copyText`（addon 默认 provider 用 `navigator.clipboard`，macOS WKWebView 不可靠）；读取（`?` 查询）恒返回空——静默回传系统剪贴板给 PTY 内程序有隐私风险（iTerm2 等同样默认禁用），Claude 复制只走写入方向。仅支持 `'c'`（系统剪贴板）选区。
+
 **输出编码处理**（`src-tauri/src/pty.rs::read_output_loop` + `src-tauri/src/pty_decoder.rs`）：
 
 PTY 是字节流，子进程可能输出 UTF-8 或 GBK（Windows 中文 cmd.exe、某些 git 输出）。两层抽象协同：

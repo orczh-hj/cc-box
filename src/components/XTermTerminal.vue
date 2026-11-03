@@ -62,6 +62,7 @@ import { safeDispose } from '@/utils/dispose'
 import { relativizePath } from '@/utils/path'
 import { mapTerminalGlyphs } from '@/utils/terminal-glyphs'
 import { buildTapMouseInit } from '@/utils/tap-mouse'
+import { loadOsc52Clipboard } from '@/utils/osc52-clipboard'
 import type { SnapshotData } from '@/utils/terminal-reflow'
 import { copyText as platformCopyText, readClipboardText as platformReadText } from '@/api/platform'
 import { transport } from '@/api/transport'
@@ -352,6 +353,10 @@ function createTerminal(tabId: string): Terminal {
   const fitAddon = new FitAddon()
   term.loadAddon(fitAddon)
 
+  // OSC 52 剪贴板：Claude CLI 自管选区，Cmd+C 由 CLI 发 OSC 52 序列、
+  // 终端负责写入系统剪贴板——不装 addon 时复制静默失败
+  loadOsc52Clipboard(term)
+
   // 用户输入 → 发送到对应的 PTY
   term.onData(data => {
     const instance = terminalInstances.get(tabId)
@@ -428,7 +433,8 @@ function createTerminal(tabId: string): Terminal {
     if (event.shiftKey && event.key === 'Enter') {
       event.preventDefault()
       const instance = terminalInstances.get(tabId)
-      if (instance) {
+      // ptyId 为空 = 占位实例（spawn 失败/CLI 已退出），没有底层进程可转发
+      if (instance?.ptyId) {
         ptyInput(instance.ptyId, '\\\r')
       }
       return false
@@ -439,7 +445,7 @@ function createTerminal(tabId: string): Terminal {
     if (isUndoShortcut(event)) {
       event.preventDefault()
       const instance = terminalInstances.get(tabId)
-      if (instance) {
+      if (instance?.ptyId) {
         ptyInput(instance.ptyId, READLINE_UNDO)
       }
       return false
@@ -645,17 +651,17 @@ async function setupEventListeners() {
     }
   })
 
-  // PTY 退出 → 更新 Tab 状态（不删除 Tab）
+  // PTY 退出 → 更新 Tab 状态（不删除 Tab）。实例降级为占位而非销毁：
+  // CLI 临终输出（如未配置 Provider 的报错）留在 scrollback，销毁会让
+  // 报错随 DOM 消失、终端区一片空白（Mac 新装用户白屏无提示的根因）。
+  // 占位实例 ptyId 为空：输入不转发、无 attach 需求；重启由 restartTab
+  // 替换实例，关闭 Tab 由 watch(tabs) 兜底回收。
   unlistenPtyExit = await onPtyExit(({ id }) => {
     for (const [tabId, instance] of terminalInstances) {
       if (instance.ptyId === id) {
-        // 更新 store（Tab 保留，状态变 stopped）
+        // 更新 store（Tab 保留，状态变 stopped，ptyId 清空）
         sessionStore.handlePtyExit(id)
-
-        // 销毁 Terminal 实例（释放资源）
-        void disposeTerminal(instance.term, `onPtyExit(tabId=${tabId})`)
-        terminalInstances.delete(tabId)
-        terminalEls.delete(tabId)
+        instance.ptyId = ''
         attachedPtyIds.delete(id)
         break
       }
