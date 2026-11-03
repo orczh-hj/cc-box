@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted } from 'vue'
+import { onMounted, onUnmounted, ref } from 'vue'
 import ccBoxMd from '../content/cc-box.md?raw'
 import claudeCodeMd from '../content/claude-code.md?raw'
 import DocsToc from './components/DocsToc.vue'
@@ -15,6 +15,9 @@ const docs = [
 ]
 
 const tocGroups = docs.map((d) => ({ title: d.title, items: d.toc }))
+
+// ≤900px 手机/窄屏：目录改为可折叠块（默认收起），桌面端保持常驻
+const tocOpen = ref(false)
 
 let teardown: (() => void) | undefined
 
@@ -37,7 +40,10 @@ onUnmounted(() => teardown?.())
     <div class="container doc-page">
       <h1 class="doc-title">使用文档</h1>
       <p class="doc-lead">Claude Code 基本用法与 CC-Box 使用指南。</p>
-      <div class="doc-layout">
+      <button class="doc-toc-toggle" @click="tocOpen = !tocOpen">
+        {{ tocOpen ? '收起目录' : '本页目录' }}
+      </button>
+      <div class="doc-layout" :class="{ 'toc-open': tocOpen }">
         <DocsToc :groups="tocGroups" />
         <div class="doc-content">
           <div v-for="d in docs" :key="d.title" class="md-body" v-html="d.html"></div>
@@ -74,13 +80,40 @@ onUnmounted(() => teardown?.())
   min-width: 0;
 }
 
+/* 折叠按钮只在 ≤900px 出现，桌面端目录常驻 */
+.doc-toc-toggle {
+  display: none;
+}
+
 @media (max-width: 900px) {
+  .doc-toc-toggle {
+    display: inline-block;
+    margin-bottom: 20px;
+    padding: 6px 14px;
+    font-size: 13px;
+    border: 1px solid var(--border-light);
+    border-radius: 6px;
+    background: none;
+    color: var(--text-secondary);
+    cursor: pointer;
+  }
+
   .doc-layout {
     grid-template-columns: minmax(0, 1fr);
   }
 
   .doc-layout > nav {
     display: none;
+    position: static;
+    max-height: none;
+    margin-bottom: 28px;
+    padding: 12px;
+    border: 1px solid var(--border-light);
+    border-radius: 8px;
+  }
+
+  .doc-layout.toc-open > nav {
+    display: block;
   }
 }
 
