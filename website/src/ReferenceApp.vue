@@ -192,7 +192,13 @@ watch(currentKey, (key) => {
 onMounted(() => {
   syncFromHash()
   expandTo(currentKey.value)
-  loadDoc(currentKey.value)
+  loadDoc(currentKey.value).then(() => {
+    // 同 key 深链（#/<默认文档>?a=）不触发 watch，首屏加载完必须在这里补一次滚动
+    const anchor = pendingAnchor
+    if (!anchor) return
+    pendingAnchor = undefined
+    nextTick(() => scrollToAnchor(anchor))
+  })
   window.addEventListener('hashchange', onHashChange)
 })
 
