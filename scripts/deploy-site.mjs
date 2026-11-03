@@ -131,7 +131,10 @@ function main() {
     sh(`"${ossutil}" rm -r "oss://${bucketName}/assets/"`)
     logOk('已清空 assets/（旧 hash 产物）')
   }
-  // 语料单独上传：预 gzip + 长缓存头（内容 hash 文件名，永不失效）；批量上传排除它防未压缩版覆盖
+  // 顺序：批量资源（含未压缩语料）→ 语料 gzip 版覆盖 → index.html 最后。
+  // 先批量后覆盖而不是用 --exclude 排除：ossutil 的 --exclude 是路径通配，`assets/search-corpus-*.txt`
+  // 这类全路径匹配不可靠，覆盖顺序与通配语义无关，更稳。
+  sh(`"${ossutil}" cp -r "website/dist/" "oss://${bucketName}/" -f --exclude "index.html"`)
   const corpusPath = path.join(SITE_DIST, 'assets', corpusFile)
   const gzPath = `${corpusPath}.gz`
   fs.writeFileSync(gzPath, zlib.gzipSync(fs.readFileSync(corpusPath)))
@@ -140,9 +143,6 @@ function main() {
     `"${ossutil}" cp "${gzPath}" "oss://${bucketName}/assets/${corpusFile}" -f --meta "Content-Encoding:gzip#Cache-Control:max-age=31536000,immutable"`,
   )
   fs.unlinkSync(gzPath)
-  sh(
-    `"${ossutil}" cp -r "website/dist/" "oss://${bucketName}/" -f --exclude "index.html" --exclude "search-corpus-*.txt"`,
-  )
   sh(`"${ossutil}" cp "website/dist/index.html" "oss://${bucketName}/index.html" -f`)
   logOk('上传完成')
 
