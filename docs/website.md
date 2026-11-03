@@ -30,7 +30,7 @@
 - **虚拟模块** `virtual:cc-docs-search` 只下发 `corpusUrl`；dev 由 `configureServer` 中间件返回同一纯函数生成的未压缩语料（`/__search-corpus.txt`），保证 dev/prod 行为一致
 - **运行时**（`lib/search.ts`，纯函数）：首次搜索才 fetch 语料（模块级 Promise 缓存）→ `parseCorpus` 切文档/章节 → `searchCorpus` 按空白拆词、**AND 语义**、标题命中优先排序、前 12 条 → `makeSnippet` 截命中前后 ~40 字并以 `«»` 标记（前端渲染 `<mark>`）
 - **跳转**：reference → `reference.html#/<key>?a=<encodeURIComponent(章节标题)>`（ReferenceApp 用文字兜底 `resolveAnchor` 定位，构建期不算锚点 id）；docs → `docs.html#<slug(标题)>`（与 `lib/markdown.ts` h2 id 规则一致）
-- **缓存语义**：内容 hash 文件名 + `deploy:site` 上传时预 gzip 并设 `Content-Encoding: gzip` / `Cache-Control: max-age=31536000, immutable`；语料文件单独上传，批量上传以 `--exclude "search-corpus-*.txt"` 防止未压缩版覆盖；HEAD 校验含语料 URL 与其 gzip 头（另见 `--clean-assets` 随 assets 目录整体替换）
+- **缓存语义**：内容 hash 文件名 + `deploy:site` 上传时预 gzip 并设 `Content-Encoding: gzip` / `Cache-Control: max-age=31536000, immutable`；上传顺序为「批量资源（未压缩语料）→ 语料 gzip 版覆盖 → index.html」，**不用 `--exclude`**（ossutil 路径通配不可靠，覆盖顺序与通配语义无关）；HEAD 校验含语料 URL 与其 gzip 头（另见 `--clean-assets` 随 assets 目录整体替换）
 - **已知限制**：无模糊/拼写容错；code block 与表格内容不可搜；docs.html 两篇文档 h2 撞名时只落第一篇
 
 ## 手机适配
