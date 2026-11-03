@@ -182,6 +182,19 @@ const term = new Terminal({
 })
 ```
 
+### 终端主题
+
+主题常量在 `src/utils/terminal-theme.ts`（`lightTheme` / `darkTheme`），组件按 `appStore.theme` 选择并监听切换。
+
+**浅色主题的 `white` / `brightWhite` 必须与背景保持 ≥ 4.5:1 对比度**。原因：Windows 10 的 ConPTY 无法表示 bold 与反色，它假设终端是深色背景并重编码输出——
+
+| 应用（Claude）输出 | Win10 ConPTY 输出 | 含义 |
+|---|---|---|
+| `SGR 1`（粗体 + 默认前景） | `SGR 1;97` | 粗体被强插 brightWhite |
+| `SGR 7`（反色，输入框光标块） | `SGR 30;47` | 反色展开成黑字白底 |
+
+若 `brightWhite` / `white` 贴近纯白，Claude Code `light` 主题的粗体文字与光标块会在浅色背景上消失；Win11 的 ConPTY 不重编码，所以该问题只在部分设备（Win10）复现。守卫测试：`tests/utils/terminal-theme.test.ts`。
+
 ### 数据绑定
 
 ```typescript

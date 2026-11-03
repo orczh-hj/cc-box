@@ -3,8 +3,9 @@
 //! - Windows/macOS：Tauri 原生托盘（非 Linux 才编译 tray-icon）
 //! - Linux：无头运行（无系统托盘），窗口/远程/自启动由桌面设置或远程面板管理
 //!
-//! 菜单：CC-Box 标题、各窗口（一级项，单击直接显示/聚焦）、开机自启动、
-//! 新建窗口、远程连接、刷新远程密钥、关闭/开启远程连接、退出 CC-Box。
+//! 菜单：CC-Box 标题、新建窗口、各窗口（一级项，单击直接显示/聚焦）、显示
+//! 远程连接、刷新远程密钥、关闭/开启远程连接、更新/检查更新（独立成组）、
+//! 开机自启动、退出 CC-Box。
 //! 破坏性动作统一弹原生确认对话框；菜单由 Broker 状态与成员名单驱动（2s 轮询）。
 
 use std::collections::HashMap;
@@ -124,7 +125,7 @@ pub(crate) fn build_model(
             "Start remote".to_string()
         },
         remote_connect: if zh {
-            "远程连接".to_string()
+            "显示远程连接".to_string()
         } else {
             "Connect remotely".to_string()
         },
@@ -220,27 +221,8 @@ fn build_menu(
     items.push(Box::new(title_item));
     items.push(Box::new(PredefinedMenuItem::separator(app)?));
 
-    // 有新版本：紧贴标题下方给最高可见度（配合托盘图标红点）
-    if let Some(label) = &model.update {
-        items.push(Box::new(MenuItem::with_id(
-            app,
-            "update",
-            label,
-            true,
-            None::<&str>,
-        )?));
-        items.push(Box::new(PredefinedMenuItem::separator(app)?));
-    } else {
-        // 无更新：「检查更新」立即查一次（结果经菜单签名变化自动重建菜单）
-        items.push(Box::new(MenuItem::with_id(
-            app,
-            "check-update",
-            &model.check_update,
-            true,
-            None::<&str>,
-        )?));
-        items.push(Box::new(PredefinedMenuItem::separator(app)?));
-    }
+    // 「新建窗口」紧贴窗口列表：同属窗口管理，后续窗口项在其下方
+    items.push(Box::new(new_item));
 
     // 每个窗口直接是一级菜单项，单击直接显示/聚焦
     if model.windows.is_empty() {
@@ -264,13 +246,33 @@ fn build_menu(
     }
 
     items.push(Box::new(PredefinedMenuItem::separator(app)?));
-    items.push(Box::new(autostart_item));
-    items.push(Box::new(new_item));
-    items.push(Box::new(PredefinedMenuItem::separator(app)?));
     items.push(Box::new(remote_connect));
     items.push(Box::new(rotate_item));
     items.push(Box::new(remote_item));
     items.push(Box::new(PredefinedMenuItem::separator(app)?));
+
+    // 更新项独立成组（有更新时「更新到 vX.Y.Z」，无更新时「检查更新」；
+    // 配合托盘图标红点，结果经菜单签名变化自动重建菜单）
+    if let Some(label) = &model.update {
+        items.push(Box::new(MenuItem::with_id(
+            app,
+            "update",
+            label,
+            true,
+            None::<&str>,
+        )?));
+    } else {
+        items.push(Box::new(MenuItem::with_id(
+            app,
+            "check-update",
+            &model.check_update,
+            true,
+            None::<&str>,
+        )?));
+    }
+
+    items.push(Box::new(PredefinedMenuItem::separator(app)?));
+    items.push(Box::new(autostart_item));
     items.push(Box::new(quit_item));
 
     let refs: Vec<&dyn IsMenuItem<tauri::Wry>> =
