@@ -6,6 +6,7 @@ import SiteHeader from './components/SiteHeader.vue'
 import { renderMarkdown, stripLeadingBlockquote, type TocEntry } from './lib/markdown'
 import { buildRefTree, type RefCategory } from './lib/refTree'
 import { resolveInternalDocLink } from './lib/internalLinks'
+import { parseRefHash } from './lib/refHash'
 import { enhanceBlocks } from './lib/tabs'
 
 // 文档正文按需懒加载：每篇 md 一个独立 chunk，首屏只带清单
@@ -152,16 +153,26 @@ async function loadDoc(key: string) {
   if (seq === loadSeq && !loadError.value) {
     await nextTick()
     if (seq === loadSeq && mdBodyEl.value) enhanceBlocks(mdBodyEl.value)
+    // 锚点只在「当前加载批次」落定后消费：并发加载时被放弃的批次不能提前抢走/清空它
+    if (seq === loadSeq && pendingAnchor) {
+      const anchor = pendingAnchor
+      pendingAnchor = undefined
+      scrollToAnchor(anchor)
+    }
   }
 }
 
 function syncFromHash() {
-  const hash = decodeURIComponent(location.hash.slice(1))
-  if (hash.startsWith('/')) {
-    const key = hash.slice(1).replace(/\/+$/, '')
-    if (key && key !== currentKey.value) {
-      currentKey.value = key
-    }
+  // 传原始 hash（不预 decode）：?a= 由 URLSearchParams 正确解码，避免 +/% 二次解码踩坑
+  const { key, anchor } = parseRefHash(location.hash)
+  if (!key) return
+  if (anchor) {
+    // 站内搜索跳转（#/<key>?a=<章节标题>）：id/text 同值，resolveAnchor 走文字兜底
+    pendingAnchor = { id: anchor, text: anchor }
+    if (key === currentKey.value) scrollToAnchor(pendingAnchor)
+  }
+  if (key !== currentKey.value) {
+    currentKey.value = key
   }
 }
 
@@ -177,11 +188,8 @@ function onHashChange() {
 
 watch(currentKey, (key) => {
   expandTo(key)
-  loadDoc(key).then(() => {
-    const anchor = pendingAnchor
-    pendingAnchor = undefined
-    nextTick(() => scrollToAnchor(anchor))
-  })
+  // 锚点由 loadDoc 在成功渲染后消费（首屏与切文档同一路径）
+  loadDoc(key)
 })
 
 onMounted(() => {

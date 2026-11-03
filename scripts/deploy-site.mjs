@@ -16,6 +16,7 @@
 import { execSync } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
+import zlib from 'node:zlib'
 import { fileURLToPath } from 'node:url'
 
 const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
@@ -108,6 +109,12 @@ function main() {
     logErr('产物缺失: website/dist/assets/{main,docs,reference}-*.js')
     process.exit(1)
   }
+  // 搜索语料由主 bundle 引用，漏传 = 线上搜索必坏，必须显式校验
+  const corpusFile = assetFiles.find((f) => /^search-corpus-.*\.txt$/.test(f))
+  if (!corpusFile) {
+    logErr('产物缺失: website/dist/assets/search-corpus-*.txt（搜索语料）')
+    process.exit(1)
+  }
   logOk('产物完整')
 
   // [2/4] ossutil 准备
@@ -124,7 +131,18 @@ function main() {
     sh(`"${ossutil}" rm -r "oss://${bucketName}/assets/"`)
     logOk('已清空 assets/（旧 hash 产物）')
   }
+  // 顺序：批量资源（含未压缩语料）→ 语料 gzip 版覆盖 → index.html 最后。
+  // 先批量后覆盖而不是用 --exclude 排除：ossutil 的 --exclude 是路径通配，`assets/search-corpus-*.txt`
+  // 这类全路径匹配不可靠，覆盖顺序与通配语义无关，更稳。
   sh(`"${ossutil}" cp -r "website/dist/" "oss://${bucketName}/" -f --exclude "index.html"`)
+  const corpusPath = path.join(SITE_DIST, 'assets', corpusFile)
+  const gzPath = `${corpusPath}.gz`
+  fs.writeFileSync(gzPath, zlib.gzipSync(fs.readFileSync(corpusPath)))
+  logInfo(`语料 gzip: ${(fs.statSync(corpusPath).size / 1024 / 1024).toFixed(2)}MB → ${(fs.statSync(gzPath).size / 1024 / 1024).toFixed(2)}MB`)
+  sh(
+    `"${ossutil}" cp "${gzPath}" "oss://${bucketName}/assets/${corpusFile}" -f --meta "Content-Encoding:gzip#Cache-Control:max-age=31536000,immutable"`,
+  )
+  fs.unlinkSync(gzPath)
   sh(`"${ossutil}" cp "website/dist/index.html" "oss://${bucketName}/index.html" -f`)
   logOk('上传完成')
 
@@ -140,6 +158,7 @@ function main() {
     `${siteBase}/assets/${mainBundle}`,
     `${siteBase}/assets/${docsBundle}`,
     `${siteBase}/assets/${referenceBundle}`,
+    `${siteBase}/assets/${corpusFile}`,
   ]) {
     if (httpHeadOk(url)) {
       logOk(`200 ${url}`)
@@ -147,6 +166,15 @@ function main() {
       logErr(`校验失败(非 200): ${url}`)
       failed = true
     }
+  }
+  // 语料必须带 gzip 内容编码（上传 meta 丢失会导致浏览器拿到压缩字节当文本解析）
+  const corpusHeaders =
+    sh(`curl -s -I --max-time 10 "${siteBase}/assets/${corpusFile}"`, { silent: true, allowFail: true }) || ''
+  if (/content-encoding:\s*gzip/i.test(corpusHeaders)) {
+    logOk('语料 Content-Encoding: gzip')
+  } else {
+    logErr(`语料缺少 Content-Encoding: gzip: ${siteBase}/assets/${corpusFile}`)
+    failed = true
   }
   if (failed) process.exit(1)
 
