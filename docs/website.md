@@ -22,6 +22,23 @@
 - 正文用 `import.meta.glob('../content/claude-code-docs/**/*.md', {query:'?raw'})` **每篇一个懒加载 chunk**（勿全量内联）；渲染前 `stripLeadingBlockquote` 剥掉每篇开头的 `Documentation Index` 引用块
 - 路由 `#/<相对路径>`（非 `/` 开头 hash 视为页内锚点）；正文中 code.claude.com 文档链接与英文 slug 锚点均拦截为站内导航（`resolveAnchor` 按链接文字↔标题模糊兜底）；链接解析在 `lib/internalLinks.ts` 纯函数（**slug 允许多段嵌套路径**如 `plugins/mods/interface.md`，单段正则会漏拦截致跳外链，测试 tests/website/internalLinks.test.ts）
 
+## 全文搜索
+
+三页共用 `SiteHeader` 内的 `SearchBox`（**压缩语料 + 浏览器内暴力扫描，无倒排索引**）：
+
+- **构建期**（`website/vite.config.mts` 的 `ccDocsSearchPlugin`）：读全部语料（`claude-code-docs/**/*.md` + `cc-box.md` + `claude-code.md`），`stripForSearch` 剥 code fence 与表格行，拼成单文本（每篇一行 `@@@CCBOXDOC ty=… key=… title=…` 分隔头）；产物 `assets/search-corpus-<hash>.txt`（`emitFile`，构建在 `buildStart` 无条件产出），doc 更新 → hash 变 → 旧缓存自然失效
+- **虚拟模块** `virtual:cc-docs-search` 只下发 `corpusUrl`；dev 由 `configureServer` 中间件返回同一纯函数生成的未压缩语料（`/__search-corpus.txt`），保证 dev/prod 行为一致
+- **运行时**（`lib/search.ts`，纯函数）：首次搜索才 fetch 语料（模块级 Promise 缓存）→ `parseCorpus` 切文档/章节 → `searchCorpus` 按空白拆词、**AND 语义**、标题命中优先排序、前 12 条 → `makeSnippet` 截命中前后 ~40 字并以 `«»` 标记（前端渲染 `<mark>`）
+- **跳转**：reference → `reference.html#/<key>?a=<encodeURIComponent(章节标题)>`（ReferenceApp 用文字兜底 `resolveAnchor` 定位，构建期不算锚点 id）；docs → `docs.html#<slug(标题)>`（与 `lib/markdown.ts` h2 id 规则一致）
+- **缓存语义**：内容 hash 文件名 + `deploy:site` 上传时预 gzip 并设 `Content-Encoding: gzip` / `Cache-Control: max-age=31536000, immutable`；语料文件单独上传，批量上传以 `--exclude "search-corpus-*.txt"` 防止未压缩版覆盖；HEAD 校验含语料 URL 与其 gzip 头（另见 `--clean-assets` 随 assets 目录整体替换）
+- **已知限制**：无模糊/拼写容错；code block 与表格内容不可搜；docs.html 两篇文档 h2 撞名时只落第一篇
+
+## 手机适配
+
+- **SiteHeader 断点**：`>1024px` 常驻搜索框（nav 左侧 240px）；`≤1024px` 搜索收成图标 + header 下方浮层（header 根节点 `@click.stop` + document 监听实现点击外部收起）；`≤768px` 六链接收进汉堡菜单（含搜索框，链接点击后收起）
+- **docs.html 目录**：`≤900px` 不再 `display:none`，改为「本页目录」可折叠块（默认收起，复刻 reference `ref-nav-toggle` 模式；`>900px` 侧栏 sticky 常驻）
+- 触屏适配与工具条规则见 CLAUDE.md「响应式适配」
+
 ## SEO 与版本号
 
 - 三个页面 head 已含 keywords/canonical/Open Graph/Twitter（主页另有 JSON-LD SoftwareApplication），`public/robots.txt` + `sitemap.xml` 随 dist 根上传并由 deploy-site 校验；**改入口或域名需同步 sitemap 与 canonical**
@@ -49,4 +66,4 @@ DigiCert 免费证书（3 个月）由 ortab 服务器 `update_ssl.py` 每天 3 
 
 ## 纯逻辑与测试
 
-纯逻辑在 `website/src/lib/`（ua/format/latest），测试在 `tests/website/`。
+纯逻辑在 `website/src/lib/`：`ua/format/latest`（浏览器/格式化/版本）、`refTree/toc`（参考文档树与目录）、`internalLinks`（文档链接拦截）、`markdown`（渲染与 h2 锚点）、`search`（语料切分/扫描/排序/跳转 URL）、`refHash`（`#/key?a=` 路由 hash 解析）；测试在 `tests/website/`（`npx vitest run tests/website/`）。

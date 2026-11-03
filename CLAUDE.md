@@ -137,7 +137,9 @@ npm run release -- --bump patch --notes "### Features\n- Add feature"
 - 命令：`npm run dev:site` / `build:site` / `deploy:site`（`--skip-build`、`--clean-assets` 可选）
 - **安全红线**：bucket 根下有更新通道 `cc-box/` 与依赖 `deps/`，绝不 `rm -r oss://cc-box/`；清旧 hash 产物只能 `--clean-assets`（上传前清 `assets/`，勿在上传后手动 rm）
 - 官网证书自动续签（ortab `update_ssl.py`）→ [docs/release-process.md](docs/release-process.md)「产品官网」
-- 实现细节正本（渲染/虚拟模块/排序/SEO/懒加载/锚点拦截）→ [docs/website.md](docs/website.md)
+- **全文搜索**：构建期把 228+2 篇文档压成语料 `assets/search-corpus-<hash>.txt`（虚拟模块只下发 URL），首次搜索才 fetch、浏览器内全量扫描（AND 语义、前 12 条）；部署时单独预 gzip + immutable 缓存头，批量上传必须 `--exclude "search-corpus-*.txt"`
+- **手机适配**：`>1024px` 搜索框常驻 header，`≤1024px` 图标浮层，`≤768px` 六链接收汉堡菜单；docs.html `≤900px` 目录改为可折叠块
+- 实现细节正本（渲染/虚拟模块/排序/SEO/懒加载/锚点拦截/搜索/手机适配）→ [docs/website.md](docs/website.md)
 
 ## 详细文档
 
