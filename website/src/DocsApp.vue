@@ -20,18 +20,58 @@ const tocGroups = docs.map((d) => ({ title: d.title, items: d.toc }))
 const tocOpen = ref(false)
 
 let teardown: (() => void) | undefined
+let stopAnchorLoop: (() => void) | undefined
+
+// 内容为客户端渲染，浏览器加载时的 hash 定位会因元素尚不存在而失效，挂载后补跳。
+// 正文截图是 loading="lazy"（无固有尺寸），加载后会把目标顶出视口：在短暂窗口内逐帧
+// 检查并按需重新对齐；behavior:'instant' 绕过全局 scroll-behavior:smooth，保证每次落点精确。
+function jumpToHash() {
+  const hash = decodeURIComponent(location.hash.slice(1))
+  if (!hash) return
+  const el = document.getElementById(hash)
+  if (!el) return
+  const top = el.getBoundingClientRect().top
+  if (top < -50 || top > window.innerHeight * 0.6) {
+    el.scrollIntoView({ behavior: 'instant', block: 'start' })
+  }
+}
 
 onMounted(() => {
   teardown = setupScrollSpy(tocGroups.flatMap((g) => g.items.map((i) => i.id)))
 
-  // 内容为客户端渲染，浏览器加载时的 hash 定位会因元素尚不存在而失效，挂载后补一次
-  const hash = decodeURIComponent(location.hash.slice(1))
-  if (hash) {
-    document.getElementById(hash)?.scrollIntoView({ behavior: 'auto', block: 'start' })
+  jumpToHash()
+
+  let active = true
+  const until = Date.now() + 4000
+  let raf = 0
+  const tick = () => {
+    if (!active || Date.now() > until) return
+    jumpToHash()
+    raf = requestAnimationFrame(tick)
+  }
+  raf = requestAnimationFrame(tick)
+
+  // 用户一旦主动滚动/按键即放弃重对齐，避免把正在阅读的人拉回去
+  const stop = () => {
+    active = false
+  }
+  window.addEventListener('wheel', stop, { passive: true, once: true })
+  window.addEventListener('touchstart', stop, { passive: true, once: true })
+  window.addEventListener('keydown', stop, { once: true })
+
+  stopAnchorLoop = () => {
+    active = false
+    cancelAnimationFrame(raf)
+    window.removeEventListener('wheel', stop)
+    window.removeEventListener('touchstart', stop)
+    window.removeEventListener('keydown', stop)
   }
 })
 
-onUnmounted(() => teardown?.())
+onUnmounted(() => {
+  teardown?.()
+  stopAnchorLoop?.()
+})
 </script>
 
 <template>
