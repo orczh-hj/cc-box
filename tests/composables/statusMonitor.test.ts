@@ -272,6 +272,95 @@ describe('useStatusMonitor（消费 Rust hook-status）', () => {
       expect(useSessionStore().getTabByPtyId('pty1')!.sessionId).toBeNull()
     })
 
+    // sessionEnd（clear/resume）：旧 sessionId 解除关联、释放认领（sessionIds）、
+    // 名重置占位——旧对话的 prompt 名不得残留到新对话
+    it('StatusMonitor_SessionEnd_ClearsSessionId_001', () => {
+      createRunningTab('pty1')
+      mountMonitor()
+      const store = useSessionStore()
+      store.assignSessionIdByPtyId('pty1', 'old-session-id', 'claude-sonnet-4-6')
+      store.updateTabName(store.getTabByPtyId('pty1')!.tabId, '旧对话的 prompt 名')
+      expect(store.getTabByPtyId('pty1')!.sessionId).toBe('old-session-id')
+
+      emit(
+        makeStatus('sessionEnd', 'pty1', {
+          sessionId: 'old-session-id',
+          data: { reason: 'clear' },
+        }),
+      )
+
+      const tab = store.getTabByPtyId('pty1')!
+      expect(tab.sessionId).toBeNull()
+      expect(tab.sessionIds).toEqual([])
+      expect(tab.name).toBe('New Session')
+    })
+
+    // /clear 重置后，新对话首条 prompt 自动命名重新生效（名称与实际会话一致）
+    it('StatusMonitor_SessionEnd_PromptRenameAfterClear_001', () => {
+      createRunningTab('pty1')
+      mountMonitor()
+      const store = useSessionStore()
+      store.assignSessionIdByPtyId('pty1', 'old-session-id', 'claude-sonnet-4-6')
+      store.updateTabName(store.getTabByPtyId('pty1')!.tabId, '旧对话的 prompt 名')
+
+      emit(makeStatus('sessionEnd', 'pty1', { sessionId: 'old-session-id', data: { reason: 'clear' } }))
+      emit(makeStatus('userPromptSubmit', 'pty1', { working: true, data: { prompt: '新对话首个问题' } }))
+
+      expect(store.getTabByPtyId('pty1')!.name).toBe('新对话首个问题')
+    })
+
+    // sessionStart 带 session_title（CLI 内 /rename、--name、resume 历史标题）：
+    // Tab 名对齐官方标题（修复同一会话两个名字）
+    it('StatusMonitor_SessionStart_AlignsSessionTitle_001', () => {
+      createRunningTab('pty1')
+      mountMonitor()
+      const store = useSessionStore()
+      store.assignSessionIdByPtyId('pty1', 'sid-1', 'claude-sonnet-4-6')
+
+      emit(
+        makeStatus('sessionStart', 'pty1', {
+          sessionId: 'sid-2',
+          data: { model: 'claude-sonnet-4-6', source: 'resume', sessionTitle: '登录模块重构' },
+        }),
+      )
+
+      const tab = store.getTabByPtyId('pty1')!
+      expect(tab.name).toBe('登录模块重构')
+    })
+
+    // userPromptSubmit 带 session_title：官方标题优先于 prompt 自动命名
+    it('StatusMonitor_UserPromptSubmit_SessionTitleWins_001', () => {
+      createRunningTab('pty1')
+      mountMonitor()
+
+      emit(
+        makeStatus('userPromptSubmit', 'pty1', {
+          working: true,
+          data: { prompt: '随便的第一句话', sessionTitle: '官方标题' },
+        }),
+      )
+
+      expect(useSessionStore().getTabByPtyId('pty1')!.name).toBe('官方标题')
+    })
+
+    // sessionEnd（退出类 reason）：sessionIds 必须保留——stopped Tab 重启
+    // 走 --resume 继续，清掉会退化为新会话
+    it('StatusMonitor_SessionEnd_ExitKeepsSessionIds_001', () => {
+      createRunningTab('pty1')
+      mountMonitor()
+      const store = useSessionStore()
+      store.assignSessionIdByPtyId('pty1', 'sess-still-alive', 'claude-sonnet-4-6')
+
+      emit(
+        makeStatus('sessionEnd', 'pty1', {
+          sessionId: 'sess-still-alive',
+          data: { reason: 'prompt_input_exit' },
+        }),
+      )
+
+      expect(store.getTabByPtyId('pty1')!.sessionIds).toContain('sess-still-alive')
+    })
+
     // userPromptSubmit：默认名（New Session）时用首条 prompt 命名
     it('StatusMonitor_UserPromptSubmit_AutoName_001', () => {
       createRunningTab('pty1')
@@ -292,11 +381,12 @@ describe('useStatusMonitor（消费 Rust hook-status）', () => {
       createRunningTab('pty1')
       mountMonitor()
 
-      const long = 'a'.repeat(60)
+      // 截断 200 与 Rust/CLI 一致（唯一源同长）
+      const long = 'a'.repeat(260)
       emit(makeStatus('userPromptSubmit', 'pty1', { working: true, data: { prompt: long } }))
 
       const name = useSessionStore().getTabByPtyId('pty1')!.name
-      expect(name).toBe('a'.repeat(50) + '…')
+      expect(name).toBe('a'.repeat(200) + '…')
     })
 
     // 用户已自定义标题 → 不覆盖

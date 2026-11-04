@@ -146,39 +146,28 @@ describe('session store', () => {
       expect(store.claimedSessionIds.has('sess-release')).toBe(false)
     })
 
-    // 关闭带 sessionId 的 tab：会话信息并入首页近期会话缓存（零请求即时可见）
-    it('CloseTab_MergesIntoRecent_001', async () => {
+    // 关闭 tab：触发近期会话重拉（统一走 Rust 单一出口，无前端内存合并）
+    it('CloseTab_ReloadsRecent_001', async () => {
       const appStore = useAppStore()
+      const spy = vi.spyOn(appStore, 'reloadRecentSessions').mockResolvedValue()
       const store = useSessionStore()
-      const tabId = store.createTab('/project', { sessionId: 'sess-recent', name: '我的会话' })
+      const tabId = store.createTab('/project', { sessionId: 'sess-recent' })
 
       await store.closeTab(tabId)
-      const merged = appStore.cachedRecentSessions.find(s => s.sessionId === 'sess-recent')
-      expect(merged).toBeDefined()
-      expect(merged?.name).toBe('我的会话')
-      expect(merged?.projectPath).toBe('/project')
+      expect(spy).toHaveBeenCalledTimes(1)
+      spy.mockRestore()
     })
 
-    // 关闭无 sessionId 的 tab（从未启动）：无历史记录可指，不并入缓存
-    it('CloseTab_NoSessionId_NoMerge_002', async () => {
+    // PTY 自然退出（handlePtyExit）同样触发重拉
+    it('PtyExit_ReloadsRecent_002', async () => {
       const appStore = useAppStore()
+      const spy = vi.spyOn(appStore, 'reloadRecentSessions').mockResolvedValue()
       const store = useSessionStore()
       const tabId = store.createTab('/project')
-
-      await store.closeTab(tabId)
-      expect(appStore.cachedRecentSessions).toHaveLength(0)
-    })
-
-    // 重复关闭同 sessionId（closeTab 后 resume 再 closeTab）：按 id 去重，不产生重复条目
-    it('CloseTab_MergeDedup_003', async () => {
-      const appStore = useAppStore()
-      const store = useSessionStore()
-      const tabId = store.createTab('/project', { sessionId: 'sess-dup' })
-
-      await store.closeTab(tabId)
-      const tabId2 = store.createTab('/project', { sessionId: 'sess-dup' })
-      await store.closeTab(tabId2)
-      expect(appStore.cachedRecentSessions.filter(s => s.sessionId === 'sess-dup')).toHaveLength(1)
+      store.setTabPty(tabId, 'pty-r')
+      store.handlePtyExit('pty-r')
+      expect(spy).toHaveBeenCalledTimes(1)
+      spy.mockRestore()
     })
   })
 
@@ -391,6 +380,22 @@ describe('session store', () => {
       const tab2 = store.getTabByPtyId('pty-2')!
       expect(tab2.name).toBe('proj-b')
       expect(tab2.pending).toBe(true)
+    })
+
+    // 服务端 display_name 优先于历史缓存名与项目名（RemoteSession.name；旧桌面缺失时回退）
+    it('AdoptRemoteSessions_ServerNameWins_001', async () => {
+      const mockGetSessions = vi.mocked(getSessions)
+      mockGetSessions.mockResolvedValue([
+        { sessionId: 'sess-h', name: '历史缓存名', projectPath: '/p2', lastActiveAt: 1 } as never,
+      ])
+      const store = useSessionStore()
+      await store.loadHistorySessions('/p2')
+
+      store.adoptRemoteSessions([
+        { id: 'pty-s', type: 'claude', cwd: '/p2', working: false, pending: false, sessionId: 'sess-h', name: '服务端显示名' },
+      ])
+
+      expect(store.getTabByPtyId('pty-s')!.name).toBe('服务端显示名')
     })
 
     // 重复采纳同 ptyId：不新建 Tab，仅更新 working/pending

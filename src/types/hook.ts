@@ -19,6 +19,8 @@ export interface SessionStartData {
   cwd?: string
   transcriptPath?: string
   source?: string
+  /** 会话官方标题（用户显式命名；旧版 CLI 缺失） */
+  sessionTitle?: string
 }
 
 /** SessionEnd 事件提取的数据 */
@@ -29,6 +31,8 @@ export interface SessionEndData {
 /** UserPromptSubmit 事件提取的数据 */
 export interface UserPromptSubmitData {
   prompt?: string
+  /** 会话官方标题（用户显式命名时每条 prompt 携带；旧版 CLI 缺失） */
+  sessionTitle?: string
 }
 
 /** PreToolUse 事件提取的数据 */

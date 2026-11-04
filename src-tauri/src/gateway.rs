@@ -410,6 +410,7 @@ fn member_route_from_session_created(instance_id: &str, id: &str, path: &str) ->
                 working: false,
                 pending: false,
                 session_id: None,
+                name: None,
                 instance_id: Some(instance_id.to_string()),
                 instance_name: Some(name),
             });

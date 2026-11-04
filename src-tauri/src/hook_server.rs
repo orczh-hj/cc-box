@@ -5,21 +5,13 @@ use axum::{routing::post, Router};
 use serde_json::{json, Value};
 use std::net::SocketAddr;
 use tauri::AppHandle;
-use tokio::sync::Mutex;
 use tower::ServiceBuilder;
 
 use crate::hook_events::HookPayload;
 use crate::store::invalidate_project_path_mapping;
 
-/// session_id → pty_id 映射
-type SessionMap = Mutex<std::collections::HashMap<String, String>>;
-
 /// 同步存储端口
 static HOOK_PORT: std::sync::OnceLock<u16> = std::sync::OnceLock::new();
-
-/// 异步会话映射
-static SESSIONS: once_cell::sync::Lazy<SessionMap> =
-    once_cell::sync::Lazy::new(|| Mutex::new(std::collections::HashMap::new()));
 
 pub async fn init(app_handle: AppHandle) {
     match start_server(app_handle).await {
@@ -106,13 +98,26 @@ async fn handle_hook(
         .to_string();
     log::info!("[hook-server] received: {} pty={}", event_name, pty_id.as_deref().unwrap_or("?"));
 
-    // 建立 session_id ↔ pty_id 映射；同步记入远程会话表（手机端
-    // sessions.list 下发，防止从历史恢复时二次 spawn 同一对话）
-    if let Some(ref sid) = event.get("session_id").and_then(|v| v.as_str()).map(|s| s.to_string()) {
-        if let Some(ref pty) = pty_id {
-            let mut sessions = SESSIONS.lock().await;
-            sessions.insert(sid.to_string(), pty.clone());
-            crate::remote_state::REMOTE_STATE.set_session_id(pty, sid);
+    // 记入远程会话表（手机端 sessions.list 下发，防止从历史恢复时二次
+    // spawn 同一对话）；SessionEnd 时由 on_hook_payload 解除关联
+    let session_id = event
+        .get("session_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    if let (Some(ref sid), Some(ref pty)) = (&session_id, &pty_id) {
+        crate::remote_state::REMOTE_STATE.set_session_id(pty, sid);
+    }
+
+    // 官方标题（用户显式命名：CLI /rename、--name 写入 transcript 后回执）：
+    // 手机运行列表实时名（内存镜像，正本在 transcript JSONL）
+    if let Some(title) = event
+        .get("session_title")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+    {
+        if let Some(ref pty) = &pty_id {
+            crate::remote_state::REMOTE_STATE.set_display_name(pty, title);
         }
     }
 

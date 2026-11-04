@@ -4,6 +4,7 @@ import { useSessionStore } from '@/stores/session'
 import { isTauriEnv } from '@/api/platform'
 import { onHookStatus, onSessionViewed } from '@/api/tauri'
 import type { HookStatusPayload } from '@/types/hook'
+import { SESSION_NAME_PLACEHOLDER, isPlaceholderSessionName, truncateDisplayName } from '@/utils/session-name'
 
 /**
  * Tab working/pending 状态监控：消费 Rust 状态机的 hook-status 事件。
@@ -45,22 +46,51 @@ export function useStatusMonitor(options: { isFocused: Ref<boolean>; isTerminalV
     }
 
     // sessionStart：分配 sessionId（Tab 元数据在前端；Rust 侧 set_session_id
-    // 已维护远程会话表，两处存储各司其职）
+    // 已维护远程会话表，两处存储各司其职）。带官方标题（CLI /rename、--name、
+    // resume 历史标题）时 Tab 名对齐——占位类名才跟随，用户改过的名不动
     if (status.trigger.type === 'sessionStart') {
       const sessionId = status.sessionId
       if (sessionId) {
         const data = status.trigger.data
         sessionStore.assignSessionIdByPtyId(status.ptyId, sessionId, data.model)
+        if (data.sessionTitle && isPlaceholderSessionName(tab.name, sessionId)) {
+          sessionStore.updateTabName(tab.tabId, data.sessionTitle)
+        }
       }
       return
     }
 
-    // userPromptSubmit：无自定义标题时，用首条用户消息作为标题
+    // sessionEnd（对话切换）：/clear、/resume 后旧对话不再属于此 Tab——解除
+    // sessionId 关联、释放认领（sessionIds）、名重置占位（旧 prompt 名不得残留
+    // 到新对话）。退出类 reason（prompt_input_exit 等）不清：对话仍在，stopped
+    // Tab 重启要走 --resume，名保留。Rust 侧 entry.session_id 不区分 reason 全清
+    // （CLI 已退出，手机端此刻恢复本就该开新 PTY，无 --resume 语义）
+    if (status.trigger.type === 'sessionEnd') {
+      const reason = status.trigger.data.reason
+      if (reason === 'clear' || reason === 'resume') {
+        tab.sessionId = null
+        tab.sessionIds = []
+        if (tab.name !== SESSION_NAME_PLACEHOLDER) {
+          sessionStore.updateTabName(tab.tabId, SESSION_NAME_PLACEHOLDER)
+        }
+      }
+      return
+    }
+
+    // userPromptSubmit 命名：官方标题（用户显式命名，/rename 注入回执）优先于
+    // prompt 自动命名；后者仅占位类名时生效，截断统一 '…'
     if (status.trigger.type === 'userPromptSubmit') {
-      if (tab.name === 'New Session' || tab.name === tab.sessionId?.slice(0, 8)) {
+      const title = status.trigger.data.sessionTitle?.trim()
+      if (title) {
+        if (tab.name !== title) {
+          sessionStore.updateTabName(tab.tabId, title)
+        }
+        return
+      }
+      if (isPlaceholderSessionName(tab.name, tab.sessionId)) {
         const prompt = status.trigger.data.prompt?.trim()
         if (prompt) {
-          sessionStore.updateTabName(tab.tabId, prompt.length > 50 ? prompt.slice(0, 50) + '…' : prompt)
+          sessionStore.updateTabName(tab.tabId, truncateDisplayName(prompt))
         }
       }
     }

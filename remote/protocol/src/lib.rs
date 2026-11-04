@@ -225,6 +225,10 @@ pub struct RemoteSession {
     /// Claude 会话 id（hook SessionStart 建立；shell 会话与旧版桌面端缺失）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
+    /// 会话显示名（用户重命名/官方标题对齐后的当前名；旧版桌面端缺失，
+    /// 手机端回退历史缓存名/项目名）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     /// 会话所属 CC-Box 实例 id（设备级 Gateway 多实例聚合用；单实例/旧版缺失）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instance_id: Option<String>,

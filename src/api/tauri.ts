@@ -139,7 +139,8 @@ export const onRemoteSessionCreated = (callback: (payload: { id: string; data: s
 export const onRemoteSessionClosed = (callback: (payload: { id: string }) => void): Promise<Unlisten> =>
   listen<{ id: string }>('remote-session-closed', callback);
 
-/** 会话重命名双端同步（广播中转 command；两端收 session-renamed 应用同一结果） */
+/** 会话重命名双端同步（广播中转 command；两端收 session-renamed 应用同一结果）。
+ * 名称唯一源 = transcript JSONL：运行中由前端注入 /rename 让 CLI 写 custom-title */
 export const renameSession = (ptyId: string, name: string): Promise<void> =>
   invoke<void>('rename_session', { ptyId, name });
 

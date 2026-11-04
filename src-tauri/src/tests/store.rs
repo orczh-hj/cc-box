@@ -500,7 +500,7 @@ fn ExtractSessionName_SkipSystemInject_001() {
 // 超过 50 字符的消息被截断并加省略号
 #[test]
 fn ExtractSessionName_TruncateLong_001() {
-    let long_msg: String = "a".repeat(60);
+    let long_msg: String = "a".repeat(260);
     let lines = vec![format!(
         r#"{{"type":"user","message":{{"content":"{}"}},"isMeta":false}}"#,
         long_msg
@@ -509,9 +509,9 @@ fn ExtractSessionName_TruncateLong_001() {
     let file_path = dir.path().join("session.jsonl");
     std::fs::write(&file_path, lines.join("\n")).unwrap();
     let result = extract_session_name(&file_path);
-    assert!(result.ends_with("..."));
-    // 50 chars + "..." = 53
-    assert_eq!(result.len(), 53);
+    // CLI 同路径：截断 200 字符 + '…'（extractFirstPromptFromHead）
+    assert_eq!(result.chars().count(), 201);
+    assert!(result.ends_with('…'));
 }
 
 // 无用户消息也无 custom-title 时返回 "Unnamed session"
@@ -1525,4 +1525,117 @@ fn UnhideProject_RemoveNormalized_003() {
 
     let hidden = get_app_config().unwrap().hidden_projects.unwrap();
     assert_eq!(hidden, vec!["/home/user/proj".to_string()]);
+}
+
+// ==================== extract_session_name（CLI 同路径补充用例） ====================
+// 真值来源：Claude Code 源码 utils/listSessionsImpl.ts::parseSessionInfoFromLite
+// 与 utils/sessionStoragePortable.ts::extractFirstPromptFromHead 的过滤语义
+
+fn name_fixture(tag: &str, lines: Vec<String>) -> std::path::PathBuf {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("s.jsonl");
+    std::fs::write(&p, lines.join("\n")).unwrap();
+    let kept = std::env::temp_dir().join(format!("cc-box-cli-name-{}-{}.jsonl", tag, std::process::id()));
+    std::fs::copy(&p, &kept).unwrap();
+    kept
+}
+
+// tool_result 行（type:user 但内容是 tool_result block）不作为首条 prompt
+#[test]
+fn ExtractSessionName_SkipToolResult_001() {
+    let f = name_fixture("toolres", vec![
+        r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"output"}]},"isMeta":false}"#.into(),
+        r#"{"type":"user","message":{"content":"真实提问"},"isMeta":false}"#.into(),
+    ]);
+    assert_eq!(extract_session_name(&f), "真实提问");
+}
+
+// slash 命令消息跳过；后面无正常消息时用首条 command-name 作 fallback
+#[test]
+fn ExtractSessionName_CommandFallback_002() {
+    let f = name_fixture("cmd", vec![
+        r#"{"type":"user","message":{"content":"/init\n<command-name>init</command-name>"},"isMeta":false}"#.into(),
+    ]);
+    assert_eq!(extract_session_name(&f), "init");
+}
+
+// bash 输入格式化为 "! <命令>"
+#[test]
+fn ExtractSessionName_BashInput_003() {
+    let f = name_fixture("bash", vec![
+        r#"{"type":"user","message":{"content":"<bash-input>npm test</bash-input>"},"isMeta":false}"#.into(),
+    ]);
+    assert_eq!(extract_session_name(&f), "! npm test");
+}
+
+// aiTitle（AI 生成标题）回退；customTitle 缺失时命中
+#[test]
+fn ExtractSessionName_AiTitleFallback_004() {
+    let f = name_fixture("aititle", vec![
+        r#"{"type":"ai-title","aiTitle":"Fix login button"}"#.into(),
+        r#"{"type":"user","message":{"content":"第一条消息"},"isMeta":false}"#.into(),
+    ]);
+    assert_eq!(extract_session_name(&f), "Fix login button");
+}
+
+// 大文件：customTitle 写在 64KB 之外（tail 区）仍命中；firstPrompt 在 head 区命中
+#[test]
+fn ExtractSessionName_HeadTailLiteRead_005() {
+    let big: String = "x".repeat(200 * 1024);
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("s.jsonl");
+    std::fs::write(
+        &p,
+        format!(
+            "{{\"type\":\"user\",\"message\":{{\"content\":\"{}\"}},\"isMeta\":false}}\n{}\n{{\"type\":\"custom-title\",\"customTitle\":\"尾部的标题\"}}",
+            "开头的首条消息", big
+        ),
+    )
+    .unwrap();
+    assert_eq!(extract_session_name(&p), "尾部的标题");
+}
+
+// isCompactSummary 消息不作为首条 prompt
+#[test]
+fn ExtractSessionName_SkipCompactSummary_006() {
+    let f = name_fixture("compact", vec![
+        r#"{"type":"user","message":{"content":"压缩摘要内容"},"isCompactSummary":true}"#.into(),
+        r#"{"type":"user","message":{"content":"真实问题"},"isMeta":false}"#.into(),
+    ]);
+    assert_eq!(extract_session_name(&f), "真实问题");
+}
+
+// sidechain 首行标记的会话不出现在列表（CLI listSessionsImpl 同路径）
+#[test]
+fn GetSessions_SkipSidechain_001() {
+    use crate::store::collect_session_entries_in_dir;
+    let dir = tempfile::tempdir().unwrap();
+    let proj = dir.path().join("proj");
+    std::fs::create_dir_all(&proj).unwrap();
+    std::fs::write(
+        proj.join("11111111-2222-3333-4444-555555555555.jsonl"),
+        r#"{"isSidechain":true,"type":"user","message":{"content":"子代理任务"}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        proj.join("66666666-7777-8888-9999-000000000000.jsonl"),
+        r#"{"type":"user","message":{"content":"主会话"},"isMeta":false}"#,
+    )
+    .unwrap();
+    let entries = collect_session_entries_in_dir(&proj);
+    // 名称提取在 entries_into_sessions（私有）：经 session_name 兜底验证——
+    // sidechain 文件名单独检查其 head 首行判定
+    assert_eq!(entries.len(), 2);
+    use crate::store::extract_session_name;
+    let sidechain_path = proj.join("11111111-2222-3333-4444-555555555555.jsonl");
+    let main_path = proj.join("66666666-7777-8888-9999-000000000000.jsonl");
+    assert_eq!(extract_session_name(&sidechain_path), "子代理任务"); // 名称可提取
+    // 但列表过滤由 head_first_line_is_sidechain 决定：经 get_sessions 全链验证
+    // 需真实项目目录，这里验证核心判定函数
+    assert!(crate::store::head_first_line_is_sidechain(
+        &std::fs::read_to_string(&sidechain_path).unwrap()
+    ));
+    assert!(!crate::store::head_first_line_is_sidechain(
+        &std::fs::read_to_string(&main_path).unwrap()
+    ));
 }

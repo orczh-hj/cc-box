@@ -116,11 +116,12 @@
 ### RemoteSession
 
 ```json
-{ "id": "<ptyId>", "type": "claude|shell", "cwd": "<path>", "working": false, "pending": false, "sessionId": "<可选>", "instanceId": "<可选>", "instanceName": "<可选>" }
+{ "id": "<ptyId>", "type": "claude|shell", "cwd": "<path>", "working": false, "pending": false, "sessionId": "<可选>", "name": "<可选>", "instanceId": "<可选>", "instanceName": "<可选>" }
 ```
 
 - `id` 是 ptyId（Rust 注册表键，与 Claude sessionId 不同；UUID v4 跨实例全局唯一）
 - `sessionId`（可选）：Claude 会话 id，hook `SessionStart` 等事件建立映射后由桌面端填充；shell 会话与旧版桌面端缺失。手机端用它把重连恢复的 Tab 与历史会话关联，**防止从历史恢复同一对话时二次 spawn**
+- `name`（可选）：会话显示名（用户重命名/官方标题对齐后的当前名，`rename_session` 与 hook `session_title` 维护）。旧版桌面端缺失，手机端回退历史缓存名/项目名
 - `instanceId` / `instanceName`（可选）：多实例远程架构下会话所属 CC-Box 实例（设备级 Gateway 聚合所有实例的会话；`instanceName` 如「实例 2」）。缺失（单实例/旧桌面）时手机端降级为不分组平铺
 
 ### 回放快照（tail）

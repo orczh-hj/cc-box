@@ -1,6 +1,6 @@
 import { setActivePinia, createPinia } from 'pinia'
 import { mockIPC } from '@tauri-apps/api/mocks'
-import { beforeEach, describe, it, expect, vi } from 'vitest'
+import { beforeEach, describe, it, expect } from 'vitest'
 import { useAppStore } from '@/stores/app'
 import type { SessionInfo } from '@/types'
 import i18n from '@/i18n'
@@ -235,7 +235,7 @@ describe('setLanguage', () => {
   })
 })
 
-describe('mergeRecentSession', () => {
+describe('reloadRecentSessions', () => {
   const session = (id: string, over: Partial<SessionInfo> = {}): SessionInfo => ({
     sessionId: id,
     name: id,
@@ -244,31 +244,30 @@ describe('mergeRecentSession', () => {
     ...over,
   })
 
-  // 新会话（本次运行新建后关闭）插入缓存顶部，首页近期会话即时可见
-  it('MergeRecentSession_New_InsertsTop_001', () => {
+  // 会话结束后重拉：缓存整体替换为 Rust 单一出口的数据（名称已合并 override），
+  // 不再有前端 tab.name 内存合并
+  it('ReloadRecentSessions_ReplacesCache_001', async () => {
+    mockIPC((cmd) => {
+      if (cmd === 'get_all_recent_sessions') {
+        return [session('srv-1'), session('srv-2', { name: '官方标题名' })]
+      }
+    })
     const store = useAppStore()
-    store.refreshRecentSessions([session('old-1')])
-    store.mergeRecentSession(session('closed-new', { lastActiveAt: 999 }))
-    expect(store.cachedRecentSessions.map(s => s.sessionId)).toEqual(['closed-new', 'old-1'])
-    expect(store.cachedRecentSessions[0].lastActiveAt).toBe(999)
+    store.refreshRecentSessions([session('stale-local')])
+    await store.reloadRecentSessions()
+    expect(store.cachedRecentSessions.map(s => s.sessionId)).toEqual(['srv-1', 'srv-2'])
+    expect(store.cachedRecentSessions[1].name).toBe('官方标题名')
   })
 
-  // 已存在的 sessionId（恢复后关闭）就地更新，不产生重复条目
-  it('MergeRecentSession_Existing_UpdatesInPlace_002', () => {
+  // 拉取失败静默保留旧缓存（不抛出、不清空）
+  it('ReloadRecentSessions_FailureKeepsCache_002', async () => {
+    mockIPC(() => {
+      throw new Error('backend offline')
+    })
     const store = useAppStore()
-    store.refreshRecentSessions([session('old-1', { name: '旧名' })])
-    store.mergeRecentSession(session('old-1', { name: '新名', lastActiveAt: 500 }))
-    expect(store.cachedRecentSessions).toHaveLength(1)
-    expect(store.cachedRecentSessions[0].name).toBe('新名')
-    expect(store.cachedRecentSessions[0].lastActiveAt).toBe(500)
-  })
-
-  // 合入条目代表已结束的会话：working/pending 强制清 false（不残留运行态圆点）
-  it('MergeRecentSession_ClearsWorkingPending_003', () => {
-    const store = useAppStore()
-    store.mergeRecentSession(session('s1', { working: true, pending: true }))
-    expect(store.cachedRecentSessions[0].working).toBe(false)
-    expect(store.cachedRecentSessions[0].pending).toBe(false)
+    store.refreshRecentSessions([session('old-keep')])
+    await store.reloadRecentSessions()
+    expect(store.cachedRecentSessions.map(s => s.sessionId)).toEqual(['old-keep'])
   })
 })
 
@@ -326,8 +325,9 @@ describe('hideProject / unhideProjectIfHidden', () => {
     expect(calls.some(([cmd, args]) => cmd === 'unhide_project' && (args as { path: string }).path === 'D:\\Work\\Demo')).toBe(true)
   })
 
-  // 隐藏项目的本地缓存回填守卫：ensureProjectInList / mergeRecentSession
-  // 不把隐藏项目塞回首页（运行中 Tab 的会话启动/关闭路径）
+  // 隐藏项目的本地缓存回填守卫：ensureProjectInList 不把隐藏项目塞回首页
+  // 项目列表。近期会话的隐藏过滤已移至服务端（get_all_recent_sessions 只列
+  // 已知项目，get_projects 已过滤隐藏）——前端不再本地二次过滤（单一出口）
   it('HiddenProject_LocalCacheBackfillGuard_004', async () => {
     mockIPC(() => null)
     const store = useAppStore()
@@ -337,11 +337,8 @@ describe('hideProject / unhideProjectIfHidden', () => {
 
     store.ensureProjectInList('D:\\Work\\Demo')
     store.ensureProjectInList('/home/user/proj')
-    store.mergeRecentSession({ sessionId: 's1', name: 's1', projectPath: 'd:/work/demo', lastActiveAt: 1 } as SessionInfo)
-    store.mergeRecentSession({ sessionId: 's2', name: 's2', projectPath: '/home/user/proj', lastActiveAt: 2 } as SessionInfo)
 
     expect(store.cachedProjects.map(p => p.path)).toEqual(['/home/user/proj'])
-    expect(store.cachedRecentSessions.map(s => s.sessionId)).toEqual(['s2'])
   })
 })
 

@@ -44,6 +44,8 @@ export interface RemoteSession {
   pending: boolean
   /** Claude 会话 id（hook SessionStart 建立；shell 会话与旧版桌面端缺失） */
   sessionId?: string
+  /** 会话显示名（用户重命名/官方标题对齐后的当前名；旧版桌面端缺失） */
+  name?: string
   /** 会话所属 CC-Box 实例 id（设备级 Gateway 多实例聚合；单实例/旧版缺失） */
   instanceId?: string
   /** 实例展示名（如「实例 2」；缺失时手机端降级为不分组平铺） */

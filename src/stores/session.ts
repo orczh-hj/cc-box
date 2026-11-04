@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref, computed, reactive } from 'vue'
 import { uuid } from '@/utils/uuid'
+import { SESSION_NAME_PLACEHOLDER } from '@/utils/session-name'
 import {
   getSessions,
   ptyKill,
@@ -193,7 +194,7 @@ export const useSessionStore = defineStore('session', () => {
       ptyId: null,
       sessionId: opts?.sessionId ?? null,
       sessionIds: opts?.sessionId ? [opts.sessionId] : [],
-      name: opts?.name ?? (opts?.sessionId ? opts.sessionId.slice(0, 8) : 'New Session'),
+      name: opts?.name ?? (opts?.sessionId ? opts.sessionId.slice(0, 8) : SESSION_NAME_PLACEHOLDER),
       status: 'stopped',
       createdAt: now,
       lastActiveAt: now,
@@ -230,7 +231,7 @@ export const useSessionStore = defineStore('session', () => {
    * Tab 名优先取历史会话名（sessionId 匹配）；历史未加载时回退项目名，
    * 加载完成后经 backfillTabNamesFromHistory 修正
    */
-  function adoptRemoteSessions(list: Array<{ id: string; type: string; cwd: string; working: boolean; pending: boolean; sessionId?: string; instanceId?: string; instanceName?: string }>) {
+  function adoptRemoteSessions(list: Array<{ id: string; type: string; cwd: string; working: boolean; pending: boolean; sessionId?: string; name?: string; instanceId?: string; instanceName?: string }>) {
     for (const s of list) {
       const existing = getTabByPtyId(s.id)
       if (existing) {
@@ -248,7 +249,9 @@ export const useSessionStore = defineStore('session', () => {
         ? historyCacheMap.get(s.cwd)?.find(h => h.sessionId === s.sessionId)?.name?.trim()
         : ''
       const parts = s.cwd.replace(/\\/g, '/').split('/')
-      const name = histName || parts[parts.length - 1] || s.cwd
+      // 服务端 display_name（用户重命名/官方标题对齐）优先；旧桌面缺失时回退
+      // 历史缓存名，再回退项目名（历史加载后经 backfillTabNamesFromHistory 修正）
+      const name = s.name?.trim() || histName || parts[parts.length - 1] || s.cwd
       // 显式归属：不消费 pendingInstanceId（用户选择只属于其下一步新建/恢复）
       const tabId = createTab(s.cwd, {
         name,
@@ -307,19 +310,13 @@ export const useSessionStore = defineStore('session', () => {
   }
 
   /**
-   * 会话结束（用户关闭/自然退出）时把 Tab 已知信息就地并入首页「近期
-   * 会话」缓存（appStore.mergeRecentSession 按 sessionId 去重）：零请求
-   * 即时可见，且不重置首页项目列表分页。sessionId 为空（从未启动/CLI
-   * 未上报）的 Tab 无历史记录可指，跳过
+   * 会话结束（用户关闭/自然退出）时刷新首页「近期会话」缓存：数据统一
+   * 走 Rust 单一出口 get_all_recent_sessions（名称已合并 override/官方
+   * 标题），前端不做 tab.name 内存合并（单一正本，避免与历史列表双源
+   * 不一致）。只更新近期会话，不重置首页项目列表分页
    */
-  function mergeTabIntoRecentSessions(tab: TerminalTab) {
-    if (!tab.sessionId) return
-    useAppStore().mergeRecentSession({
-      sessionId: tab.sessionId,
-      name: tab.name,
-      projectPath: tab.projectPath,
-      lastActiveAt: Date.now(),
-    })
+  function refreshRecentSessionsFromBackend() {
+    void useAppStore().reloadRecentSessions()
   }
 
   /**
@@ -335,7 +332,7 @@ export const useSessionStore = defineStore('session', () => {
         tab.lastActiveAt = Date.now()
         // 会话已结束：并入近期会话缓存，首页立即可见（重启该 Tab 时运行中
         // 条目优先、缓存同 id 被排重，无副作用）
-        mergeTabIntoRecentSessions(tab)
+        refreshRecentSessionsFromBackend()
         break
       }
     }
@@ -354,7 +351,7 @@ export const useSessionStore = defineStore('session', () => {
 
     // 先删除 tab，UI 立即更新；Tab 携带的会话信息并入近期会话缓存
     tabs.delete(tabId)
-    mergeTabIntoRecentSessions(tab)
+    refreshRecentSessionsFromBackend()
 
     if (activeTabId.value === tabId) {
       // 关闭当前活跃标签后，聚焦到同项目的相邻标签
@@ -384,9 +381,9 @@ export const useSessionStore = defineStore('session', () => {
     tabs.forEach((tab, tabId) => {
       if (tab.projectPath === projectPath) {
         tabs.delete(tabId)
-        mergeTabIntoRecentSessions(tab)
       }
     })
+    refreshRecentSessionsFromBackend()
 
     if (activeTabId.value && !tabs.has(activeTabId.value)) {
       activeTabId.value = null
@@ -412,13 +409,14 @@ export const useSessionStore = defineStore('session', () => {
       if (tab.tabId !== keepTabId) {
         if (tab.ptyId) ptyIds.push(tab.ptyId)
         tabs.delete(tab.tabId)
-        mergeTabIntoRecentSessions(tab)
       }
     }
 
     if (activeTabId.value && !tabs.has(activeTabId.value)) {
       activeTabId.value = keepTabId
     }
+
+    refreshRecentSessionsFromBackend()
 
     for (const ptyId of ptyIds) {
       ptyKill(ptyId).catch(() => {})

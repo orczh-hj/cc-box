@@ -43,7 +43,8 @@ Hook 系统只采集**对 GUI 有意义**的信息：
 │  hook_server.rs handle_hook()                                 │
 │  ├─ 从 header 读 pty_id（区分多终端）                         │
 │  ├─ 从 body 读 session_id                                     │
-│  ├─ 建立 session_id ↔ pty_id 映射                             │
+│  ├─ 记入远程会话表 entry.session_id                           │
+│  │   （SessionEnd 时由 on_hook_payload 解除关联）             │
 │  ├─ hook_events.rs：推导状态 + 提取模型                        │
 │  ├─ emit "hook-event" → 前端（原始事件，诊断用）              │
 │  └─ remote_state.on_hook_payload → apply_hook_event           │
@@ -132,15 +133,15 @@ if (payload.detail.type === 'sessionStart') {
 
 **后端处理**（hook_server.rs）：
 - 收到 SessionStart 时自动 `invalidate_project_path_mapping()`
-- 建立 `session_id ↔ pty_id` 映射（用于反向查询）
+- 记入远程会话表 `entry.session_id`（手机端 sessions.list 防重复恢复依据；SessionEnd 时解除）
 
 ### 已注册的 11 个事件
 
 | 事件 | 提取数据 | 推导状态 |
 |------|----------|----------|
 | `SessionStart` | session_id(顶层), cwd, transcript_path, model, source | → idle |
-| `SessionEnd` | — | → idle |
-| `UserPromptSubmit` | — | → thinking |
+| `SessionEnd` | reason | → idle |
+| `UserPromptSubmit` | prompt, session_title | → thinking |
 | `PreToolUse` | — | → tool_executing |
 | `PostToolUse` | — | → thinking |
 | `PostToolUseFailure` | — | → thinking |
@@ -149,6 +150,23 @@ if (payload.detail.type === 'sessionStart') {
 | `Notification` | — | → waiting_permission / waiting_input |
 | `SubagentStart` | — | → subagent_running |
 | `SubagentStop` | — | → thinking |
+
+### SessionEnd 的会话关联解除（clear/resume）
+
+`SessionEnd` 到达时 `on_hook_payload` **无条件清 `entry.session_id`**（不区分 reason）：该 Claude 会话不再运行于此终端——`/clear`、`/resume`（选择器窗口期可达数十秒）后手机端 `sessions.list` 不再把旧会话判为"正运行于此终端"（防重复恢复依据）；随后的新 `SessionStart` 经 `set_session_id` 重建新关联。CLI 退出类 reason（`prompt_input_exit` 等）下清除同样正确：CLI 已退出，手机端此刻恢复本就该开新 PTY。清除时无 working/pending 变化也触发 `SessionUpsert` 上报（成员模式缓存一致）。
+
+前端 `useStatusMonitor` 按 reason 二次区分（Tab 元数据在前端）：
+
+- `reason=clear | resume`（对话切换）：`tab.sessionId = null` 且**清空 `tab.sessionIds` 认领**——否则旧会话被该 Tab 永久占用，历史列表无法恢复
+- 退出类 reason：**保留 `sessionIds`**——stopped Tab 重启走 `--resume` 继续对话，清掉会退化为新会话
+
+### 会话显示名（session_title 消费）
+
+`SessionStart` / `UserPromptSubmit` 事件自带官方标题 `session_title`（用户显式命名：CLI 内 `/rename`、`--name`；旧版 CLI 缺失为 None）。三路消费：
+
+- **hook_server**：`set_display_name`（手机运行列表 `RemoteSession.name` 实时名，内存镜像；正本在 transcript JSONL）
+- **前端 useStatusMonitor**：sessionStart 占位类名对齐标题；userPromptSubmit 标题优先于 prompt 自动命名；sessionEnd(clear/resume) 名重置占位
+- **名称唯一源 = transcript JSONL**：`extract_session_name` 复现 CLI `listSessionsImpl` 同路径（customTitle > aiTitle > lastPrompt > summary > firstPrompt，head/tail 各 64KB、截断 200 字符）；用户重命名 = 运行中注入 `/rename` 由 CLI 写 custom-title，`rename_session` 只做实时名镜像与双端广播，**不落盘、不触发重载**（历史/近期列表下次加载自然读到）
 
 ### 状态机
 
@@ -273,7 +291,7 @@ onHookStatus((status) => {
 | `stop` / `stopFailure` / `notification(idle_prompt)` | `working = false` + `pending = true`，回合结束 |
 | `notification(permission_prompt)` | `working = false` + `pending = true`，回合不结束 |
 | activity（tool/subagent/compact） | 回合内恢复 `working`；回合结束后忽略（recap 防护） |
-| `sessionEnd` | `working = false`，不设 pending、不结束回合 |
+| `sessionEnd` | `working = false`，不设 pending、不结束回合；解除 session_id 关联（见下节） |
 
 #### pending 状态（用户注意力管理）
 

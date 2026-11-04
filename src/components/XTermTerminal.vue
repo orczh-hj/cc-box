@@ -33,6 +33,7 @@ import { FitAddon } from '@xterm/addon-fit'
 import { WebglAddon } from '@xterm/addon-webgl'
 import { Unicode11Addon } from '@xterm/addon-unicode11'
 import { debounce } from 'lodash-es'
+import { isPlaceholderSessionName } from '@/utils/session-name'
 import '@xterm/xterm/css/xterm.css'
 // Cascadia Code webfont：终端符号（box-drawing/箭头/spinner）跨端一致——
 // 手机无雅黑/Consolas 等桌面字体，缺 webfont 时回退系统字体导致符号错位
@@ -807,9 +808,7 @@ async function startTab(tabId: string) {
       resume: tab.sessionId ?? undefined,
       // 多实例远程：随 session.create 路由到 Tab 所属实例（重启沿用原归属）
       instanceId: tab.instanceId,
-      resumeName: tab.name && tab.name !== 'New Session' && tab.name !== tab.sessionId?.slice(0, 8)
-        ? tab.name
-        : undefined,
+      resumeName: !isPlaceholderSessionName(tab.name, tab.sessionId) ? tab.name : undefined,
       skipPermissions: appStore.claudeOptions.skipPermissions || undefined,
       customArgs: appStore.claudeOptions.customArgs || undefined,
     })

@@ -16,6 +16,7 @@ fn make_session(id: &str) -> RemoteSession {
         working: false,
         pending: false,
         session_id: None,
+name: None,
         instance_id: None,
         instance_name: None,
     }

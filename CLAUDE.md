@@ -202,6 +202,8 @@ npm run release -- --bump patch --notes "### Features\n- Add feature"
 
 ## 开发约定
 
+- **会话显示名唯一源 = transcript JSONL**：`extract_session_name`（store.rs）复现 Claude Code CLI `listSessionsImpl` 同路径（customTitle > aiTitle > lastPrompt > summary > firstPrompt；head/tail 各 64KB lite 读、首条 prompt 截断 200 字符），不做任何 CC-Box 侧名称落盘/覆盖表。用户重命名 = 运行中注入 `/rename` 让 CLI 写 custom-title；`rename_session` 只做实时名内存镜像（`RemoteSession.name`）与双端广播，**改名不触发会话列表重载**（历史/近期下次加载自然读到）。机制详见 [docs/hook-monitor.md](docs/hook-monitor.md)「会话显示名」。
+- **不对 Claude Code 新版本特性做开发**（2026-11 决策，暂缓）：大量用户仍在旧版 Claude Code 上（mods、userConfig/`plugin configure`、`plugin install --json`、新 hook 事件/字段等均依赖较新 CLI）。此前对 plugin 新特性的调研结论（mods 安全可视化、插件配置表单、hook 新事件、`--json` 安装链路等）暂存于 git 历史与会话记录，待用户 CLI 版本面跟上后再评估启动。做扩展相关功能时以旧版 CLI 能力为兼容基线。
 - **远程操作一致性**：远程（手机）操作与桌面直接操作效果一致——桌面端原生实现单点执行，远程只是触发器 + 事件同步的镜像，不另写一份执行逻辑
 - **远程文件下载走票据直链（所有浏览器统一）**：`file_download_ticket` 签发一次性票据 → 直连 `GET /dl/<ticket>` 流式返回、中继 `/?dl=<device>.<ticket>` 票据页（受限 WS 只允许 `file_download_ticket_chunk`/`ping`）。票据 **不绑连接**（系统浏览器/下载器接管后 WS 必断，不能被 `cleanup_conn` 回收）、128bit、TTL 10 分钟、256 次；旧桌面/旧 relay 经 `command not allowed` 与 HEAD 探测自动降级 Blob。relay 零改动（只按 token 前缀路由），详见 [remote/docs/protocol.md](remote/docs/protocol.md)「一次性下载票据」
 - **避免重复实现**：同一逻辑只留一份（如 `spawn_pty_core`、`apply_hook_event`）；两端各自需要的状态靠事件同步（`session-renamed`、`hook-status`），不靠复制代码

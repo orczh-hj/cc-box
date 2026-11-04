@@ -720,71 +720,295 @@ pub fn unhide_project(path: &str) -> Result<()> {
     update_app_config(serde_json::json!({ "hiddenProjects": next }))
 }
 
-/// 从 JSONL 提取会话名称
+/// 会话名提取 —— 复现 Claude Code CLI 的正本路径（名称唯一源 = transcript
+/// JSONL，解析与 CLI 一致保证稳定）：
+/// utils/listSessionsImpl.ts::parseSessionInfoFromLite +
+/// utils/sessionStoragePortable.ts::extractFirstPromptFromHead
+///
+/// 优先级：customTitle(tail→head) > aiTitle(tail→head) > lastPrompt(tail)
+///         > summary(tail) > firstPrompt(head)；全部缺失 → "Unnamed session"
+/// 读取 head/tail 各 64KB（LITE_READ_BUF_SIZE 同值），不全文件扫描
 pub(crate) fn extract_session_name(jsonl_path: &Path) -> String {
-    if let Ok(content) = fs::read_to_string(jsonl_path) {
-        let mut custom_title: Option<String> = None;
-        let mut first_user_message: Option<String> = None;
+    let (head, tail) = read_head_tail(jsonl_path);
+    session_name_from_windows(&head, &tail)
+}
 
-        for line in content.lines() {
-            if let Ok(json) = serde_json::from_str::<serde_json::Value>(line) {
-                // 查找 custom-title（优先级最高）
-                if json.get("type").and_then(|v| v.as_str()) == Some("custom-title") {
-                    if let Some(title) = json.get("customTitle").and_then(|v| v.as_str()) {
-                        custom_title = Some(title.to_string());
-                    }
+/// CLI 同路径：首行含 "isSidechain":true 的会话不出现在列表
+/// （listSessionsImpl.ts 首行检查——子代理/sidechain 会话不进历史列表）
+pub(crate) fn head_first_line_is_sidechain(head: &str) -> bool {
+    let first_line = head.split('\n').next().unwrap_or("");
+    first_line.contains(r#""isSidechain":true"#) || first_line.contains(r#""isSidechain": true"#)
+}
+
+/// 从 head/tail 窗口提取会话名（extract_session_name 的主体；调用方已持有
+/// 窗口时复用，避免二次读文件——sidechain 检查与名称提取共用一次 IO）
+fn session_name_from_windows(head: &str, tail: &str) -> String {
+    if head.is_empty() && tail.is_empty() {
+        return "Unnamed session".to_string();
+    }
+
+    let custom_title = extract_last_json_string_field(&tail, "customTitle")
+        .or_else(|| extract_last_json_string_field(&head, "customTitle"))
+        .or_else(|| extract_last_json_string_field(&tail, "aiTitle"))
+        .or_else(|| extract_last_json_string_field(&head, "aiTitle"));
+    if let Some(t) = custom_title.filter(|t| !t.is_empty()) {
+        return t;
+    }
+    if let Some(lp) = extract_last_json_string_field(&tail, "lastPrompt").filter(|t| !t.is_empty()) {
+        return lp;
+    }
+    if let Some(sum) = extract_last_json_string_field(&tail, "summary").filter(|t| !t.is_empty()) {
+        return sum;
+    }
+    let first = extract_first_prompt_from_head(&head);
+    if !first.is_empty() {
+        return first;
+    }
+    "Unnamed session".to_string()
+}
+
+/// CLI 同值：head/tail lite 读缓冲（utils/sessionStoragePortable.ts LITE_READ_BUF_SIZE）
+const LITE_READ_BUF_SIZE: usize = 65536;
+
+/// 读文件首尾各 LITE_READ_BUF_SIZE 字节（小文件 tail=head）。任何错误返回
+/// 空串对（上层回退 Unnamed）
+fn read_head_tail(path: &Path) -> (String, String) {
+    use std::io::{Read, Seek, SeekFrom};
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return (String::new(), String::new());
+    };
+    let Ok(meta) = f.metadata() else {
+        return (String::new(), String::new());
+    };
+    let size = meta.len() as usize;
+    let head_len = LITE_READ_BUF_SIZE.min(size);
+
+    let mut buf = vec![0u8; head_len];
+    if f.read_exact(&mut buf).is_err() {
+        return (String::new(), String::new());
+    }
+    let head = String::from_utf8_lossy(&buf).into_owned();
+
+    let tail_offset = size.saturating_sub(LITE_READ_BUF_SIZE);
+    let tail = if tail_offset > 0 {
+        if f.seek(SeekFrom::Start(tail_offset as u64)).is_err() {
+            return (head, String::new());
+        }
+        let mut buf = vec![0u8; LITE_READ_BUF_SIZE];
+        match f.read_exact(&mut buf) {
+            Ok(_) => String::from_utf8_lossy(&buf).into_owned(),
+            Err(_) => String::new(),
+        }
+    } else {
+        head.clone()
+    };
+    (head, tail)
+}
+
+/// CLI 同路径：找文本中 `"key":"value"` / `"key": "value"` 的**最后一次**出现
+/// （escape 感知扫描；值经标准 JSON unescape）
+fn extract_last_json_string_field(text: &str, key: &str) -> Option<String> {
+    let mut last: Option<String> = None;
+    for pat in [format!("{q}{k}{q}:{q}", q = '"', k = key), format!("{q}{k}{q}: {q}", q = '"', k = key)] {
+        let mut search_from = 0usize;
+        while let Some(rel) = text[search_from..].find(&pat) {
+            let idx = search_from + rel;
+            let value_start = idx + pat.len();
+            let bytes = text.as_bytes();
+            let mut i = value_start;
+            let mut closed = false;
+            while i < bytes.len() {
+                if bytes[i] == b'\\' {
+                    i += 2;
+                    continue;
                 }
+                if bytes[i] == b'"' {
+                    // 用 serde 做标准 JSON unescape（含 \uXXXX）
+                    let raw = &text[value_start..i];
+                    if let Ok(v) = serde_json::from_str::<String>(&format!("{q}{r}{q}", q = '"', r = raw)) {
+                        last = Some(v);
+                    }
+                    closed = true;
+                    break;
+                }
+                i += 1;
+            }
+            // 值未闭合（head/tail 64KB 窗口截断行、CLI 并发写的残缺末行）：
+            // CLI 的 indexOf 越界返回 -1 结束搜索；此处等价——不更新 last、
+            // 停止该 pattern 的后续扫描（search_from 若置 i+1 会越界 panic）
+            if !closed {
+                break;
+            }
+            search_from = i + 1;
+        }
+    }
+    last
+}
 
-                // 查找用户消息（只取第一条）
-                if json.get("type").and_then(|v| v.as_str()) == Some("user")
-                    && first_user_message.is_none()
-                {
-                    if let Some(msg_content) = json
-                        .get("message")
-                        .and_then(|m| m.get("content"))
-                        .and_then(|c| c.as_str())
-                    {
-                        let is_meta = json
-                            .get("isMeta")
-                            .and_then(|v| v.as_bool())
-                            .unwrap_or(false);
+/// CLI 同路径 SKIP_FIRST_PROMPT_PATTERN：
+/// /^(?:\s*<[a-z][\w-]*[\s>]|\[Request interrupted by user[^\]]*\])/
+/// —— 小写 XML 类标签开头（IDE 上下文/hook 输出/任务通知等）或中断标记
+fn skip_first_prompt_pattern(s: &str) -> bool {
+    let t = s.trim_start();
+    if let Some(rest) = t.strip_prefix('<') {
+        // [a-z] 起头的小写标签视为系统注入（大写如 <system-reminder> 由 CLI
+        // 的 pattern 同样覆盖：<s 为小写。注意 CLI 正则只匹配小写起始字母）
+        return rest.chars().next().is_some_and(|c| c.is_ascii_lowercase());
+    }
+    t.starts_with("[Request interrupted by user")
+}
 
-                        // 过滤所有系统注入消息：以 < 开头的都是系统标记
-                        let is_system_inject = msg_content.trim_start().starts_with('<');
+/// 从文本中取 `<tag>...</tag>` 内文（command-name / bash-input 用）
+fn find_delimited(s: &str, tag: &str) -> Option<String> {
+    let open = format!("<{t}>", t = tag);
+    let close = format!("</{t}>", t = tag);
+    let start = s.find(&open)? + open.len();
+    let end = s.find(&close)?;
+    (end > start).then(|| s[start..end].to_string())
+}
 
-                        if !is_meta && !is_system_inject {
-                            let truncated: String = msg_content.chars().take(50).collect();
-                            first_user_message = if msg_content.chars().count() > 50 {
-                                Some(format!("{}...", truncated))
-                            } else {
-                                Some(msg_content.to_string())
-                            };
+/// CLI 同路径 extractFirstPromptFromHead：head 逐行找第一条有效用户消息。
+/// 跳过 tool_result / isMeta / isCompactSummary；slash 命令跳过但记首条作
+/// fallback；`<bash-input>` 格式化为 `! <输入>`；系统注入类标签跳过；
+/// 截断 200 字符 + '…'（CLI 为 200，非 CC-Box 旧值 50）
+fn extract_first_prompt_from_head(head: &str) -> String {
+    let mut command_fallback = String::new();
+    for line in head.lines() {
+        if !line.contains(r#""type":"user""#) && !line.contains(r#""type": "user""#) {
+            continue;
+        }
+        if line.contains(r#""tool_result""#) {
+            continue;
+        }
+        if line.contains(r#""isMeta":true"#) || line.contains(r#""isMeta": true"#) {
+            continue;
+        }
+        if line.contains(r#""isCompactSummary":true"#) || line.contains(r#""isCompactSummary": true"#) {
+            continue;
+        }
+        let Ok(entry) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if entry.get("type").and_then(|v| v.as_str()) != Some("user") {
+            continue;
+        }
+        let Some(message) = entry.get("message") else { continue };
+        let mut texts: Vec<String> = Vec::new();
+        match message.get("content") {
+            Some(serde_json::Value::String(s)) => texts.push(s.clone()),
+            Some(serde_json::Value::Array(blocks)) => {
+                for b in blocks {
+                    if b.get("type").and_then(|v| v.as_str()) == Some("text") {
+                        if let Some(t) = b.get("text").and_then(|v| v.as_str()) {
+                            texts.push(t.to_string());
                         }
                     }
                 }
             }
+            _ => {}
         }
-
-        if let Some(title) = custom_title {
-            return title;
-        }
-
-        if let Some(msg) = first_user_message {
-            return msg;
+        for raw in texts {
+            let mut result = raw.replace('\n', " ").trim().to_string();
+            if result.is_empty() {
+                continue;
+            }
+            // slash 命令消息：跳过但记首条为 fallback
+            if let Some(cmd) = find_delimited(&result, "command-name") {
+                if !cmd.is_empty() {
+                    if command_fallback.is_empty() {
+                        command_fallback = cmd;
+                    }
+                    continue;
+                }
+            }
+            // bash 输入格式化优先于通用 XML 跳过
+            if let Some(bash) = find_delimited(&result, "bash-input") {
+                return format!("! {}", bash.trim());
+            }
+            if skip_first_prompt_pattern(&result) {
+                continue;
+            }
+            let chars: Vec<char> = result.chars().collect();
+            if chars.len() > 200 {
+                result = chars[..200].iter().collect::<String>().trim().to_string() + "\u{2026}";
+            }
+            return result;
         }
     }
-
-    "Unnamed session".to_string()
+    command_fallback
 }
 
 /// 轻量会话条目（仅文件元数据，不读内容）
-struct SessionEntry {
+#[derive(Clone)]
+pub(crate) struct SessionEntry {
     session_id: String,
     path: PathBuf,
     last_active_at: u64,
 }
 
 /// 获取会话列表
+/// 扫描单个 project 目录下的会话文件（仅 stat，不读内容；get_sessions 的
+/// 第一遍，独立出来供测试直接喂临时目录）
+pub(crate) fn collect_session_entries_in_dir(project_dir: &Path) -> Vec<SessionEntry> {
+    let mut entries: Vec<SessionEntry> = Vec::new();
+    if !project_dir.exists() {
+        return entries;
+    }
+    let Ok(read_dir) = fs::read_dir(project_dir) else {
+        return entries;
+    };
+    for entry in read_dir.flatten() {
+        let path = entry.path();
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        if (ext == "jsonl" || ext == "txt")
+            && !path
+                .file_name()
+                .map(|n| n.to_str().unwrap_or("").starts_with("agent-"))
+                .unwrap_or(false)
+        {
+            let session_id = path
+                .file_stem()
+                .and_then(|n| n.to_str())
+                .unwrap_or("")
+                .to_string();
+            let last_active_at = fs::metadata(&path)
+                .and_then(|m| m.modified())
+                .map(|t| {
+                    t.duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as u64)
+                        .unwrap_or(0)
+                })
+                .unwrap_or(0);
+            entries.push(SessionEntry {
+                session_id,
+                path,
+                last_active_at,
+            });
+        }
+    }
+    entries
+}
+
+/// 名称提取（CLI 同路径：sidechain 会话——首行 isSidechain——不出现在列表；
+/// sidechain 检查与名称提取共用一次 head/tail 读）
+fn entries_into_sessions(entries: Vec<SessionEntry>, project_path: &str) -> Vec<SessionInfo> {
+    entries
+        .into_iter()
+        .filter_map(|e| {
+            let (head, tail) = read_head_tail(&e.path);
+            if head_first_line_is_sidechain(&head) {
+                return None;
+            }
+            Some(SessionInfo {
+                session_id: e.session_id,
+                name: session_name_from_windows(&head, &tail),
+                project_path: project_path.to_string(),
+                last_active_at: e.last_active_at,
+            })
+        })
+        .collect()
+}
+
 pub fn get_sessions(project_path: &str, limit: usize, offset: usize) -> Result<Vec<SessionInfo>> {
     let project_dirs = get_project_dirs(project_path);
 
@@ -792,66 +1016,19 @@ pub fn get_sessions(project_path: &str, limit: usize, offset: usize) -> Result<V
         return Ok(Vec::new());
     }
 
-    // 第一遍：只扫文件名和元数据（不读 JSONL 内容）
-    let mut entries: Vec<SessionEntry> = Vec::new();
-
-    for project_dir in &project_dirs {
-        if !project_dir.exists() {
-            continue;
-        }
-
-        for entry in fs::read_dir(project_dir)? {
-            let entry = entry?;
-            let path = entry.path();
-
-            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-            if (ext == "jsonl" || ext == "txt")
-                && !path
-                    .file_name()
-                    .map(|n| n.to_str().unwrap_or("").starts_with("agent-"))
-                    .unwrap_or(false)
-            {
-                let session_id = path
-                    .file_stem()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("")
-                    .to_string();
-
-                let last_active_at = fs::metadata(&path)
-                    .and_then(|m| m.modified())
-                    .map(|t| {
-                        t.duration_since(std::time::UNIX_EPOCH)
-                            .map(|d| d.as_millis() as u64)
-                            .unwrap_or(0)
-                    })
-                    .unwrap_or(0);
-
-                entries.push(SessionEntry {
-                    session_id,
-                    path,
-                    last_active_at,
-                });
-            }
-        }
-    }
-
-    // 按最后活跃时间排序
+    // 第一遍：只扫文件名和元数据（不读内容），合并排序后分页，第二遍只读
+    // 分页后的少量文件提取名称（sidechain 过滤在提取时）
+    let mut entries: Vec<SessionEntry> = project_dirs
+        .iter()
+        .flat_map(|dir| collect_session_entries_in_dir(dir))
+        .collect();
     entries.sort_by(|a, b| b.last_active_at.cmp(&a.last_active_at));
 
     // 分页
     let start = offset.min(entries.len());
     let end = (offset + limit).min(entries.len());
-
-    // 第二遍：只读分页后的少量文件提取名称
-    let sessions: Vec<SessionInfo> = entries[start..end]
-        .iter()
-        .map(|e| SessionInfo {
-            session_id: e.session_id.clone(),
-            name: extract_session_name(&e.path),
-            project_path: project_path.to_string(),
-            last_active_at: e.last_active_at,
-        })
-        .collect();
+    let sessions: Vec<SessionInfo> =
+        entries_into_sessions(entries[start..end].to_vec(), project_path);
 
     Ok(sessions)
 }

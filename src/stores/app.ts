@@ -6,6 +6,7 @@ import {
   updateAppConfig,
   saveLastProject,
   saveDefaultClaudeOptions,
+  getAllRecentSessions,
   getHomeData,
   getProjects,
   getCheckResults,
@@ -296,18 +297,15 @@ export const useAppStore = defineStore('app', () => {
     cachedRecentSessions.value = sessions
   }
 
-  /** 就地合并一条近期会话（按 sessionId 去重）：会话关闭/自然结束时把
-   *  Tab 上已有的信息（sessionId/名称/项目路径）直接并入缓存，首页
-   *  「近期会话」零请求即时可见——比重拉 getHomeData 高效，且不重置
-   *  项目列表分页状态。缓存条目代表已结束的会话，working/pending 清 false */
-  function mergeRecentSession(session: SessionInfo) {
-    // 隐藏项目的会话不并入近期会话（Tab 关闭路径；否则隐藏被本地缓存绕过）
-    if (isPathHidden(session.projectPath)) return
-    const existing = cachedRecentSessions.value.find(s => s.sessionId === session.sessionId)
-    if (existing) {
-      Object.assign(existing, session, { working: false, pending: false })
-    } else {
-      cachedRecentSessions.value.unshift({ ...session, working: false, pending: false })
+  /** 重新拉取近期会话（会话关闭/自然结束时调用）：数据一律来自 Rust 单一出口
+   *  get_all_recent_sessions（extract_session_name 与 CLI 同路径：customTitle > aiTitle > lastPrompt > summary > firstPrompt），
+   *  前端不再用 tab.name 内存合并——单一正本，双源混用会与历史列表不一致。
+   *  只更新近期会话缓存，不重置首页项目列表分页；失败静默保留旧缓存 */
+  async function reloadRecentSessions() {
+    try {
+      cachedRecentSessions.value = await getAllRecentSessions(20)
+    } catch (err) {
+      console.error('Failed to reload recent sessions:', err)
     }
   }
 
@@ -470,7 +468,7 @@ export const useAppStore = defineStore('app', () => {
     unhideProjectIfHidden,
     syncHiddenProjects,
     isPathHidden,
-    mergeRecentSession,
+    reloadRecentSessions,
     ensureProjectInList,
     isKnownProject,
     refreshRecentSessions,

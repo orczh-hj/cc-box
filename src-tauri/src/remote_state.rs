@@ -49,6 +49,8 @@ struct SessionEntry {
     desktop_size: Option<(u16, u16)>,
     /// Claude 会话 id（hook SessionStart 建立；会话列表下发给手机端防重复恢复）
     session_id: Option<String>,
+    /// 会话显示名（用户重命名/官方标题对齐后的当前名；RemoteSession.name 来源）
+    display_name: Option<String>,
 }
 
 /// 输出回放缓冲：分块 ring buffer。淘汰整块，新头部对齐 ANSI 转义边界——
@@ -408,6 +410,7 @@ impl RemoteState {
                 active: ActiveView::Desktop,
                 desktop_size: None,
                 session_id: None,
+                display_name: None,
             },
         );
         drop(inner);
@@ -502,6 +505,30 @@ impl RemoteState {
         }
     }
 
+    /// 记录会话显示名（rename_session / hook session_title 对齐时调用；幂等）。
+    /// 变化即 SessionUpsert 上报——手机端运行列表实时名
+    pub fn set_display_name(&self, pty_id: &str, name: &str) {
+        let changed = {
+            let mut inner = self.inner.lock();
+            match inner.sessions.get_mut(pty_id) {
+                Some(entry) => {
+                    if entry.display_name.as_deref() != Some(name) {
+                        entry.display_name = Some(name.to_string());
+                        true
+                    } else {
+                        false
+                    }
+                }
+                None => false,
+            }
+        };
+        if changed {
+            uplink_send(crate::gateway_proto::GwUp::SessionUpsert {
+                session: self.session_snapshot(pty_id),
+            });
+        }
+    }
+
     /// 单会话快照（uplink 上报用；不存在时 None）
     fn session_snapshot(&self, id: &str) -> cc_box_remote_protocol::RemoteSession {
         let inner = self.inner.lock();
@@ -515,6 +542,7 @@ impl RemoteState {
             working: entry.map(|e| e.working).unwrap_or(false),
             pending: entry.map(|e| e.pending).unwrap_or(false),
             session_id: entry.and_then(|e| e.session_id.clone()),
+            name: entry.and_then(|e| e.display_name.clone()),
             instance_id: None,
             instance_name: None,
         }
@@ -525,12 +553,24 @@ impl RemoteState {
     /// SessionStatus 广播（手机列表页圆点）与本返回值同源同值
     pub fn on_hook_payload(&self, payload: &HookPayload) -> Option<HookStatus> {
         let Some(pty_id) = &payload.pty_id else { return None };
-        let (status_msg, status) = {
+        let (status_msg, session_cleared, status) = {
             let mut inner = self.inner.lock();
             let Some(entry) = inner.sessions.get_mut(pty_id) else { return None };
             let before = (entry.working, entry.pending);
+            let had_session = entry.session_id.is_some();
+            let had_name = entry.display_name.is_some();
             apply_hook_event(entry, &payload.detail);
+            // SessionEnd 解除 pty ↔ Claude 会话关联（clear/resume/logout/退出语义
+            // 一致：该会话不再运行于此终端；/clear、/resume 后新 SessionStart
+            // 经 set_session_id 重建新关联）。resume 选择器窗口期内手机端
+            // sessions.list 不再把旧会话判为"正运行于此终端"（防重复恢复依据）
+            if matches!(payload.detail, HookEventDetail::SessionEnd(_)) {
+                entry.session_id = None;
+                entry.display_name = None;
+            }
             let after = (entry.working, entry.pending);
+            let session_cleared = (had_session && entry.session_id.is_none())
+                || (had_name && entry.display_name.is_none());
             let msg = if before != after {
                 Some(ServerMessage::SessionStatus {
                     id: pty_id.clone(),
@@ -542,6 +582,7 @@ impl RemoteState {
             };
             (
                 msg,
+                session_cleared,
                 HookStatus {
                     pty_id: pty_id.clone(),
                     working: after.0,
@@ -549,10 +590,12 @@ impl RemoteState {
                 },
             )
         };
-        if let Some(msg) = status_msg {
+        if let Some(msg) = status_msg.as_ref() {
             // 广播给全部连接而非仅订阅者：列表页 working/pending 圆点也要实时变化（R1-2）
             self.broadcast_to_all(msg.clone());
-            // 成员模式：状态变化上报 Gateway 缓存（聚合列表下次拉取时一致）
+        }
+        if status_msg.is_some() || session_cleared {
+            // 成员模式：状态或 sessionId 关联变化上报 Gateway 缓存（聚合列表下次拉取时一致）
             uplink_send(crate::gateway_proto::GwUp::SessionUpsert {
                 session: self.session_snapshot(pty_id),
             });
@@ -1167,6 +1210,7 @@ impl RemoteState {
                         working: e.working,
                         pending: e.pending,
                         session_id: e.session_id.clone(),
+                        name: e.display_name.clone(),
                         // 多实例聚合由 Gateway 侧 merged_session_list 填充（P3）；
                         // 此处 None = 旧桌面同构输出（手机端降级平铺）
                         instance_id: None,

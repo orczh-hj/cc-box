@@ -30,7 +30,7 @@ fn hook(pty_id: &str, detail: HookEventDetail) -> HookPayload {
 }
 
 fn user_prompt() -> HookEventDetail {
-    HookEventDetail::UserPromptSubmit(UserPromptSubmitData { prompt: None })
+    HookEventDetail::UserPromptSubmit(UserPromptSubmitData { prompt: None, session_title: None })
 }
 
 fn post_tool_use() -> HookEventDetail {
@@ -871,6 +871,40 @@ fn RemoteState_HookStateMachine_SessionEnd后activity恢复working() {
     assert!(state.session_list()[0].working);
 }
 
+/// SessionEnd 解除 pty ↔ Claude 会话关联：/clear、/resume 切换后新 SessionStart
+/// 到达前（resume 选择器窗口期可达数十秒），手机端 sessions.list 不应再把
+/// 旧会话判为"正运行于此终端"（防重复恢复的关联依据）
+#[test]
+fn RemoteState_SessionEnd_清除sessionId关联() {
+    let state = RemoteState::new();
+    state.register_pty("p-see", "claude", "/tmp");
+    state.set_session_id("p-see", "sess-old");
+    assert_eq!(state.session_list()[0].session_id.as_deref(), Some("sess-old"));
+
+    state.on_hook_payload(&hook(
+        "p-see",
+        HookEventDetail::SessionEnd(crate::hook_events::SessionEndData {
+            reason: Some("clear".into()),
+        }),
+    ));
+    assert_eq!(state.session_list()[0].session_id, None);
+
+    // 新会话 SessionStart 重建关联（clear/resume 后的正常链路）
+    state.on_hook_payload(&hook(
+        "p-see",
+        HookEventDetail::SessionStart(crate::hook_events::SessionStartData {
+            model: None,
+            cwd: None,
+            transcript_path: None,
+            source: Some("clear".into()),
+            session_title: None,
+        }),
+    ));
+    // hook() helper 不带 session_id 顶层字段；经 set_session_id 路径重建
+    state.set_session_id("p-see", "sess-new");
+    assert_eq!(state.session_list()[0].session_id.as_deref(), Some("sess-new"));
+}
+
 /// on_hook_payload 返回值 = hook-status 事件载荷：与 SessionStatus 广播同源同值；
 /// 会话未注册返回 None（hook_server 据此跳过事件下发）
 #[tokio::test]
@@ -1670,4 +1704,37 @@ async fn RemoteState_DeliverToConn_可靠满断开输出可丢_001() {
         state.conn_via_relay(conn2).is_some(),
         "PtyOutput 拥塞不应断开手机（由 seq 缺口可见）"
     );
+}
+
+// ==================== display_name（会话显示名，RemoteSession.name 来源） ====================
+
+// set_display_name 写入快照；幂等（重复同值不再上报）
+#[test]
+fn RemoteState_DisplayName_Snapshot_001() {
+    let state = RemoteState::new();
+    state.register_pty("p-dn", "claude", "/tmp");
+    assert_eq!(state.session_list()[0].name, None);
+
+    state.set_display_name("p-dn", "我的会话");
+    assert_eq!(state.session_list()[0].name.as_deref(), Some("我的会话"));
+
+    state.set_display_name("p-dn", "我的会话"); // 幂等
+    assert_eq!(state.session_list()[0].name.as_deref(), Some("我的会话"));
+}
+
+// SessionEnd 清 display_name（对话切换后旧名不残留到新会话的快照）
+#[test]
+fn RemoteState_DisplayName_ClearedOnSessionEnd_002() {
+    let state = RemoteState::new();
+    state.register_pty("p-dn2", "claude", "/tmp");
+    state.set_display_name("p-dn2", "旧对话名");
+
+    state.on_hook_payload(&hook(
+        "p-dn2",
+        HookEventDetail::SessionEnd(crate::hook_events::SessionEndData {
+            reason: Some("clear".into()),
+        }),
+    ));
+
+    assert_eq!(state.session_list()[0].name, None);
 }

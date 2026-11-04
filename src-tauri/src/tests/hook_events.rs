@@ -159,6 +159,35 @@ fn ExtractDetail_SessionStart_001() {
     }
 }
 
+// SessionStart 提取 session_title（/resume 切换后前端按官方标题对齐 tab 名；
+// 旧版 CLI 无该字段时为 None）
+#[test]
+fn ExtractDetail_SessionStart_SessionTitle_001() {
+    let data = json!({"session_title": "修复登录 bug", "source": "resume"});
+    let detail = extract_detail("SessionStart", &data);
+    match detail {
+        HookEventDetail::SessionStart(sd) => {
+            assert_eq!(sd.session_title.as_deref(), Some("修复登录 bug"));
+        }
+        _ => panic!("Expected SessionStart variant"),
+    }
+}
+
+// UserPromptSubmit 提取 session_title（CLI 内 /rename 或 --name 后每条 prompt 携带；
+// 旧版 CLI 无该字段为 None）
+#[test]
+fn ExtractDetail_UserPromptSubmit_SessionTitle_001() {
+    let data = json!({"prompt": "继续", "session_title": "登录模块重构"});
+    let detail = extract_detail("UserPromptSubmit", &data);
+    match detail {
+        HookEventDetail::UserPromptSubmit(d) => {
+            assert_eq!(d.session_title.as_deref(), Some("登录模块重构"));
+            assert_eq!(d.prompt.as_deref(), Some("继续"));
+        }
+        _ => panic!("Expected UserPromptSubmit variant"),
+    }
+}
+
 // SessionEnd 提取 reason 字段
 #[test]
 fn ExtractDetail_SessionEnd_001() {

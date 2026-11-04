@@ -99,6 +99,7 @@ vi.mock('@/composables/useMediaQuery', async () => {
 vi.mock('@/utils/ime', () => ({ attachImePositionSync: vi.fn() }))
 
 // app store 依赖大量启动期 IPC，仅提供组件读取的字段与 CLI 状态接口
+// （reloadRecentSessions：handlePtyExit 会触发近期会话重拉）
 vi.mock('@/stores/app', () => ({
   useAppStore: () => ({
     theme: 'dark',
@@ -107,6 +108,7 @@ vi.mock('@/stores/app', () => ({
     resetClaudeOptions: vi.fn(),
     setCliFailure: vi.fn(),
     clearCliFailure: vi.fn(),
+    reloadRecentSessions: vi.fn().mockResolvedValue(undefined),
   }),
 }))
 

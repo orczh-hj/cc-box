@@ -41,6 +41,8 @@ pub struct SessionStartData {
     pub cwd: Option<String>,
     pub transcript_path: Option<String>,
     pub source: Option<String>,
+    /// 会话官方标题（/resume 切换的历史会话自带；旧版 CLI 无此字段为 None）
+    pub session_title: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -53,6 +55,8 @@ pub struct SessionEndData {
 #[serde(rename_all = "camelCase")]
 pub struct UserPromptSubmitData {
     pub prompt: Option<String>,
+    /// 会话官方标题（用户显式命名时每条 prompt 携带；旧版 CLI 为 None）
+    pub session_title: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -165,12 +169,14 @@ pub(crate) fn extract_detail(event_name: &str, event: &Value) -> HookEventDetail
             cwd: str_field(event, "cwd"),
             transcript_path: str_field(event, "transcript_path"),
             source: str_field(event, "source"),
+            session_title: str_field(event, "session_title"),
         }),
         "SessionEnd" => HookEventDetail::SessionEnd(SessionEndData {
             reason: str_field(event, "reason"),
         }),
         "UserPromptSubmit" => HookEventDetail::UserPromptSubmit(UserPromptSubmitData {
             prompt: str_field(event, "prompt"),
+            session_title: str_field(event, "session_title"),
         }),
         "PreToolUse" => HookEventDetail::PreToolUse(PreToolUseData {
             tool_name: str_field(event, "tool_name"),

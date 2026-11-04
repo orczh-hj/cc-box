@@ -114,10 +114,14 @@ pub async fn pty_claim(id: String) -> Result<(), String> {
 
 /// 会话重命名双端同步（广播中转：Rust 不存 Tab 元数据，桌面/手机两端各自
 /// 应用同一个 updateTabName；发起端也收回环，同名幂等无副作用）。
-/// 写但不广播 state-changed（走 SESSION_RENAMED 专用事件），registry! 登记 write(None)
+/// 写但不广播 state-changed（走 SESSION_RENAMED 专用事件），registry! 登记 write(None)。
+/// 名称唯一源 = transcript JSONL：运行中 Tab 重命名由前端注入 /rename 让 CLI
+/// 自己写 custom-title；本命令只做运行列表实时名（内存镜像）与双端广播，
+/// 不落任何盘、不触发重载（历史/近期列表下次加载自然读到 custom-title）
 #[cc_command(write)]
 #[tauri::command]
 pub async fn rename_session(pty_id: String, name: String) -> Result<(), String> {
+    crate::remote_state::REMOTE_STATE.set_display_name(&pty_id, &name);
     crate::remote_state::emit_event(crate::events::names::SESSION_RENAMED, &pty_id, &name);
     Ok(())
 }
