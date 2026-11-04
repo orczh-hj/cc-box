@@ -32,7 +32,7 @@
 
 **同步机制**（2026-10 修正：**GitHub Actions 并不会自动同步 Gitee**——release.yml 注释声称同步但无此代码，Gitee 同步只能靠手动推送）：
 1. release.js 发布脚本内置分仓库推送：GitHub（代理，阻断）+ Gitee（直连，失败仅告警可后补）——**不用多 URL `git push origin`**（一条命令跨两域，代理环境 Gitee 必失败）
-2. 日常手动推送：分 URL 推（GitHub 带代理、Gitee 直连），勿用多 URL origin
+2. 日常手动推送（2026-11 起远程配置已改为单 URL + 别名）：`git push origin main`（GitHub，偶尔可直连、失败再开代理）+ `git push gitee main`（Gitee 直连必达，先推）。**勿给 origin 配多个 push URL**——一端失败整条命令报错、成败难分辨；origin 曾误配双 pushurl，修复命令 `git config --unset-all remote.origin.pushurl`（fetch/push 回落单 URL=GitHub），Gitee 用别名 `git remote add gitee https://gitee.com/orczh/cc-box.git`
 
 **推送时注意**：推送到 GitHub 需先设置代理，推送到 Gitee 无需代理。
 

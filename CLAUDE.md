@@ -115,7 +115,7 @@ npm run tauri:build        # 生产构建
 
 - **Windows**：MSVC 工具链 + C++ Build Tools（link.exe 须为 MSVC 版本）；配置细节 → [docs/development.md](docs/development.md)「Windows 环境配置」
 - **mac 远程（SSH 免密）**：`ssh wangdatong@192.168.5.119` 可直接执行拉取/构建/安装/读日志（源码 `~/Desktop/czh/cc-box`，node 在 `/opt/homebrew/bin` 需加 PATH，安装=退出 CC-Box 后替换 `/Applications/CC-Box.app`；GUI 按键测试仍需用户配合）
-- **双仓库**：GitHub（需代理）/ Gitee（直连）；**始终分 URL 推送，勿用多 URL origin** → [docs/development.md](docs/development.md)「双仓库同步」。GitHub **偶尔可直连推送**（git push 有时能通），但**下载/克隆必须代理**；代理经 `set_proxy` 开关，**偶尔崩溃、不定时恢复**——失败时先重试直连/检查代理状态；**开代理后国内站点（Gitee、OSS 等）可能无法访问**，用完及时关
+- **双仓库**：GitHub（需代理）/ Gitee（直连）；**始终分远程推送，勿给 origin 配多个 push URL**（一端失败整条命令报错、成败难分辨）→ [docs/development.md](docs/development.md)「双仓库同步」。**现行配置（2026-11 起生效）**：`origin` = GitHub（fetch/push 单 URL），`gitee` = Gitee 别名——推送命令：`git push origin main` + `git push gitee main`（先 Gitee 必达，再 GitHub；origin 曾误配双 pushurl，`git config --unset-all remote.origin.pushurl` 修复）。GitHub **偶尔可直连推送**（git push 有时能通），但**下载/克隆必须代理**；代理经 `set_proxy` 开关，**偶尔崩溃、不定时恢复**——失败时先重试直连/检查代理状态；**开代理后国内站点（Gitee、OSS 等）可能无法访问**，用完及时关
 - **打包**：首次下载 NSIS 组件需代理 → [docs/development.md](docs/development.md)「Windows 环境配置」
 
 ## 版本发布（速查）
