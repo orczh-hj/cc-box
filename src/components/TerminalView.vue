@@ -59,14 +59,22 @@
           :font-size="appStore.fontSize"
           @pty-started="handlePtyStarted"
         />
-        <!-- 快捷键工具条（仅手机：窄屏触屏）：键盘开关 + 选择复制 + 软键盘
-             按不出的控制键；桌面鼠标设备窗口再窄也不渲染 -->
+        <!-- 快捷键工具条（仅手机：窄屏触屏）：键盘开关 + 完整键盘 + 选择复制 +
+             软键盘按不出的控制键；桌面鼠标设备窗口再窄也不渲染 -->
         <QuickKeyBar
           v-if="isMobile"
           :keyboard-open="terminalRef?.softKeyboardOpen ?? false"
+          :vkeyboard-open="vkOpen"
           @send="handleQuickKey"
           @select="handleSelectCopy"
           @toggle-keyboard="terminalRef?.toggleSoftKeyboard()"
+          @toggle-vkeyboard="toggleVkKeyboard"
+        />
+        <!-- 完整虚拟键盘弹层（手机低频兜底：修饰键/功能键/F 键，粘滞组合） -->
+        <VirtualKeyboard
+          v-if="isMobile && vkOpen"
+          @send="handleQuickKey"
+          @close="vkOpen = false"
         />
         <!-- 复制阅读器（手机复制部分内容）：buffer 快照 + 反渲染，系统原生长按选择 -->
         <TerminalCopyReader
@@ -102,6 +110,7 @@ import TerminalHeader from './TerminalHeader.vue'
 import XTermTerminal from './XTermTerminal.vue'
 import IconBar from './IconBar.vue'
 import QuickKeyBar from './QuickKeyBar.vue'
+import VirtualKeyboard from './VirtualKeyboard.vue'
 import TerminalCopyReader from './TerminalCopyReader.vue'
 import { reflowSnapshot } from '@/utils/terminal-reflow'
 import SidebarPanel from './sidebar/SidebarPanel.vue'
@@ -142,6 +151,16 @@ const copyReaderData = ref<{ smart: string; raw: string; truncated: boolean } | 
  *  内部 isMobile 守卫处理——点按键不召唤软键盘；桌面回焦让键盘输入立即可用） */
 function handleQuickKey(bytes: string) {
   terminalRef.value?.sendText(bytes)
+}
+
+/** 完整虚拟键盘开关：打开时若软键盘开着先收起（防弹层与软键盘双重挤压
+ *  视口）；关闭不自动回弹软键盘（用户需要时经「键盘」开关再唤出） */
+const vkOpen = ref(false)
+function toggleVkKeyboard() {
+  vkOpen.value = !vkOpen.value
+  if (vkOpen.value && terminalRef.value?.softKeyboardOpen) {
+    terminalRef.value.toggleSoftKeyboard()
+  }
 }
 
 /** 「选择复制」按钮：抓 buffer 快照 → 反渲染 → 打开复制阅读器（系统原生长按选择） */
