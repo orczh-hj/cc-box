@@ -95,6 +95,8 @@ export default {
   quickKeyKeyboardHint: 'Show/hide soft keyboard',
   quickKeyVkb: 'Full keyboard',
   quickKeyVkbHint: 'Open/close full virtual keyboard (modifiers & function keys)',
+  vkbTitle: 'Virtual keyboard',
+  vkbCloseHint: 'Close virtual keyboard',
 
   // Terminal copy reader (mobile partial copy: snapshot + system selection handles)
   selectModeHint: 'Long-press to select; drag system handles to adjust',
