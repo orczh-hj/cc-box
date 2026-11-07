@@ -386,6 +386,7 @@ pub fn run(initial_dir: Option<String>, new_window: bool) {
             commands::get_projects,
             commands::hide_project,
             commands::unhide_project,
+            commands::authorize_project,
             commands::list_directories,
             commands::get_project_info,
             commands::get_sessions,

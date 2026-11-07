@@ -7,6 +7,17 @@
  * - Windows 下盘符与目录名不区分大小写
  * - 拖入路径恰好就是项目根目录时返回 '.'
  */
+/**
+ * Windows 盘符路径的分隔符统一为 '\'。
+ *
+ * 目录选择器（浏览器远程端）中 goUp 用 '/' 拼接父目录、Rust 端 entry.path()
+ * 用 '\' 追加子目录，浏览几层后会产生混合斜杠路径（D:/a/b\c）——Windows
+ * 文件系统接受，但落盘展示都不该带出去。非 Windows 路径原样返回。
+ */
+export function normalizeWinPathSeparators(p: string): string {
+  return /^[a-zA-Z]:[\\/]/.test(p) ? p.replace(/\//g, '\\') : p
+}
+
 export function relativizePath(filePath: string, projectPath: string): string {
   if (!projectPath || !filePath) return filePath
 

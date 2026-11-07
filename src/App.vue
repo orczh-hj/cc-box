@@ -499,6 +499,8 @@ async function handleSelectProject() {
     } else {
       // 隐藏项目不在 cachedProjects 中，会落到此分支：解除隐藏恢复展示
       void appStore.unhideProjectIfHidden(result.path)
+      // 新项目：打开 = 显式授权（远程 session.create 白名单）
+      void appStore.authorizeProjectIfUnknown(result.path)
       appStore.setCwd(result.path)
       // 保留用户的启动参数设置，只清除 resume（新项目不需要恢复会话）
       appStore.setClaudeOptions({
@@ -514,6 +516,8 @@ async function handleSelectProject() {
 async function handleOpenProject(path: string) {
   // 重新打开即恢复展示（隐藏项目经"添加项目"再次打开时解除隐藏）
   void appStore.unhideProjectIfHidden(path)
+  // 打开项目 = 显式授权（远程 session.create 白名单放行新项目）
+  void appStore.authorizeProjectIfUnknown(path)
   appStore.setCwd(path)
   currentView.value = 'terminal'
   // 启动时自动加载 sidebar 数据

@@ -1738,3 +1738,74 @@ fn RemoteState_DisplayName_ClearedOnSessionEnd_002() {
 
     assert_eq!(state.session_list()[0].name, None);
 }
+
+// ==================== 远程项目白名单（新项目授权） ====================
+
+/// 远程打开全新项目（Claude 从未运行过、不在 ~/.claude/projects）：
+/// 未授权时白名单拒绝（复现线上 bug 的核心断言），经 authorize_project
+/// 登记（打开项目 = 显式授权）后必须通过——否则远程第一次 session.create
+/// 必被拒 "unknown project"，而桌面 pty_spawn 无白名单正常（行为不一致）
+#[test]
+fn IsKnownProject_AuthorizedProject_001() {
+    let _lock = super::CONFIG_DIR_TEST_LOCK.lock();
+    let _guard = TestConfigDirGuard::new("authorize-project");
+
+    let proj = tempfile::tempdir().unwrap();
+    let path = proj.path().to_str().unwrap().to_string();
+
+    // 临时目录绝不在 ~/.claude/projects 中（真实 Claude 数据只读无污染）
+    assert!(
+        !crate::remote_state::is_known_project(&path),
+        "未授权的新项目应被白名单拒绝"
+    );
+
+    crate::store::authorize_project(&path).unwrap();
+
+    assert!(
+        crate::remote_state::is_known_project(&path),
+        "授权登记后必须通过白名单（远程新项目可建会话）"
+    );
+
+    // 授权路径的分隔符差异不影响判定（DirectoryPicker 混合斜杠场景）
+    let mixed = if path.contains('\\') {
+        path.replace('\\', "/")
+    } else {
+        path.replace('/', "\\")
+    };
+    assert!(
+        crate::remote_state::is_known_project(&mixed),
+        "分隔符风格不同的授权路径应等价通过"
+    );
+}
+
+/// projects.list 合并授权项目：授权的新项目出现在远程项目列表（用户在
+/// 远程添加后可见）；隐藏后不再列出（与 Claude 已运行项目的隐藏语义一致）
+#[test]
+fn ProjectsList_AuthorizedMerged_001() {
+    let _lock = super::CONFIG_DIR_TEST_LOCK.lock();
+    let _guard = TestConfigDirGuard::new("authorize-project-list");
+
+    let proj = tempfile::tempdir().unwrap();
+    let path = proj.path().to_str().unwrap().to_string();
+    let dir_name = proj
+        .path()
+        .file_name()
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    crate::store::authorize_project(&path).unwrap();
+
+    let list = crate::remote_state::remote_project_list();
+    let hit = list.iter().find(|p| crate::remote_state::paths_equivalent(&p.path, &path));
+    assert!(hit.is_some(), "授权项目应合并进 projects.list");
+    assert_eq!(hit.unwrap().name.as_deref(), Some(dir_name.as_str()));
+
+    // 隐藏后从列表消失
+    crate::store::hide_project(&path).unwrap();
+    let list = crate::remote_state::remote_project_list();
+    assert!(
+        !list.iter().any(|p| crate::remote_state::paths_equivalent(&p.path, &path)),
+        "隐藏的授权项目不应出现在 projects.list"
+    );
+}

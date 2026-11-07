@@ -220,6 +220,13 @@ pub async fn unhide_project(path: String) -> Result<(), String> {
     crate::store::unhide_project(&path).map_err(|e| e.to_string())
 }
 
+/// 授权项目（打开项目 = 显式授权；远程 session.create 白名单放行新项目）
+#[cc_command(write = "projects")]
+#[tauri::command]
+pub async fn authorize_project(path: String) -> Result<(), String> {
+    crate::store::authorize_project(&path).map_err(|e| e.to_string())
+}
+
 /// 目录浏览条目（远程端"添加项目"的电脑目录选择器用）
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]

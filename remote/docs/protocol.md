@@ -17,8 +17,8 @@
 |---|---|---|
 | `hello` | `ver, client, token` | 认证握手。token 三种：局域直连 = 桌面静态 token（连接层等值校验）；中继 = token v2 `<device_id>.<secret>`（relay 按前缀路由，**secret 由桌面 Hello 分支校验**——命中配对 pending 时固化为持久设备，LRU 上限 16）；**下载票据** = `<device_id>.<ticket>`（同格式复用 relay 路由，桌面命中票据表即建立受限会话，只允许 `file_download_ticket_chunk` 与 `ping`） |
 | `sessions.list` | `{}` | 拉取运行中会话列表 |
-| `projects.list` | `{}` | 可操作项目白名单 |
-| `session.create` | `path, sessionId?, skipPermissions?, customArgs?, instanceId?` | 新建（无 sessionId）或恢复（--resume sessionId）会话。`instanceId`（可选）为窗口路由：Broker 按此转发到对应 GUI 成员；不带 = 路由到最近注册的默认成员，无成员时返回 `session.create.failed` |
+| `projects.list` | `{}` | 可操作项目白名单（Claude 已运行项目 + 显式授权项目 `config.authorizedProjects`，隐藏过滤、去重） |
+| `session.create` | `path, sessionId?, skipPermissions?, customArgs?, instanceId?` | 新建（无 sessionId）或恢复（--resume sessionId）会话。白名单 = Claude 已运行项目（~/.claude/projects 扫描）**或显式授权项目**（打开项目 = 授权：任一端打开项目时前端对未知项目调 `authorize_project` 写入 config.authorizedProjects——否则全新项目远程首次建会话必被拒，与桌面不一致）。`instanceId`（可选）为窗口路由：Broker 按此转发到对应 GUI 成员；不带 = 路由到最近注册的默认成员，无成员时返回 `session.create.failed` |
 | `session.kill` | `id, quiet?` | 关闭会话（ptyId）。显式关闭：先广播 `remote-session-closed` 再 kill（各端联动删 Tab），与桌面 `pty_kill` 双路径同语义；`quiet=true` 为重启场景内部清理——不广播 closed（各端保留 Tab 等 respawn，pty-exit 只置 stopped） |
 | `sessions.history` | `path` | 项目历史会话（恢复入口） |
 | `session.subscribe` | `id` | 只读订阅输出（附回放快照） |

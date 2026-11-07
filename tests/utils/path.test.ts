@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { relativizePath } from '@/utils/path'
+import { relativizePath, normalizeWinPathSeparators } from '@/utils/path'
 
 describe('relativizePath', () => {
   // Windows 下文件位于项目目录内 → 返回用 '/' 分隔的相对路径
@@ -102,5 +102,26 @@ describe('relativizePath', () => {
     expect(
       relativizePath('/a/b/c/d/e.ts', '/a/b'),
     ).toBe('c/d/e.ts')
+  })
+})
+
+describe('normalizeWinPathSeparators', () => {
+  // Windows 盘符路径里的 '/' 统一为 '\'（DirectoryPicker goUp 的 '/' 拼接与
+  // Rust entry.path() 的 '\' 追加会产生混合斜杠，落盘/展示都不该带出去）
+  it('NormalizeWinPath_MixedSeparators_001', () => {
+    expect(
+      normalizeWinPathSeparators('D:/orczh/Documents\\Project\\my proj'),
+    ).toBe('D:\\orczh\\Documents\\Project\\my proj')
+  })
+
+  // 盘符根（D:/）也统一为反斜杠
+  it('NormalizeWinPath_DriveRoot_002', () => {
+    expect(normalizeWinPathSeparators('D:/')).toBe('D:\\')
+  })
+
+  // 非 Windows 路径（Unix 绝对路径 / 相对路径）原样返回
+  it('NormalizeWinPath_UnixUntouched_003', () => {
+    expect(normalizeWinPathSeparators('/home/user/proj')).toBe('/home/user/proj')
+    expect(normalizeWinPathSeparators('')).toBe('')
   })
 })

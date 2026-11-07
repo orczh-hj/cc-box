@@ -221,12 +221,52 @@ fn device_name() -> String {
     NAME.clone()
 }
 
-/// 远程可操作的项目白名单：仅允许已知项目（Claude projects 目录中出现过的路径）
-fn is_known_project(path: &str) -> bool {
-    let Ok(projects) = crate::store::get_projects(None, None) else {
-        return false;
-    };
-    projects.iter().any(|p| paths_equivalent(&p.path, path))
+/// 远程可操作的项目白名单：Claude 已运行过的项目（~/.claude/projects 扫描）
+/// 或显式授权项目（打开项目 = 授权，config.authorizedProjects——新项目
+/// Claude 未运行过也能远程建会话，与桌面行为一致）
+pub(crate) fn is_known_project(path: &str) -> bool {
+    let from_claude = crate::store::get_projects(None, None)
+        .map(|projects| projects.iter().any(|p| paths_equivalent(&p.path, path)))
+        .unwrap_or(false);
+    from_claude
+        || crate::store::authorized_project_paths()
+            .iter()
+            .any(|p| paths_equivalent(p, path))
+}
+
+/// projects.list 构建：Claude 已运行项目 + 授权新项目（路径仍存在、去重、
+/// 隐藏过滤），远程添加的新项目立即可见
+pub(crate) fn remote_project_list() -> Vec<cc_box_remote_protocol::RemoteProject> {
+    let mut projects = crate::store::get_projects(Some(30), None).unwrap_or_default();
+    let hidden = crate::store::hidden_project_keys();
+    for path in crate::store::authorized_project_paths() {
+        if !std::path::Path::new(&path).exists() || crate::store::is_hidden_project(&hidden, &path)
+        {
+            continue;
+        }
+        // 已在 Claude 项目列表中的授权条目不重复
+        if projects.iter().any(|p| paths_equivalent(&p.path, &path)) {
+            continue;
+        }
+        projects.push(crate::store::Project {
+            path: path.clone(),
+            name: std::path::Path::new(&path)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(&path)
+                .to_string(),
+            last_session_id: None,
+            last_cost: None,
+            last_duration: None,
+        });
+    }
+    projects
+        .into_iter()
+        .map(|p| cc_box_remote_protocol::RemoteProject {
+            path: p.path,
+            name: Some(p.name),
+        })
+        .collect()
 }
 
 /// 路径等价比较：优先 canonicalize（消大小写/分隔符差异），失败则归一化字符串
@@ -833,14 +873,7 @@ impl RemoteState {
                 self.try_send(conn_id, ServerMessage::Sessions { list, revision });
             }
             ClientMessage::ProjectsList => {
-                let list = crate::store::get_projects(Some(30), None)
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|p| cc_box_remote_protocol::RemoteProject {
-                        path: p.path,
-                        name: Some(p.name),
-                    })
-                    .collect();
+                let list = remote_project_list();
                 self.try_send(conn_id, ServerMessage::Projects { list });
             }
             ClientMessage::SessionCreate { path, session_id, skip_permissions, custom_args, session_name, .. } => {

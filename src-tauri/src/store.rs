@@ -65,6 +65,10 @@ pub struct AppConfig {
     pub auto_connect_ide: Option<bool>,
     #[serde(rename = "hiddenProjects")]
     pub hidden_projects: Option<Vec<String>>,
+    /// 远程会话白名单的显式授权项目（打开项目 = 授权；新项目 Claude 未
+    /// 运行过、不在 ~/.claude/projects 时，远程 session.create 的放行依据）
+    #[serde(rename = "authorizedProjects", default)]
+    pub authorized_projects: Option<Vec<String>>,
     #[serde(rename = "lastOpenedProject")]
     pub last_opened_project: Option<String>,
     #[serde(rename = "windowSize")]
@@ -681,7 +685,7 @@ pub(crate) fn normalize_project_key(path: &str) -> String {
 }
 
 /// 隐藏项目键集合（config.hiddenProjects → 归一化）
-fn hidden_project_keys() -> std::collections::HashSet<String> {
+pub(crate) fn hidden_project_keys() -> std::collections::HashSet<String> {
     get_app_config()
         .ok()
         .and_then(|c| c.hidden_projects)
@@ -718,6 +722,28 @@ pub fn unhide_project(path: &str) -> Result<()> {
         .filter(|p| normalize_project_key(p) != key)
         .collect();
     update_app_config(serde_json::json!({ "hiddenProjects": next }))
+}
+
+/// 授权项目（打开项目 = 显式授权，桌面/远程同一入口）：新项目 Claude
+/// 未运行过、不在 ~/.claude/projects 时，远程 session.create 白名单的
+/// 放行依据。幂等（归一化去重），隐藏语义由列表侧过滤（hide 优先于展示）
+pub fn authorize_project(path: &str) -> Result<()> {
+    let authorized = get_app_config()?.authorized_projects.unwrap_or_default();
+    let key = normalize_project_key(path);
+    if authorized.iter().any(|p| normalize_project_key(p) == key) {
+        return Ok(());
+    }
+    let mut next = authorized;
+    next.push(path.to_string());
+    update_app_config(serde_json::json!({ "authorizedProjects": next }))
+}
+
+/// 授权项目列表（config.authorizedProjects 原始值；判定走 paths_equivalent）
+pub(crate) fn authorized_project_paths() -> Vec<String> {
+    get_app_config()
+        .ok()
+        .and_then(|c| c.authorized_projects)
+        .unwrap_or_default()
 }
 
 /// 会话名提取 —— 复现 Claude Code CLI 的正本路径（名称唯一源 = transcript

@@ -205,6 +205,10 @@ export const hideProject = (path: string): Promise<void> =>
 export const unhideProject = (path: string): Promise<void> =>
   invoke<void>('unhide_project', { path });
 
+/** 授权项目（打开项目 = 显式授权；远程 session.create 白名单放行新项目） */
+export const authorizeProject = (path: string): Promise<void> =>
+  invoke<void>('authorize_project', { path });
+
 /** 目录浏览条目（远程端"添加项目"的目录选择器；仅子目录） */
 export interface DirEntryLite {
   name: string

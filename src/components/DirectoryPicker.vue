@@ -80,6 +80,7 @@
 import { ref, computed, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { listDirectories, type DirEntryLite } from '@/api/tauri'
+import { normalizeWinPathSeparators } from '@/utils/path'
 
 const props = defineProps<{ visible: boolean }>()
 const emit = defineEmits<{ close: []; select: [path: string] }>()
@@ -108,7 +109,7 @@ watch(() => props.visible, (v) => {
     currentPath.value = ''
     manualPath.value = ''
     sortBy.value = 'name'
-    load()
+    load('')
   }
 }, { immediate: true })
 
@@ -117,7 +118,9 @@ async function load(path: string) {
   error.value = ''
   try {
     entries.value = await listDirectories(path || undefined)
-    currentPath.value = path
+    // Windows 盘符路径统一 '\'（goUp 的 '/' 拼接与 Rust join 的 '\' 追加
+    // 会产生混合斜杠，选出的项目路径不该带出去）
+    currentPath.value = path ? normalizeWinPathSeparators(path) : ''
   } catch (e) {
     error.value = String(e)
     entries.value = []

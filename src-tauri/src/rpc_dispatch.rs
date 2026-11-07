@@ -178,6 +178,7 @@ registry! {
     // 隐藏/恢复展示：跨端可见的首页列表状态变更，广播 projects section
     "hide_project" => write(Projects) => |path: String| crate::commands::hide_project,
     "unhide_project" => write(Projects) => |path: String| crate::commands::unhide_project,
+    "authorize_project" => write(Projects) => |path: String| crate::commands::authorize_project,
     "list_directories" => read() => |path: Option<String>| crate::commands::list_directories,
     "get_project_info" => read() => |path: String| crate::commands::get_project_info,
     "get_sessions" => read() => |project_path: String, limit: Option<usize>, offset: Option<usize>| crate::commands::get_sessions,

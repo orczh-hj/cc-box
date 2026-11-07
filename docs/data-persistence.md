@@ -62,6 +62,7 @@
 | `theme` | string | GUI 主题 |
 | `fontSize` | number | 终端字号 |
 | `hiddenProjects` | string[]? | 隐藏项目路径（首页不再主动展示；重新添加该项目时解除） |
+| `authorizedProjects` | string[]? | 远程会话白名单的显式授权项目（打开项目 = 授权；新项目 Claude 未运行过时远程 `session.create` 的放行依据，判定走 canonicalize 等价比较） |
 | `lastOpenedProject` | string? | 上次打开的项目路径 |
 
 ## Store 命令 (IPC 通道)
@@ -72,6 +73,7 @@
 | `get_projects` | 项目列表（分页） |
 | `hide_project` | 隐藏项目（写命令，广播 state-changed(projects)；首页列表/近期会话过滤） |
 | `unhide_project` | 取消隐藏（重新添加该项目时恢复展示） |
+| `authorize_project` | 授权项目（写命令，广播 state-changed(projects)；打开项目时前端对未知项目调用，幂等） |
 | `get_project_info` | 项目详情 |
 | `get_sessions` | 会话列表（分页） |
 | `get_session_count` | 会话总数 |

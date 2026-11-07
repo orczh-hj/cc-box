@@ -13,6 +13,7 @@ import {
   runChecks,
   hideProject as hideProjectApi,
   unhideProject as unhideProjectApi,
+  authorizeProject as authorizeProjectApi,
 } from '@/api/tauri'
 import i18n from '@/i18n'
 import { useSidebarStore } from '@/stores/sidebar'
@@ -293,6 +294,20 @@ export const useAppStore = defineStore('app', () => {
     return cachedProjects.value.some(p => normalize(p.path) === normalized)
   }
 
+  /** 打开项目 = 显式授权（远程 session.create 白名单）：未知项目（Claude
+   *  未运行过、不在首页列表）时登记 config.authorizedProjects；幂等，已知
+   *  项目不写（避免每次打开都触发 state-changed(projects) 广播） */
+  async function authorizeProjectIfUnknown(path: string) {
+    if (isKnownProject(path)) return
+    useSidebarStore().markSelfWrite('projects')
+    try {
+      await authorizeProjectApi(path)
+    } catch (err) {
+      console.error('Failed to authorize project:', err)
+      useSidebarStore().cancelSelfWrite('projects')
+    }
+  }
+
   function refreshRecentSessions(sessions: SessionInfo[]) {
     cachedRecentSessions.value = sessions
   }
@@ -336,6 +351,7 @@ export const useAppStore = defineStore('app', () => {
     updateAppConfig({ language: lang })
     i18n.global.locale.value = lang
   }
+
 
   /** 同步当前 claudeEnvVars 到 cc-box config */
   async function doSyncEnv() {
@@ -466,6 +482,7 @@ export const useAppStore = defineStore('app', () => {
     refreshCache,
     hideProject,
     unhideProjectIfHidden,
+    authorizeProjectIfUnknown,
     syncHiddenProjects,
     isPathHidden,
     reloadRecentSessions,
@@ -475,8 +492,7 @@ export const useAppStore = defineStore('app', () => {
     setCwd,
     setTheme,
     setFontSize,
-    setLanguage,
-    setClaudeEnvVars,
+    setLanguage,    setClaudeEnvVars,
     resetClaudeEnvVars,
     setClaudeOptions,
     setDefaultClaudeOptions,
