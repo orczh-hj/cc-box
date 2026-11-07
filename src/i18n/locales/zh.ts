@@ -93,6 +93,8 @@ export default {
   quickKeyKeyboard: '键盘',
   quickKeyKeyboardHide: '收起',
   quickKeyKeyboardHint: '显示/收起软键盘',
+  quickKeyVkb: '完整键盘',
+  quickKeyVkbHint: '打开/收起完整虚拟键盘（含修饰键与功能键）',
 
   // 终端复制阅读器（手机端复制部分内容：快照 + 系统原生长按选择手柄）
   selectModeHint: '长按选择文本，用系统手柄调整范围',

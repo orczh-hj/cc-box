@@ -14,10 +14,10 @@
       v-for="k in keys"
       :key="k.key"
       class="qk-btn"
-      :class="{ 'qk-action': !!k.action, 'qk-open': k.action === 'keyboard' && keyboardOpen, pressing: pressedLabel === k.label }"
+      :class="{ 'qk-action': !!k.action, 'qk-open': (k.action === 'keyboard' && keyboardOpen) || (k.action === 'vkeyboard' && vkeyboardOpen), pressing: pressedLabel === k.label }"
       :title="k.hint"
       :aria-label="k.label"
-      @click="k.action === 'select' ? $emit('select') : k.action === 'keyboard' ? $emit('toggleKeyboard') : $emit('send', k.bytes!)"
+      @click="k.action === 'select' ? $emit('select') : k.action === 'keyboard' ? $emit('toggleKeyboard') : k.action === 'vkeyboard' ? $emit('toggleVkeyboard') : $emit('send', k.bytes!)"
     >
       <svg
         v-if="k.icon === 'keyboard'"
@@ -51,8 +51,8 @@
 import { computed, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 
-const props = defineProps<{ keyboardOpen?: boolean }>()
-defineEmits<{ send: [bytes: string]; select: []; toggleKeyboard: [] }>()
+const props = defineProps<{ keyboardOpen?: boolean; vkeyboardOpen?: boolean }>()
+defineEmits<{ send: [bytes: string]; select: []; toggleKeyboard: []; toggleVkeyboard: [] }>()
 
 const { t } = useI18n()
 
@@ -70,7 +70,7 @@ interface QuickKey {
   label: string
   bytes?: string
   hint?: string
-  action?: 'select' | 'keyboard'
+  action?: 'select' | 'keyboard' | 'vkeyboard'
   /** 图标按钮：渲染 SVG 而非文字（label 仅作 aria-label/按压高亮标识） */
   icon?: 'keyboard'
 }
@@ -83,9 +83,17 @@ const keys = computed<QuickKey[]>(() => [
     icon: 'keyboard',
     hint: t('quickKeyKeyboardHint'),
   },
+  {
+    key: 'vkb',
+    label: t('quickKeyVkb'),
+    action: 'vkeyboard',
+    icon: 'keyboard',
+    hint: t('quickKeyVkbHint'),
+  },
   { key: 'select', label: t('quickKeySelectCopy'), action: 'select' },
   { key: 'esc', label: 'Esc', bytes: '\x1b', hint: t('quickKeyEsc') },
   { key: 'enter', label: 'Enter', bytes: '\r', hint: t('quickKeyEnter') },
+  { key: 'tab', label: 'Tab', bytes: '\t' },
   { key: 'stab', label: '⇧Tab', bytes: '\x1b[Z', hint: t('quickKeyMode') },
   { key: 'ctrlj', label: 'Ctrl+J', bytes: '\x0a', hint: t('quickKeyNewline') },
   { key: 'ctrlu', label: 'Ctrl+U', bytes: '\x15', hint: t('quickKeyClearLine') },
@@ -95,6 +103,7 @@ const keys = computed<QuickKey[]>(() => [
   { key: 'right', label: '→', bytes: '\x1b[C', hint: '' },
   { key: 'home', label: 'Home', bytes: '\x1b[H', hint: '' },
   { key: 'end', label: 'End', bytes: '\x1b[F', hint: '' },
+  { key: 'del', label: 'Del', bytes: '\x1b[3~', hint: '' },
 ])
 </script>
 

@@ -8,10 +8,11 @@ vi.mock('vue-i18n', () => ({
 
 import QuickKeyBar from '@/components/QuickKeyBar.vue'
 
-/** label → 期望发送的终端转义序列（action 按钮 select 不在此列） */
+/** label → 期望发送的终端转义序列（action 按钮 select/keyboard/vkeyboard 不在此列） */
 const EXPECT: Record<string, string> = {
   'Esc': '\x1b',
   'Enter': '\r',      // 回车：提交（与 Ctrl+J 换行不提交互补）
+  'Tab': '\t',        // Tab 补全
   '⇧Tab': '\x1b[Z',   // Shift+Tab：Claude CLI 工作模式切换
   'Ctrl+J': '\x0a',    // 换行不提交
   'Ctrl+U': '\x15',    // 清空当前输入行
@@ -21,6 +22,7 @@ const EXPECT: Record<string, string> = {
   '→': '\x1b[C',
   'Home': '\x1b[H',
   'End': '\x1b[F',
+  'Del': '\x1b[3~',
 }
 
 describe('QuickKeyBar（手机快捷键工具条）', () => {
@@ -28,8 +30,8 @@ describe('QuickKeyBar（手机快捷键工具条）', () => {
     mockT.mockClear()
   })
 
-  // 键序：键盘开关（第一位，图标按钮——tap 终端不再自动唤出软键盘）+
-  // 选择复制 action 按钮 + 十一个字节键（Enter 在 Esc 后）；^C 已按用户决策移除
+  // 键序：键盘开关 + 完整键盘（前两位图标按钮——tap 终端不再自动唤出软键盘）+
+  // 选择复制 action 按钮 + 字节键（Enter 在 Esc 后）；^C 已按用户决策移除
   it('QuickKeyBar_RendersAllKeys_001', () => {
     const wrapper = mount(QuickKeyBar)
     const buttons = wrapper.findAll('button')
@@ -37,7 +39,7 @@ describe('QuickKeyBar（手机快捷键工具条）', () => {
     expect(buttons[0].find('svg').exists()).toBe(true)
     expect(buttons[0].attributes('aria-label')).toBe('quickKeyKeyboard')
     const labels = buttons.map(b => b.text())
-    expect(labels).toEqual(['', 'quickKeySelectCopy', ...Object.keys(EXPECT)])
+    expect(labels).toEqual(['', '', 'quickKeySelectCopy', ...Object.keys(EXPECT)])
     expect(labels).not.toContain('^C')
   })
 
@@ -111,6 +113,26 @@ describe('QuickKeyBar（手机快捷键工具条）', () => {
     expect(btnOpen.attributes('aria-label')).toBe('quickKeyKeyboardHide')
     await btnOpen.trigger('click')
     expect(open.emitted('toggleKeyboard')).toHaveLength(1)
+    open.unmount()
+  })
+
+  // 完整键盘唤出按钮（第二位图标按钮）：点击 emit toggleVkeyboard 不发字节；
+  // vkeyboardOpen 时 qk-open 常亮（与软键盘开关联动提示弹层已打开）
+  it('QuickKeyBar_虚拟键盘按钮_007', async () => {
+    const closed = mount(QuickKeyBar, { props: { vkeyboardOpen: false } })
+    const btnClosed = closed.findAll('button')[1]
+    expect(btnClosed.find('svg').exists()).toBe(true)
+    expect(btnClosed.classes()).toContain('qk-action')
+    expect(btnClosed.classes()).not.toContain('qk-open')
+    expect(btnClosed.attributes('aria-label')).toBe('quickKeyVkb')
+    await btnClosed.trigger('click')
+    expect(closed.emitted('toggleVkeyboard')).toHaveLength(1)
+    expect(closed.emitted('send')).toBeUndefined()
+    closed.unmount()
+
+    const open = mount(QuickKeyBar, { props: { vkeyboardOpen: true } })
+    const btnOpen = open.findAll('button')[1]
+    expect(btnOpen.classes()).toContain('qk-open')
     open.unmount()
   })
 })
