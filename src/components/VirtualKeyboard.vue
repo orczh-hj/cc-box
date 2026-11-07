@@ -1,5 +1,5 @@
 <template>
-  <!-- 完整虚拟键盘弹层（手机端）：软键盘按不出的修饰键/功能键/F 键兜底。
+  <!-- 完整虚拟键盘（手机端，文档流内底部面板）：软键盘按不出的修饰键/功能键/F 键兜底。
        mousedown.prevent 同 QuickKeyBar：点击按键不偷终端 textarea 焦点。
        粘滞修饰键（RustDesk/向日葵同款）：点 Ctrl/Alt/Shift 高亮，下一键
        组合后自动释放，可叠加、再点取消。按键经 vkeyToBytes 转 ANSI 序列
@@ -174,19 +174,15 @@ function press(k: VirtualKeyEvent) {
 
 <style scoped>
 .virtual-keyboard {
-  position: fixed;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  z-index: 60;
+  /* 文档流内（terminal-container flex 列、排在 QuickKeyBar 后）：终端区随弹层
+     出现自动收缩 refit（ResizeObserver），输入行始终可见；不 fixed 遮挡 */
+  flex-shrink: 0;
   display: flex;
   flex-direction: column;
   gap: 4px;
   padding: 6px 6px calc(var(--safe-area-bottom, 0px) + 6px);
   background: var(--bg-secondary);
   border-top: 1px solid var(--border-color);
-  border-radius: 10px 10px 0 0;
-  box-shadow: 0 -4px 16px rgb(0 0 0 / 0.25);
   user-select: none;
   -webkit-tap-highlight-color: transparent;
 }
