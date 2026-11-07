@@ -151,6 +151,62 @@ cp scripts/oss-config.example.json scripts/oss-config.json
 # 编辑填入阿里云 AccessKey
 ```
 
+## Claude CLI 版本存档（deps/claude）正本
+
+用户在 cc-box 内下载/安装指定历史版本 Claude CLI 的数据源。**安全红线：bucket 根下 `deps/` 是依赖通道，绝不整目录删除。**
+
+### 机制
+
+- **下载源 = npm 镜像平台分包（国内直连免代理，默认）**：
+  - 元数据 `https://registry.npmmirror.com/@anthropic-ai/claude-code-<platform>/<version>`（含 `dist.shasum` = SHA1 真值、`dist.size`）
+  - tarball 302 → `https://cdn.npmmirror.com/packages/%40anthropic-ai/claude-code-<platform>/<version>/claude-code-<platform>-<version>.tgz`（包内仅 `package/claude[.exe]`）
+  - 流程：下载 tgz → SHA1 校验 → `tar -xzf` 解包 → 算 SHA256 → 上传裸二进制到 OSS（客户端无需解压）
+  - 实测：2.1.316 win32-x64 的 SHA1 `8dcbf9ee…` 与 registry 元数据一致，解开后 `--version` 正常
+- **官方源（备用，需代理且节点要过 Cloudflare）**：`https://downloads.claude.ai/claude-code-releases/<version>/manifest.json`；部分节点握手失败表现为 `schannel: failed to receive handshake`
+- **版本清单/发布日期**：`registry.npmmirror.com/@anthropic-ai/claude-code` 的 `time` 字段
+- **脚本**：`npm run download-deps -- --claude-versions <v1,v2,...> [--platforms ...] [--skip-git]`
+  - 无参数 = registry 最新版 × 三主平台
+  - 已有裸二进制自动跳过（重跑同命令即断点续传）；单版本失败不中断后续版本
+  - `latest.json` 仅在版本 = registry 最新时更新；`versions.json` 按平台合并同版本条目、`latest` 取最大版本号
+- **产物**：`deps/claude/<version>/<platform>/claude[.exe]` + `deps/claude/versions.json`（`{latest, updated_at, versions:[{version, release_date, platforms:{<platform>:{url,checksum,size}}}]} `）
+- **平台**：默认三主平台（win32-x64 + darwin-arm64 + linux-x64，与 CC-Box 发布面一致，每版 ≈ 0.7GB）；白名单另含 win32-arm64 / darwin-x64 / linux-arm64 / linux-arm64-musl / linux-x64-musl，需要时 `--platforms` 指定
+- **客户端**：`installer.rs` 读 versions.json（`list_claude_versions` / `download_claude_version` / `install_claude_version`）；**按 size 校验下载完整性，checksum 字段目前只记录不校验**
+
+### 踩坑记录
+
+- **Windows 盘符 + tar/scp**：`tar -C D:\...` 被 Git Bash 的 GNU tar 当作远程主机（`Cannot connect to D:`）——参数一律用相对路径 + `cwd`
+- **execSync 缓冲**：npm 包级元数据（557 个版本）超过默认 1MB，需 `maxBuffer: 64MB`
+- **versions.json 覆盖风险**：拉取现有 versions.json 失败时若按空列表合并会**丢掉全部历史版本条目**（曾发生）。现策略：网络失败抛错中止写入，仅 HTTP 404（首次）才允许空
+- **中断残留**：Ctrl+C 需连带杀 curl 子进程（已加 SIGINT 处理），否则 `.tmp` 被占用导致 EBUSY
+
+### 已存档版本（2026-11 快照）
+
+12 个版本，`latest = 2.1.318`。新 6 版为三主平台，旧 6 版保留原 8 平台。
+
+| 版本 | 发布日期 | 平台 | 定位 |
+|---|---|---|---|
+| 2.1.318 | 2026-11-03 | 3 主 | 当前最新；追新用户目的版本 |
+| 2.1.316 | 2026-10-31 | 3 主 | cc-box 内置 changelog 快照的最新稳定锚点 |
+| 2.1.295 | 2026-10-08 | 3 主 | statusline 数据面最全早期稳定点；10 月大改前收尾 |
+| 2.1.284 | 2026-09-28 | 3 主 | spend_limit 美元值（used_usd/limit_usd）补全 |
+| 2.1.260 | 2026-09-03 | 3 主 | workspace.repo、缓存 miss 原因等字段补全 |
+| 2.1.251 | 2026-08-28 | 3 主 | **会话状态条核心字段起点**（rate_limits/prompt_cache/spend_limit）——状态条完整体验的推荐升级下限 |
+| 2.1.179 | 2026-06-16 | 8 平台 | 曾长期作为 latest |
+| 2.1.177 | 2026-06-13 | 8 平台 | |
+| 2.1.170 | 2026-06-09 | 8 平台 | |
+| 2.1.146 | 2026-05-20 | 8 平台 | 项目「不对新版本特性做开发」的兼容锚点之一 |
+| 2.1.143 | 2026-05-15 | 8 平台 | |
+| 2.1.138 | 2026-05-09 | 8 平台 | 旧基线 |
+
+> 旧 6 版的 `checksum` 字段为空（条目在 2026-11-05 从 OSS 文件重建，OSS ETag 非 MD5 无法反推 SHA256）；客户端按 size 校验，不影响安装。如需补齐可下载后重算并重写 versions.json。
+
+### 关键版本门槛（开发参考）
+
+- `--settings`（文件路径形态，会话状态条注入的前提）：**v1.0.61**（2025-07-25）起支持——门槛极低，文案写「v1.0.61+」
+- statusLine 丰富数据字段（rate_limits / prompt_cache / spend_limit 百分比）：**v2.1.251** 起
+- spend_limit 美元值：v2.1.284 起；`workspace.repo` / `last_miss_cause`：v2.1.260 起
+- 版本清单数据源：npm registry（`time` 字段）；功能节点判定源：`website/content/claude-code-docs/getting-started/changelog.md`（`npm run sync:cc-docs` 更新，需代理）
+
 ## 产品官网（ccbox.orczh.top）
 
 官网源码在 `website/`（独立 Vite 站点，见根 CLAUDE.md「产品官网」速查），部署在同一 OSS bucket 根路径，与版本发布互不依赖（页面动态 fetch `/cc-box/latest.json`，发版后官网自动更新）。速查见 CLAUDE.md，此处只记录 **OSS 侧配置与证书**。

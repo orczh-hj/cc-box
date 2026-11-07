@@ -65,3 +65,5 @@ remote/relay/target-dev/
 
 # 本地测试安装包（勿提交）
 *-setup-local.exe
+
+.ossutil_checkpoint/

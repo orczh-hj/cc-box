@@ -115,6 +115,7 @@ npm run tauri:build        # 生产构建
 
 - **Windows**：MSVC 工具链 + C++ Build Tools（link.exe 须为 MSVC 版本）；配置细节 → [docs/development.md](docs/development.md)「Windows 环境配置」
 - **mac 远程（SSH 免密）**：`ssh wangdatong@192.168.5.119` 可直接执行拉取/构建/安装/读日志（源码 `~/Desktop/czh/cc-box`，node 在 `/opt/homebrew/bin` 需加 PATH，安装=退出 CC-Box 后替换 `/Applications/CC-Box.app`；GUI 按键测试仍需用户配合）
+- **Windows 测试机**：`F416-02@192.168.5.200`（编译产物发送目标；SSH/共享方式按需探测）
 - **双仓库**：GitHub（需代理）/ Gitee（直连）；**始终分远程推送，勿给 origin 配多个 push URL**（一端失败整条命令报错、成败难分辨）→ [docs/development.md](docs/development.md)「双仓库同步」。**现行配置（2026-11 起生效）**：`origin` = GitHub（fetch/push 单 URL），`gitee` = Gitee 别名——推送命令：`git push origin main` + `git push gitee main`（先 Gitee 必达，再 GitHub；origin 曾误配双 pushurl，`git config --unset-all remote.origin.pushurl` 修复）。GitHub **偶尔可直连推送**（git push 有时能通），但**下载/克隆必须代理**；代理经 `set_proxy` 开关，**偶尔崩溃、不定时恢复**——失败时先重试直连/检查代理状态；**开代理后国内站点（Gitee、OSS 等）可能无法访问**，用完及时关
 - **打包**：首次下载 NSIS 组件需代理 → [docs/development.md](docs/development.md)「Windows 环境配置」
 
@@ -128,6 +129,7 @@ npm run release -- --bump patch --notes "### Features\n- Add feature"
 - **`--bump major/minor` 只在用户明确指定时使用**；`--notes` 必填、中文、从用户使用角度写（可感知的修复与新增能力，不写模块/实现细节）
 - **relay 二进制不内嵌 Web UI**（`web-assets` 以 `--no-default-features` 构建，UI 与 relay 部署完全独立）：生产 relay 必须配置 `CC_BOX_RELAY_WEB_DIR=/opt/cc-box/web`，前端（src/）改动只需 `npm run deploy:web`（构建 → staging → md5 校验 → 原子切换 → 线上校验，完整镜像替换、自动清理旧 bundle；勿直接用 `scp -r dist/*` 覆盖，否则历史 `index-*.js` 会永久堆叠），免重编、免重启；只有 relay 源码/服务逻辑（remote/relay/、web-assets 代码）改动才跑 `npm run deploy:relay`（不再构建前端；先桌面后 relay）。桌面安装包保留内嵌 UI（默认 feature）
 - 详细参数、断点续跑与远程组件发布清单 → [docs/release-process.md](docs/release-process.md)
+- **Claude CLI 版本存档**（deps/claude，用户安装指定历史版本的数据源）：**下载源是 npm 镜像平台分包**（`registry.npmmirror.com/@anthropic-ai/claude-code-<platform>`，国内直连免代理，SHA1 校验后解包）；`npm run download-deps -- --claude-versions <列表> --skip-git` 增量续传；已存档 12 版（2.1.138~2.1.318）、关键版本门槛（`--settings` ≥ v1.0.61、状态条字段 ≥ v2.1.251）、versions.json 结构与踩坑（盘符/tar、缓冲、覆盖风险）→ [docs/release-process.md](docs/release-process.md)「Claude CLI 版本存档」
 
 ### 产品官网（速查）
 
