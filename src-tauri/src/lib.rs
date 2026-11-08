@@ -342,8 +342,9 @@ pub fn run(initial_dir: Option<String>, new_window: bool) {
 
                 // 文件传输清理：启动扫一次（删崩溃遗留的上传临时文件）
                 file_transfer::startup_cleanup();
-                // 历史会话回收站清理：超过 30 天的 transcript 彻底删除
-                store::sweep_trash();
+                // 历史会话回收站清理：超过 30 天的 transcript 彻底删除。
+                // 非关键操作，异步执行避免阻塞启动
+                tauri::async_runtime::spawn_blocking(crate::store::sweep_trash);
                 // 定时 TTL sweep（惰性清理的兜底：连接断开后再无 file_ 命令触发）
                 tauri::async_runtime::spawn(async move {
                     let mut interval =

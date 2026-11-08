@@ -33,7 +33,7 @@
 删除历史会话（会话面板 hover 删除按钮）时 transcript 不直接删除：
 
 - **移入**：`delete_history_session` 把 `<sessionId>.jsonl`/`.txt` rename 进回收站，文件名编码删除时刻（`<millis>_<sessionId>.<ext>`）——rename 保留原 mtime（= 会话最后写入），不能作期限依据；运行中会话的 transcript 被写打开，Windows rename 失败直接报错
-- **清理**：保留 30 天；启动时（lib.rs setup）+ 每次删除后惰性 `sweep_trash`，按文件名毫秒前缀判断超期即彻底删除
+- **清理**：保留 30 天；启动时（lib.rs setup，`spawn_blocking` 异步执行不阻塞启动）+ 每次删除后惰性 `sweep_trash`，按文件名毫秒前缀判断超期即彻底删除
 
 ### 项目内传输目录 `.cc-box-files/`（远程文件上传）
 
