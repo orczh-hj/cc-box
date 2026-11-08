@@ -66,6 +66,8 @@ class RemoteTransportImpl implements Transport {
 
   /** 本连接标识（hello.ok 下发；会话遮罩归属判定依据） */
   private _connId: number | null = null
+  /** 目标电脑 OS（hello.ok 下发；手机键盘平台键名依据，null=旧桌面按 Windows） */
+  private _remotePlatform: string | null = null
   /** 已应用的状态版本（事件单调过滤：旧事件不覆盖新状态） */
   private appliedRevision = 0
 
@@ -124,6 +126,11 @@ class RemoteTransportImpl implements Transport {
   /** 本连接唯一标识（hello.ok 下发；null = 旧桌面端未下发） */
   get connId(): number | null {
     return this._connId
+  }
+
+  /** 目标电脑 OS（windows/macos/linux；null = 旧桌面端未下发，按 Windows 处理） */
+  get remotePlatform(): string | null {
+    return this._remotePlatform
   }
 
   /** 是否经中继连接（文件传输限额选档：中继流量按量计费从严；直连走局域网宽松）。
@@ -347,6 +354,7 @@ class RemoteTransportImpl implements Transport {
         this.setConnState('connected')
         this.startPing()
         this._connId = msg.connId
+        this._remotePlatform = msg.platform ?? null
         // 设备名回填列表条目（TokenGate 展示），并清除历史失效标记
         if (this._activeDesktopId) {
           touchDesktop(this._activeDesktopId, { name: msg.deviceName, invalid: false })

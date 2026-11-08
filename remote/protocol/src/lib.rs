@@ -114,6 +114,10 @@ pub enum ServerMessage {
         /// None=普通连接；旧桌面不下发（serde default）
         #[serde(default, skip_serializing_if = "Option::is_none")]
         download_scope: Option<DownloadScope>,
+        /// 目标电脑操作系统（`std::env::consts::OS`：windows/macos/linux）。
+        /// 手机键盘 UI 据此显示平台键名（Alt/Option、Win/Cmd）；旧桌面不下发
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        platform: Option<String>,
     },
     #[serde(rename = "hello.error")]
     HelloError { error: String },

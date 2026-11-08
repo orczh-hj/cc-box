@@ -862,6 +862,8 @@ impl RemoteState {
                         controller: None,
                         revision,
                         download_scope,
+                        // 手机键盘平台键名（Alt/Option、Win/Cmd）依据
+                        platform: Some(std::env::consts::OS.to_string()),
                     },
                 );
             }

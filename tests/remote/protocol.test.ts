@@ -107,6 +107,8 @@ describe('Remote_ProtocolContract_字段值保真', () => {
       connId: 7,
       controller: null,
       revision: 3,
+      // 目标电脑 OS：手机键盘平台键名依据（Alt/Option、Win/Cmd）
+      platform: 'windows',
     })
   })
 

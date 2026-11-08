@@ -80,6 +80,9 @@ export type ServerMessage =
       revision: number
       /** 票据连接：只能拉取该文件的下载分块；普通连接缺省（旧桌面端不下发） */
       downloadScope?: DownloadScope
+      /** 目标电脑操作系统（windows/macos/linux）；手机键盘平台键名依据，
+       *  旧桌面端不下发（缺省按 Windows 显示） */
+      platform?: string
     }
   | { type: 'hello.error'; error: string }
   | { type: 'sessions'; list: RemoteSession[]; revision: number }
@@ -225,6 +228,7 @@ export function parseServerMessage(raw: unknown): ServerMessage | null {
                 },
               }
             : {}),
+          ...(str(raw.platform) ? { platform: raw.platform } : {}),
         }
       }
       return null

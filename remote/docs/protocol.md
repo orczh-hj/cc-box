@@ -35,7 +35,7 @@
 
 | type | 字段 | 说明 |
 |---|---|---|
-| `hello.ok` | `ver, deviceName, connId, controller?, revision, downloadScope?` | 认证通过（桌面设备名）。`connId` = 本连接唯一标识；`controller` = **deprecated**（全局控制权已 per-session 化，服务端恒不发/缺省，旧端缓存 UI 解析为 null=无人持有即不遮罩，勿再消费）；`revision` = 状态版本基线（旧桌面端缺省 0）；`downloadScope` = 票据连接的下载范围 `{fileName, size}`（普通连接缺省） |
+| `hello.ok` | `ver, deviceName, connId, controller?, revision, downloadScope?, platform?` | 认证通过（桌面设备名）。`connId` = 本连接唯一标识；`controller` = **deprecated**（全局控制权已 per-session 化，服务端恒不发/缺省，旧端缓存 UI 解析为 null=无人持有即不遮罩，勿再消费）；`revision` = 状态版本基线（旧桌面端缺省 0）；`downloadScope` = 票据连接的下载范围 `{fileName, size}`（普通连接缺省）；`platform` = 目标电脑 OS（`windows`/`macos`/`linux`），手机键盘据此显示平台键名（Alt/Option、Win/Cmd），旧桌面端缺省按 Windows 显示 |
 | `hello.error` | `error` | 认证失败 |
 | `sessions` | `list: RemoteSession[], revision` | 运行中会话列表 + 状态版本快照（全量刷新基线）。多实例时为设备级聚合（按 `instanceId/instanceName` 分组，见 RemoteSession）；旧桌面/单实例缺实例字段，手机端降级平铺 |
 | `projects` | `list: RemoteProject[]` | 项目列表 |
