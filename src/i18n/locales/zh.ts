@@ -90,6 +90,8 @@ export default {
   quickKeyKeyboardHint: '显示/收起软键盘',
   vkbCloseHint: '收起键盘面板',
   vkSystemKeyHint: '系统键在终端中不可用',
+  vkImeHintWin: '全角/半角切换（Windows 输入法习惯：Shift+Space）',
+  vkImeHintMac: '全角/半角切换（macOS 输入法习惯：Caps Lock 切中英）',
 
   // 键盘面板（手机三模式：原生键盘 / 快捷键 / 电脑键盘）
   kbTabNative: '原生键盘',

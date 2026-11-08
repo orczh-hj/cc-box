@@ -6,6 +6,8 @@
   <div
     class="virtual-keyboard"
     @mousedown.prevent
+    @selectstart.prevent
+    @contextmenu.prevent
     @pointerdown="onPointerDown"
     @pointerup="pressedKey = ''"
     @pointercancel="pressedKey = ''"
@@ -85,7 +87,7 @@
         :class="keyClass(k)"
         :aria-label="k.key"
         :disabled="k.disabled"
-        :title="k.disabled ? t('vkSystemKeyHint') : ''"
+        :title="k.disabled ? t('vkSystemKeyHint') : k.key === 'ime' ? imeHint : ''"
         @click="handleKey(k)"
       >{{ k.label }}</button>
     </div>
@@ -102,6 +104,7 @@
 import { computed, reactive, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { vkeyToBytes, type VirtualKeyEvent } from '@/utils/virtual-keys'
+import { isPrintableAscii, toFullWidth } from '@/utils/fullwidth'
 
 const props = defineProps<{
   /** 目标电脑 OS（hello.ok platform）：决定 Alt/Option、Win/Cmd 键名 */
@@ -123,6 +126,10 @@ const sticky = reactive({ ctrl: false, alt: false, shift: false })
 
 /** CapsLock 本地状态（不发送字节） */
 const caps = ref(false)
+
+/** 全角模式（中/英全半角切换）：只转换可打印 ASCII 输出，控制键与方向/
+ *  功能键的转义序列不受影响。纯本地状态，不发送字节 */
+const fullwidth = ref(false)
 
 function onPointerDown(e: PointerEvent) {
   const btn = (e.target as HTMLElement).closest('.vk-btn')
@@ -188,15 +195,19 @@ const row3: VKey[] = [
 
 /** 底排（平台差异）：macOS 显示 Option(⌥)/Command(⌘)，其余 Alt/Win。
  *  Command/Win 在终端无标准序列（Windows 终端不接收 Win 键、macOS Cmd 组需
- *  Kitty 协议），故只占位不发送。 */
+ *  Kitty 协议），故只占位不发送。
+ *  「中/英」键 = 全角/半角输出切换（标签与提示按目标平台习惯）：
+ *  Windows 输入法用 Shift+Space 切全半角；macOS 用 Caps Lock 切中英。 */
 const bottomRow = computed<VKey[]>(() => {
   const altLabel = isMacTarget.value ? '⌥' : 'Alt'
   const sysLabel = isMacTarget.value ? '⌘' : 'Win'
   return [
-    { key: 'ctrl', label: 'Ctrl', units: 1.25, sticky: 'ctrl' },
+    // Ctrl 加宽、空格收窄（其余保持标准 1.25），单体宽度更均衡
+    { key: 'ctrl', label: 'Ctrl', units: 1.7, sticky: 'ctrl' },
     { key: 'win', label: sysLabel, units: 1.25, disabled: true },
     { key: 'alt', label: altLabel, units: 1.25, sticky: 'alt' },
-    { key: 'space', label: '', units: 6.25 },
+    { key: 'ime', label: fullwidth.value ? '中' : 'En', units: 1.25 },
+    { key: 'space', label: '', units: 3.2 },
     { key: 'alt', label: altLabel, units: 1.25, sticky: 'alt' },
     { key: 'win', label: sysLabel, units: 1.25, disabled: true },
     { key: 'left', label: '←', units: 1.25 },
@@ -206,17 +217,23 @@ const bottomRow = computed<VKey[]>(() => {
   ]
 })
 
-/** 按键视觉状态：按压、粘滞、Caps、禁用（所有排共用，含第二排 Caps 自身） */
+/** 「中/英」键提示：按目标平台展示对应的系统习惯（仅提示，切换由本键执行） */
+const imeHint = computed(() =>
+  isMacTarget.value ? t('vkImeHintMac') : t('vkImeHintWin'),
+)
+
+/** 按键视觉状态：按压、粘滞、Caps、全角、禁用（所有排共用） */
 function keyClass(k: VKey) {
   return {
     pressing: pressedKey.value === k.key,
     'vk-sticky': !!k.sticky && sticky[k.sticky],
     'vk-caps': k.key === 'caps' && caps.value,
+    'vk-ime': k.key === 'ime' && fullwidth.value,
     'vk-disabled': !!k.disabled,
   }
 }
 
-/** 统一按键处理：修饰键切粘滞、CapsLock 切本地状态、其余走映射发送。
+/** 统一按键处理：修饰键切粘滞、CapsLock/中英键切本地状态、其余走映射发送。
  *  所有排都必须走这里（曾因第三排 Shift / 第二排 Caps 直接调 press 导致
  *  粘滞与 Caps 不生效）。 */
 function handleKey(k: VKey) {
@@ -224,6 +241,10 @@ function handleKey(k: VKey) {
   if (k.sticky) return toggleSticky(k.sticky)
   if (k.key === 'caps') {
     caps.value = !caps.value
+    return
+  }
+  if (k.key === 'ime') {
+    fullwidth.value = !fullwidth.value
     return
   }
   press(k)
@@ -243,7 +264,10 @@ function press(k: VKey) {
   sticky.ctrl = false
   sticky.alt = false
   sticky.shift = false
-  if (bytes !== null) emit('send', bytes)
+  if (bytes === null) return
+  // 全角模式：仅转换可打印 ASCII（字母/数字/符号/空格），
+  // 控制字符与转义序列（\x03、\x1b[A 等）保持原样
+  emit('send', fullwidth.value && isPrintableAscii(bytes) ? toFullWidth(bytes) : bytes)
 }
 </script>
 
@@ -257,8 +281,20 @@ function press(k: VKey) {
   gap: 3px;
   padding: 4px;
   background: var(--bg-secondary);
+  /* 禁止选中/长按菜单：Safari 需 -webkit- 前缀，callout 阻止 iOS 长按弹菜单；
+     touch-action: manipulation 去掉双击缩放与双击选中 */
   user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+  touch-action: manipulation;
   -webkit-tap-highlight-color: transparent;
+}
+
+/* 子按钮同样禁用（部分 WebKit 版本不继承到 button 文本节点） */
+.vk-btn {
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
 }
 
 .vk-row {
@@ -308,9 +344,10 @@ function press(k: VKey) {
   color: var(--accent-gold);
 }
 
-/* 粘滞修饰键与 CapsLock 开启态 */
+/* 粘滞修饰键、CapsLock 与全角模式开启态 */
 .vk-btn.vk-sticky,
-.vk-btn.vk-caps {
+.vk-btn.vk-caps,
+.vk-btn.vk-ime {
   background: var(--selected-bg);
   color: var(--accent-gold);
   border-color: var(--accent-color);

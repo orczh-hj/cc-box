@@ -3,7 +3,7 @@
        原生键盘 = 系统软键盘（选择即唤出并收起面板）；快捷键 = Claude Code
        主会话快捷键列表（点按直发）；电脑键盘 = 与真实 PC 键盘同布局。
        容器 mousedown.prevent：点击面板不偷终端 textarea 焦点。 -->
-  <div class="keyboard-panel" @mousedown.prevent>
+  <div class="keyboard-panel" @mousedown.prevent @selectstart.prevent @contextmenu.prevent>
     <div class="kp-tabs">
       <button
         v-for="tab in tabs"
@@ -105,8 +105,21 @@ function switchTab(tab: KeyboardTab) {
   background: var(--bg-secondary);
   border-top: 1px solid var(--border-color);
   padding-bottom: var(--safe-area-bottom, 0px);
+  /* 禁止选中/长按菜单（Safari 需 -webkit- 前缀与 callout 抑制） */
   user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+  touch-action: manipulation;
   -webkit-tap-highlight-color: transparent;
+}
+
+/* 子元素同样禁用（按钮/tab 文本节点在部分 WebKit 版本不继承） */
+.kp-tab,
+.kp-item,
+.kp-close {
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
 }
 
 .kp-tabs {

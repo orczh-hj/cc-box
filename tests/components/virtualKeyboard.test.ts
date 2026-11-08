@@ -156,6 +156,59 @@ describe('VirtualKeyboard（电脑键盘）', () => {
     expect(alt[0].text()).toBe('Alt')
   })
 
+  // 中/英（全/半角）切换：开启后字母/数字/符号输出全角；控制键不受影响
+  it('VirtualKeyboard_FullwidthToggle_014', async () => {
+    const wrapper = mount(VirtualKeyboard)
+    const imeBtn = key(wrapper, 'ime')
+    expect(imeBtn.text()).toBe('En') // 默认半角
+
+    await imeBtn.trigger('click')
+    expect(imeBtn.text()).toBe('中')
+    expect(imeBtn.classes()).toContain('vk-ime')
+
+    await key(wrapper, 'a').trigger('click')
+    await key(wrapper, '1').trigger('click')
+    await key(wrapper, 'space').trigger('click')
+    const emitted = wrapper.emitted('send')!
+    expect(emitted[0]).toEqual(['ａ']) // U+FF41
+    expect(emitted[1]).toEqual(['１']) // U+FF11
+    expect(emitted[2]).toEqual(['　']) // U+3000 表意空格
+
+    // 控制键不转换：回车仍为 \r，方向键仍为转义序列
+    await key(wrapper, 'enter').trigger('click')
+    await key(wrapper, 'up').trigger('click')
+    expect(wrapper.emitted('send')![3]).toEqual(['\r'])
+    expect(wrapper.emitted('send')![4]).toEqual(['\x1b[A'])
+
+    // 关闭后恢复半角
+    await imeBtn.trigger('click')
+    expect(imeBtn.text()).toBe('En')
+    await key(wrapper, 'a').trigger('click')
+    expect(wrapper.emitted('send')![5]).toEqual(['a'])
+  })
+
+  // 全角 + Shift 符号：Shift+1 先得 '!'，再全角化为 '！'
+  it('VirtualKeyboard_FullwidthShiftSymbol_015', async () => {
+    const wrapper = mount(VirtualKeyboard)
+    await key(wrapper, 'ime').trigger('click')
+    await wrapper.findAll('button').filter(b => b.attributes('aria-label') === 'shift')[0].trigger('click')
+    await key(wrapper, '1').trigger('click')
+    expect(wrapper.emitted('send')![0]).toEqual(['！'])
+  })
+
+  // 平台提示：Win 显示 Shift+Space 习惯，Mac 显示 Caps Lock 习惯
+  it('VirtualKeyboard_ImeHintPerPlatform_016', () => {
+    const win = mount(VirtualKeyboard, { props: { platform: 'windows' } })
+    expect(win.findAll('button').filter(b => b.attributes('aria-label') === 'ime')[0]
+      .attributes('title')).toBe('vkImeHintWin')
+    win.unmount()
+
+    const mac = mount(VirtualKeyboard, { props: { platform: 'macos' } })
+    expect(mac.findAll('button').filter(b => b.attributes('aria-label') === 'ime')[0]
+      .attributes('title')).toBe('vkImeHintMac')
+    mac.unmount()
+  })
+
   // mousedown 被阻止（不偷终端 textarea 焦点）
   it('VirtualKeyboard_MousedownPrevented_013', async () => {
     const wrapper = mount(VirtualKeyboard)

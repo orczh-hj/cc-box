@@ -90,6 +90,8 @@ export default {
   quickKeyKeyboardHint: 'Show/hide soft keyboard',
   vkbCloseHint: 'Close keyboard panel',
   vkSystemKeyHint: 'System keys are not available in terminal',
+  vkImeHintWin: 'Fullwidth/halfwidth toggle (Windows IME habit: Shift+Space)',
+  vkImeHintMac: 'Fullwidth/halfwidth toggle (macOS IME habit: Caps Lock for CJK)',
 
   // Keyboard panel (mobile three modes: native / shortcuts / PC keyboard)
   kbTabNative: 'Native',
