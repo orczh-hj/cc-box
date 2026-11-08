@@ -47,6 +47,18 @@ describe('KeyboardPanel（手机键盘三模式）', () => {
     expect(emitted[2]).toEqual(['\x18\x0b'])
   })
 
+  // Esc 必须在列表中且位于常规控制组首位（Claude Code 文档：Esc 中断/关闭对话框），
+  // 高频键前置保证首屏可见
+  it('KeyboardPanel_EscPresent_012', async () => {
+    const wrapper = mount(KeyboardPanel, { props: { activeTab: 'shortcuts' } })
+    const escBtn = shortcutBtn(wrapper, '\x1b')
+    expect(escBtn.find('.kp-item-keys').text()).toBe('Esc')
+    const controlItems = wrapper.findAll('.kp-group')[0].findAll('.kp-item')
+    expect(controlItems[0].attributes('aria-label')).toBe('\x1b')
+    await escBtn.trigger('click')
+    expect(wrapper.emitted('send')![0]).toEqual(['\x1b'])
+  })
+
   // 功能名渲染为文案、键位作为副标题（不把组合键当主文案）
   it('KeyboardPanel_ShowsActionNameNotKeys_004', () => {
     const wrapper = mount(KeyboardPanel, { props: { activeTab: 'shortcuts' } })
