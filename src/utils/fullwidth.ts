@@ -13,11 +13,19 @@
 const ASCII_PRINTABLE_MIN = 0x21
 const ASCII_PRINTABLE_MAX = 0x7e
 
+/** 中文标点惯例覆盖表（优先于 +0xFEE0 平移）：
+ *  句号是 。(U+3002) 而非全角句点 ．(U+FF0E)；反斜杠按输入法惯例出顿号 、(U+3001) */
+const CJK_PUNCTUATION: Record<string, string> = {
+  '.': '。',
+  '\\': '、',
+}
+
 /** 半角 → 全角；非可打印 ASCII 原样返回 */
 export function toFullWidth(ch: string): string {
   if (ch.length !== 1) return ch
   const code = ch.charCodeAt(0)
   if (code === 0x20) return '　'
+  if (CJK_PUNCTUATION[ch]) return CJK_PUNCTUATION[ch]
   if (code >= ASCII_PRINTABLE_MIN && code <= ASCII_PRINTABLE_MAX) {
     return String.fromCharCode(code + 0xfee0)
   }

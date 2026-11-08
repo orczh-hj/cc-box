@@ -15,21 +15,29 @@ describe('toFullWidth（半角 → 全角）', () => {
     expect(toFullWidth('9')).toBe('９')
   })
 
-  // 符号：ASCII 0x21-0x7E 区间整体平移 0xFEE0
+  // 符号：ASCII 0x21-0x7E 区间整体平移 0xFEE0（. 与 \ 有中文标点覆盖，见 _005）
   it('FullWidth_Symbols_002', () => {
     expect(toFullWidth('!')).toBe('！') // 0x21 → 0xFF01
     expect(toFullWidth(',')).toBe('，') // 0x2C → 0xFF0C
-    expect(toFullWidth('.')).toBe('．') // 0x2E → 0xFF0E
     expect(toFullWidth('?')).toBe('？')
     expect(toFullWidth('_')).toBe('＿')
     expect(toFullWidth('~')).toBe('～') // 0x7E → 0xFF5E
-    expect(toFullWidth('\\')).toBe('＼')
   })
 
   // 空格 → 表意空格 U+3000
   it('FullWidth_Space_003', () => {
     expect(toFullWidth(' ')).toBe('　')
     expect(toFullWidth(' ').charCodeAt(0)).toBe(0x3000)
+  })
+
+  // 中文标点惯例：句号是 。(U+3002) 而非全角句点 ．(U+FF0E)；
+  // 反斜杠按输入法惯例出顿号 、(U+3001)
+  it('FullWidth_CjkPunctuation_005', () => {
+    expect(toFullWidth('.')).toBe('。')
+    expect(toFullWidth('.')).not.toBe('．')
+    expect(toFullWidth('\\')).toBe('、')
+    expect(toFullWidth('.').charCodeAt(0)).toBe(0x3002)
+    expect(toFullWidth('\\').charCodeAt(0)).toBe(0x3001)
   })
 
   // 控制字符 / 非 ASCII 原样返回（转义序列不能被全角化）
