@@ -362,13 +362,13 @@ function cancelRename() {
 }
 
 /* 二次确认态：按钮展开显示「确认删除？」文本（红色警示，时长文字同步隐藏防重叠）。
- * hover 必须一并显式声明红色：.action-btn:hover 会以 --text-primary 覆盖
- * （点击必处于 hover 态，被覆盖时看到的永远是黑色） */
+ * hover 必须一并显式声明颜色：.action-btn:hover 会以 --text-primary 覆盖
+ * （点击必处于 hover 态）；颜色直接用固定值（--danger-color 未定义过） */
 .action-btn.delete-btn.confirming,
 .action-btn.delete-btn.confirming:hover {
   width: auto;
-  padding: 0 10px 0 6px;
-  color: var(--danger-color, #e5484d);
+  padding: 0 4px 0 6px;
+  color: #e5484d;
   font-size: 11px;
   white-space: nowrap;
 }
