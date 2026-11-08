@@ -47,7 +47,7 @@ describe('toFullWidth（半角 → 全角）', () => {
     expect(toFullWidth('<')).toBe('《') // U+300A 书名号（Shift+,）
     expect(toFullWidth('>')).toBe('》') // U+300B（Shift+.）
     // 中文输入法下保持半角的键（不转全角）
-    for (const half of '~@#%&*+{}|') {
+    for (const half of '~@#%&*+{}|-`') {
       expect(toFullWidth(half)).toBe(half)
     }
   })
