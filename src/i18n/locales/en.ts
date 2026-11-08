@@ -84,16 +84,9 @@ export default {
   remoteRotateConfirm: 'Confirm? All paired devices will be disconnected',
 
   // Quick key bar (mobile breakpoint)
-  quickKeyEsc: 'Cancel / Esc',
-  quickKeyEnter: 'Enter (submit)',
-  quickKeyMode: 'Switch work mode (Shift+Tab)',
-  quickKeyNewline: 'Insert line break (Ctrl+J)',
-  quickKeyClearLine: 'Clear current input line (Ctrl+U)',
   quickKeySelectCopy: 'Select & Copy',
   quickKeyPaste: 'Paste',
   quickKeyNewlineShort: 'Line break',
-  quickKeyKeyboard: 'Keyboard',
-  quickKeyKeyboardHide: 'Hide',
   quickKeyKeyboardHint: 'Show/hide soft keyboard',
   vkbCloseHint: 'Close keyboard panel',
   vkSystemKeyHint: 'System keys are not available in terminal',

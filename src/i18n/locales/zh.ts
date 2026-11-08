@@ -84,16 +84,9 @@ export default {
   remoteRotateConfirm: '确认刷新？所有已配对设备将断开',
 
   // 快捷键工具条（手机断点）
-  quickKeyEsc: '取消/Esc',
-  quickKeyEnter: '回车（提交）',
-  quickKeyMode: '切换工作模式 (Shift+Tab)',
-  quickKeyNewline: '插入换行不提交 (Ctrl+J)',
-  quickKeyClearLine: '清空当前输入行 (Ctrl+U)',
   quickKeySelectCopy: '选择复制',
   quickKeyPaste: '粘贴',
   quickKeyNewlineShort: '换行',
-  quickKeyKeyboard: '键盘',
-  quickKeyKeyboardHide: '收起',
   quickKeyKeyboardHint: '显示/收起软键盘',
   vkbCloseHint: '收起键盘面板',
   vkSystemKeyHint: '系统键在终端中不可用',
