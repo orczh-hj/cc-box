@@ -8,21 +8,15 @@ vi.mock('vue-i18n', () => ({
 
 import QuickKeyBar from '@/components/QuickKeyBar.vue'
 
-/** label → 期望发送的终端转义序列（action 按钮 select/keyboard/vkeyboard 不在此列） */
-const EXPECT: Record<string, string> = {
-  'Esc': '\x1b',
-  'Enter': '\r',      // 回车：提交（与 Ctrl+J 换行不提交互补）
-  'Tab': '\t',        // Tab 补全
-  '⇧Tab': '\x1b[Z',   // Shift+Tab：Claude CLI 工作模式切换
-  'Ctrl+J': '\x0a',    // 换行不提交
-  'Ctrl+U': '\x15',    // 清空当前输入行
-  '↑': '\x1b[A',
-  '↓': '\x1b[B',
-  '←': '\x1b[D',
-  '→': '\x1b[C',
-  'Home': '\x1b[H',
-  'End': '\x1b[F',
-  'Del': '\x1b[3~',
+/** 工具条常驻高频键 → 期望终端序列（字面量，来自 VT100 规范） */
+const HOT_KEYS: Record<string, string> = {
+  esc: '\x1b',
+  enter: '\r',
+  newline: '\x0a', // 换行不提交（Ctrl+J），与 Enter 提交互补
+  up: '\x1b[A',
+  down: '\x1b[B',
+  left: '\x1b[D',
+  right: '\x1b[C',
 }
 
 describe('QuickKeyBar（手机快捷键工具条）', () => {
@@ -30,109 +24,63 @@ describe('QuickKeyBar（手机快捷键工具条）', () => {
     mockT.mockClear()
   })
 
-  // 键序：键盘开关 + 完整键盘（前两位图标按钮——tap 终端不再自动唤出软键盘）+
-  // 选择复制 action 按钮 + 字节键（Enter 在 Esc 后）；^C 已按用户决策移除
-  it('QuickKeyBar_RendersAllKeys_001', () => {
+  // 工具条 = 键盘面板入口（图标）+ 选择复制 + 粘贴 + 六个高频键
+  it('QuickKeyBar_RendersEntries_001', () => {
     const wrapper = mount(QuickKeyBar)
     const buttons = wrapper.findAll('button')
-    // 键盘按钮以图标呈现（无文本），aria-label 供无障碍/按压识别
+    expect(buttons).toHaveLength(3 + Object.keys(HOT_KEYS).length)
     expect(buttons[0].find('svg').exists()).toBe(true)
-    expect(buttons[0].attributes('aria-label')).toBe('quickKeyKeyboard')
-    const labels = buttons.map(b => b.text())
-    expect(labels).toEqual(['', '', 'quickKeySelectCopy', ...Object.keys(EXPECT)])
-    expect(labels).not.toContain('^C')
+    expect(buttons[0].attributes('aria-label')).toBe('keyboard')
+    expect(buttons[1].text()).toBe('quickKeySelectCopy')
+    expect(buttons[2].text()).toBe('quickKeyPaste')
   })
 
-  // 点击字节键发射对应转义序列（重点：模式切换、换行与清行）
-  it('QuickKeyBar_EmitsEscapeSequences_002', async () => {
+  // 键盘按钮 / 粘贴 / 选择复制：各自 emit 动作事件，不发字节
+  it('QuickKeyBar_ActionEmits_002', async () => {
     const wrapper = mount(QuickKeyBar)
-    const byteBtns = wrapper.findAll('button').filter(b => !b.classes().includes('qk-action'))
-    for (const btn of byteBtns) {
-      await btn.trigger('click')
-    }
-    const emitted = wrapper.emitted('send')!
-    expect(emitted).toHaveLength(Object.keys(EXPECT).length)
-    byteBtns.forEach((btn, i) => {
-      expect(emitted[i]).toEqual([EXPECT[btn.text()]])
-    })
-  })
-
-  // 「选择复制」action 按钮：不发字节，emit select（进入终端选择模式）
-  it('QuickKeyBar_SelectAction_003', async () => {
-    const wrapper = mount(QuickKeyBar)
-    const selectBtn = wrapper.findAll('button').find(b => b.text() === 'quickKeySelectCopy')
-    expect(selectBtn!.classes()).toContain('qk-action')
-    await selectBtn!.trigger('click')
+    const buttons = wrapper.findAll('button')
+    await buttons[0].trigger('click')
+    await buttons[1].trigger('click')
+    await buttons[2].trigger('click')
+    expect(wrapper.emitted('toggleKeyboard')).toHaveLength(1)
     expect(wrapper.emitted('select')).toHaveLength(1)
+    expect(wrapper.emitted('paste')).toHaveLength(1)
     expect(wrapper.emitted('send')).toBeUndefined()
   })
 
-  // 点击按键不动键盘状态：容器 mousedown preventDefault（不把焦点从终端
-  // textarea 移走——移走即 blur 收起软键盘），click 仍正常派发字节
-  it('QuickKeyBar_MousedownPrevented_KeyboardStateKept_004', async () => {
+  // 高频键直发字面序列（Esc / Enter / 四个方向键）
+  it('QuickKeyBar_HotKeysSendBytes_003', async () => {
     const wrapper = mount(QuickKeyBar)
-    // trigger 不执行浏览器默认行为，preventDefault 效果经监听观察
+    const hotBtns = wrapper.findAll('button').filter(b => b.attributes('aria-label') in HOT_KEYS)
+    expect(hotBtns).toHaveLength(Object.keys(HOT_KEYS).length)
+    for (const btn of hotBtns) {
+      await btn.trigger('click')
+    }
+    const emitted = wrapper.emitted('send')!
+    hotBtns.forEach((btn, i) => {
+      expect(emitted[i]).toEqual([HOT_KEYS[btn.attributes('aria-label')!]])
+    })
+  })
+
+  // 面板开启态键盘按钮常亮
+  it('QuickKeyBar_OpenHighlight_004', () => {
+    const closed = mount(QuickKeyBar, { props: { keyboardOpen: false } })
+    expect(closed.findAll('button')[0].classes()).not.toContain('qk-open')
+    closed.unmount()
+
+    const open = mount(QuickKeyBar, { props: { keyboardOpen: true } })
+    expect(open.findAll('button')[0].classes()).toContain('qk-open')
+    open.unmount()
+  })
+
+  // 点击按钮不转移焦点：容器 mousedown preventDefault
+  it('QuickKeyBar_MousedownPrevented_005', async () => {
+    const wrapper = mount(QuickKeyBar)
     let prevented = false
     wrapper.find('.quick-key-bar').element.addEventListener('mousedown', (e) => {
       prevented = e.defaultPrevented
     })
-    const btn = wrapper.find('.qk-btn:not(.qk-action)')
-    await btn.trigger('mousedown')
+    await wrapper.findAll('button')[0].trigger('mousedown')
     expect(prevented).toBe(true)
-    await btn.trigger('click')
-    expect(wrapper.emitted('send')).toHaveLength(1)
-  })
-
-  // 按压高亮（:active 被 mousedown.prevent 吞掉后由 pointer 事件模拟）：
-  // pointerdown 落在按键上加 pressing，抬起/离开清除
-  it('QuickKeyBar_PressingHighlight_005', async () => {
-    const wrapper = mount(QuickKeyBar)
-    const btn = wrapper.findAll('.qk-btn:not(.qk-action)')[0]
-    await btn.trigger('pointerdown')
-    expect(btn.classes()).toContain('pressing')
-    await btn.trigger('pointerup')
-    expect(btn.classes()).not.toContain('pressing')
-  })
-
-  // 键盘开关（tap 终端不再自动唤出软键盘后的唯一显式入口）：图标按钮，
-  // 开启态 qk-open 高亮 + aria-label 变为「收起」；点击 emit toggle-keyboard，不发字节
-  it('QuickKeyBar_键盘开关_006', async () => {
-    const closed = mount(QuickKeyBar, { props: { keyboardOpen: false } })
-    const btnClosed = closed.findAll('button')[0]
-    expect(btnClosed.classes()).toContain('qk-action')
-    expect(btnClosed.classes()).not.toContain('qk-open')
-    expect(btnClosed.attributes('aria-label')).toBe('quickKeyKeyboard')
-    await btnClosed.trigger('click')
-    expect(closed.emitted('toggleKeyboard')).toHaveLength(1)
-    expect(closed.emitted('send')).toBeUndefined()
-    closed.unmount()
-
-    const open = mount(QuickKeyBar, { props: { keyboardOpen: true } })
-    const btnOpen = open.findAll('button')[0]
-    expect(btnOpen.classes()).toContain('qk-open')
-    expect(btnOpen.attributes('aria-label')).toBe('quickKeyKeyboardHide')
-    await btnOpen.trigger('click')
-    expect(open.emitted('toggleKeyboard')).toHaveLength(1)
-    open.unmount()
-  })
-
-  // 完整键盘唤出按钮（第二位图标按钮）：点击 emit toggleVkeyboard 不发字节；
-  // vkeyboardOpen 时 qk-open 常亮（与软键盘开关联动提示弹层已打开）
-  it('QuickKeyBar_虚拟键盘按钮_007', async () => {
-    const closed = mount(QuickKeyBar, { props: { vkeyboardOpen: false } })
-    const btnClosed = closed.findAll('button')[1]
-    expect(btnClosed.find('svg').exists()).toBe(true)
-    expect(btnClosed.classes()).toContain('qk-action')
-    expect(btnClosed.classes()).not.toContain('qk-open')
-    expect(btnClosed.attributes('aria-label')).toBe('quickKeyVkb')
-    await btnClosed.trigger('click')
-    expect(closed.emitted('toggleVkeyboard')).toHaveLength(1)
-    expect(closed.emitted('send')).toBeUndefined()
-    closed.unmount()
-
-    const open = mount(QuickKeyBar, { props: { vkeyboardOpen: true } })
-    const btnOpen = open.findAll('button')[1]
-    expect(btnOpen.classes()).toContain('qk-open')
-    open.unmount()
   })
 })

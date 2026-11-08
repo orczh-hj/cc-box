@@ -303,6 +303,10 @@ function createTerminal(tabId: string): Terminal {
   const fitAddon = new FitAddon()
   term.loadAddon(fitAddon)
 
+  // 手机系统软键盘的回车键文案：IME 默认显示「换行」，但 xterm 的回车实际
+  // 是提交消息（\r），设为 send 避免误导（换行改走工具条「换行」按钮 = Ctrl+J）
+  term.textarea?.setAttribute('enterkeyhint', 'send')
+
   // OSC 52 剪贴板：Claude CLI 自管选区，Cmd+C 由 CLI 发 OSC 52 序列、
   // 终端负责写入系统剪贴板——不装 addon 时复制静默失败
   loadOsc52Clipboard(term)
@@ -420,7 +424,10 @@ function isXtermTextarea(el: EventTarget | null): boolean {
 }
 
 function handleFocusIn(e: FocusEvent) {
-  if (isXtermTextarea(e.target)) softKeyboardOpen.value = true
+  if (!isXtermTextarea(e.target)) return
+  softKeyboardOpen.value = true
+  // 每次聚焦兜底设置：软键盘回车键文案「发送」（xterm/浏览器可能重置属性）
+  ;(e.target as HTMLElement).setAttribute('enterkeyhint', 'send')
 }
 
 function handleFocusOut(e: FocusEvent) {
@@ -1026,6 +1033,20 @@ async function cleanup() {
 // 向活跃终端发送文字。移动端一律不聚焦：软键盘只由工具条「键盘」按钮唤出
 // （gesturetap 兜底），侧边栏插入/工具条按键/拖放等程序化路径聚焦会突然弹出
 // 键盘打断操作；桌面无软键盘问题，保持聚焦（接管/插入后键盘输入立即可用）
+/** 手机工具条「粘贴」：读系统剪贴板 → term.paste（xterm 括号粘贴，
+ *  与桌面 Ctrl+V 同一路径；Android 软键盘自带粘贴按行拆 input 事件，
+ *  多段长文会丢换行，故不走原生粘贴） */
+async function pasteFromClipboard() {
+  const instance = currentInstance()
+  if (!instance?.term) return
+  try {
+    const text = await platformReadText()
+    if (text) instance.term.paste(text)
+  } catch {
+    /* 剪贴板不可用（权限/空）静默 */
+  }
+}
+
 function sendText(text: string, focusAfter = true) {
   const tabId = currentDisplayTabId.value
   if (!tabId) return
@@ -1297,6 +1318,8 @@ defineExpose({
   restartCurrentPty,
   cleanup,
   sendText,
+  /** 手机工具条「粘贴」（括号粘贴，与桌面 Ctrl+V 同路径） */
+  pasteFromClipboard,
   fitCurrentTerminal,
   refreshRemoteSessions,
   captureSnapshot,

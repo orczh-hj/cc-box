@@ -59,22 +59,26 @@
           :font-size="appStore.fontSize"
           @pty-started="handlePtyStarted"
         />
-        <!-- 快捷键工具条（仅手机：窄屏触屏）：键盘开关 + 完整键盘 + 选择复制 +
-             软键盘按不出的控制键；桌面鼠标设备窗口再窄也不渲染 -->
+        <!-- 快捷键工具条（仅手机：窄屏触屏）：键盘面板唯一入口 + 选择复制；
+             桌面鼠标设备窗口再窄也不渲染 -->
         <QuickKeyBar
           v-if="isMobile"
-          :keyboard-open="terminalRef?.softKeyboardOpen ?? false"
-          :vkeyboard-open="vkOpen"
-          @send="handleQuickKey"
+          :keyboard-open="panelOpen"
           @select="handleSelectCopy"
-          @toggle-keyboard="terminalRef?.toggleSoftKeyboard()"
-          @toggle-vkeyboard="toggleVkKeyboard"
-        />
-        <!-- 完整虚拟键盘弹层（手机低频兜底：修饰键/功能键/F 键，粘滞组合） -->
-        <VirtualKeyboard
-          v-if="isMobile && vkOpen"
+          @toggle-keyboard="toggleKeyboardPanel"
+          @paste="terminalRef?.pasteFromClipboard()"
           @send="handleQuickKey"
-          @close="vkOpen = false"
+        />
+        <!-- 键盘面板（三模式：原生键盘 / 快捷键 / 电脑键盘） -->
+        <KeyboardPanel
+          v-if="isMobile && panelOpen"
+          :active-tab="kbTab"
+          :platform="targetPlatform"
+          @update:active-tab="kbTab = $event"
+          @send="handleQuickKey"
+          @paste="terminalRef?.pasteFromClipboard()"
+          @native="handleNativeKeyboard"
+          @close="panelOpen = false"
         />
         <!-- 复制阅读器（手机复制部分内容）：buffer 快照 + 反渲染，系统原生长按选择 -->
         <TerminalCopyReader
@@ -105,12 +109,14 @@ import { useStatusMonitor } from '@/composables/useStatusMonitor'
 import { useToast } from '@/composables/useToast'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { isTauriEnv } from '@/api/platform'
+import { remoteTransport } from '@/api/remote-transport'
+import { platform as localPlatform } from '@/utils/platform'
 import { shouldOfferLaunchWindow } from '@/utils/remoteWindows'
 import TerminalHeader from './TerminalHeader.vue'
 import XTermTerminal from './XTermTerminal.vue'
 import IconBar from './IconBar.vue'
 import QuickKeyBar from './QuickKeyBar.vue'
-import VirtualKeyboard from './VirtualKeyboard.vue'
+import KeyboardPanel, { type KeyboardTab } from './KeyboardPanel.vue'
 import TerminalCopyReader from './TerminalCopyReader.vue'
 import { reflowSnapshot } from '@/utils/terminal-reflow'
 import SidebarPanel from './sidebar/SidebarPanel.vue'
@@ -153,14 +159,29 @@ function handleQuickKey(bytes: string) {
   terminalRef.value?.sendText(bytes)
 }
 
-/** 完整虚拟键盘开关：打开时若软键盘开着先收起（防弹层与软键盘双重挤压
- *  视口）；关闭不自动回弹软键盘（用户需要时经「键盘」开关再唤出） */
-const vkOpen = ref(false)
-function toggleVkKeyboard() {
-  vkOpen.value = !vkOpen.value
-  if (vkOpen.value && terminalRef.value?.softKeyboardOpen) {
-    terminalRef.value.toggleSoftKeyboard()
+/** 键盘面板开关（唯一键盘入口）：打开时收起已开的软键盘（防面板与软键盘
+ *  双重挤压视口）；关闭不自动回弹软键盘。打开时刷新目标电脑平台（决定
+ *  Alt/Option、Win/Cmd 键名——hello.ok 可能晚于首帧到达） */
+const panelOpen = ref(false)
+const kbTab = ref<KeyboardTab>('shortcuts')
+const targetPlatform = ref<string | null>(null)
+
+function refreshTargetPlatform() {
+  targetPlatform.value = isTauriEnv ? localPlatform : remoteTransport.remotePlatform
+}
+
+function toggleKeyboardPanel() {
+  panelOpen.value = !panelOpen.value
+  if (panelOpen.value) {
+    refreshTargetPlatform()
+    if (terminalRef.value?.softKeyboardOpen) terminalRef.value.toggleSoftKeyboard()
   }
+}
+
+/** 「原生键盘」tab 的选择：收起面板，唤出系统软键盘（未开时） */
+function handleNativeKeyboard() {
+  panelOpen.value = false
+  if (!terminalRef.value?.softKeyboardOpen) terminalRef.value?.toggleSoftKeyboard()
 }
 
 /** 「选择复制」按钮：抓 buffer 快照 → 反渲染 → 打开复制阅读器（系统原生长按选择） */
@@ -270,6 +291,9 @@ defineExpose({
 
 // 初始化
 onMounted(async () => {
+  // 目标电脑平台（键盘面板键名依据）：首次挂载先取一次，打开面板时再刷新
+  refreshTargetPlatform()
+
   // 监听快捷键事件（必须在 cwd 检查之前设置）
   window.addEventListener('terminal:newSession', handleNewSession)
   window.addEventListener('terminal:restartSession', handleRestartSession)

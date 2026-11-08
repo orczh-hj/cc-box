@@ -1,26 +1,23 @@
 <template>
-  <!-- mousedown.prevent：点击按键不转移焦点——键盘开着保持开（终端 textarea
-       不被 blur），关着不弹（按钮不获焦，click 仍正常触发）。:active 会被
-       preventDefault 吞掉，按压高亮由 pointer 事件模拟（pressedLabel） -->
+  <!-- mousedown.prevent：点击按键不转移焦点——键盘面板状态不受影响，终端
+       textarea 不 blur。:active 会被 preventDefault 吞掉，按压高亮由 pointer
+       事件模拟（pressedKey） -->
   <div
     class="quick-key-bar"
     @mousedown.prevent
     @pointerdown="onPointerDown"
-    @pointerup="pressedLabel = ''"
-    @pointercancel="pressedLabel = ''"
-    @pointerleave="pressedLabel = ''"
+    @pointerup="pressedKey = ''"
+    @pointercancel="pressedKey = ''"
+    @pointerleave="pressedKey = ''"
   >
     <button
-      v-for="k in keys"
-      :key="k.key"
-      class="qk-btn"
-      :class="{ 'qk-action': !!k.action, 'qk-open': (k.action === 'keyboard' && keyboardOpen) || (k.action === 'vkeyboard' && vkeyboardOpen), pressing: pressedLabel === k.label }"
-      :title="k.hint"
-      :aria-label="k.label"
-      @click="k.action === 'select' ? $emit('select') : k.action === 'keyboard' ? $emit('toggleKeyboard') : k.action === 'vkeyboard' ? $emit('toggleVkeyboard') : $emit('send', k.bytes!)"
+      class="qk-btn qk-action"
+      :class="{ 'qk-open': keyboardOpen }"
+      :title="t('quickKeyKeyboardHint')"
+      :aria-label="'keyboard'"
+      @click="$emit('toggleKeyboard')"
     >
       <svg
-        v-if="k.icon === 'keyboard'"
         class="qk-icon"
         viewBox="0 0 24 24"
         width="16"
@@ -35,76 +32,62 @@
         <rect x="2.5" y="6" width="19" height="12" rx="2" />
         <path d="M6 10h.5M9.5 10h.5M13 10h.5M16.5 10h.5M6 13h.5M9.5 13h.5M13 13h.5M16.5 13h.5M8 16h8" />
       </svg>
-      <template v-else>{{ k.label }}</template>
     </button>
+    <button
+      class="qk-btn qk-action"
+      :aria-label="'select'"
+      @click="$emit('select')"
+    >{{ t('quickKeySelectCopy') }}</button>
+    <button
+      class="qk-btn qk-action"
+      :aria-label="'paste'"
+      @click="$emit('paste')"
+    >{{ t('quickKeyPaste') }}</button>
+    <!-- 高频键常驻工具条（功能名/符号为主，不写组合键） -->
+    <button
+      v-for="k in hotKeys"
+      :key="k.key"
+      class="qk-btn"
+      :class="{ pressing: pressedKey === k.key }"
+      :aria-label="k.key"
+      @click="$emit('send', k.bytes)"
+    >{{ k.label }}</button>
   </div>
 </template>
 
 <script setup lang="ts">
 /**
- * 快捷键工具条（手机断点）：软键盘按不出的控制键，用按钮直发终端转义序列。
- * 「键盘」是软键盘唯一显式开关（tap 终端不自动唤出——点击阅读输出时误弹
- * 键盘打扰）；「选择复制」进入终端原生选择模式（拖选 + 复制走 xterm
- * selection）；Enter 提交，Shift+Tab 模式切换，Ctrl+J 换行不提交，
- * Ctrl+U 清行，Home/End 行首/行尾。action 按钮不发字节，经 TerminalView 转发。
+ * 快捷键工具条（手机断点）：键盘面板唯一入口（图标）+ 选择复制 + 粘贴
+ * + 高频键（Esc / Enter / 方向键）。次级与危险键（Ctrl+C 等）只在键盘面板
+ * 内，工具条不放误触即打断/退出 CLI 的直发键。
  */
-import { computed, ref } from 'vue'
+import { ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 
-const props = defineProps<{ keyboardOpen?: boolean; vkeyboardOpen?: boolean }>()
-defineEmits<{ send: [bytes: string]; select: []; toggleKeyboard: []; toggleVkeyboard: [] }>()
+defineProps<{ keyboardOpen?: boolean }>()
+defineEmits<{ select: []; toggleKeyboard: []; paste: []; send: [bytes: string] }>()
 
 const { t } = useI18n()
 
-/** 按压中的按键 label（补偿 :active 被 mousedown.prevent 吞掉的高亮反馈） */
-const pressedLabel = ref('')
+/** 工具条常驻高频键（标签用功能名/符号，不写组合键）。
+ *  换行 = Ctrl+J（\x0a）：插入换行不提交，与 Enter 提交互补 */
+const hotKeys = [
+  { key: 'esc', label: 'Esc', bytes: '\x1b' },
+  { key: 'enter', label: 'Enter', bytes: '\r' },
+  { key: 'newline', label: t('quickKeyNewlineShort'), bytes: '\x0a' },
+  { key: 'up', label: '↑', bytes: '\x1b[A' },
+  { key: 'down', label: '↓', bytes: '\x1b[B' },
+  { key: 'left', label: '←', bytes: '\x1b[D' },
+  { key: 'right', label: '→', bytes: '\x1b[C' },
+]
+
+/** 按压中的按键 aria（补偿 :active 被 mousedown.prevent 吞掉的高亮反馈） */
+const pressedKey = ref('')
 
 function onPointerDown(e: PointerEvent) {
   const btn = (e.target as HTMLElement).closest('.qk-btn')
-  // 图标按钮无文本：aria-label 与 k.label 同源，统一用它做按压高亮标识
-  pressedLabel.value = btn?.getAttribute('aria-label') ?? btn?.textContent ?? ''
+  pressedKey.value = btn?.getAttribute('aria-label') ?? ''
 }
-
-interface QuickKey {
-  key: string
-  label: string
-  bytes?: string
-  hint?: string
-  action?: 'select' | 'keyboard' | 'vkeyboard'
-  /** 图标按钮：渲染 SVG 而非文字（label 仅作 aria-label/按压高亮标识） */
-  icon?: 'keyboard'
-}
-
-const keys = computed<QuickKey[]>(() => [
-  {
-    key: 'keyboard',
-    label: props.keyboardOpen ? t('quickKeyKeyboardHide') : t('quickKeyKeyboard'),
-    action: 'keyboard',
-    icon: 'keyboard',
-    hint: t('quickKeyKeyboardHint'),
-  },
-  {
-    key: 'vkb',
-    label: t('quickKeyVkb'),
-    action: 'vkeyboard',
-    icon: 'keyboard',
-    hint: t('quickKeyVkbHint'),
-  },
-  { key: 'select', label: t('quickKeySelectCopy'), action: 'select' },
-  { key: 'esc', label: 'Esc', bytes: '\x1b', hint: t('quickKeyEsc') },
-  { key: 'enter', label: 'Enter', bytes: '\r', hint: t('quickKeyEnter') },
-  { key: 'tab', label: 'Tab', bytes: '\t' },
-  { key: 'stab', label: '⇧Tab', bytes: '\x1b[Z', hint: t('quickKeyMode') },
-  { key: 'ctrlj', label: 'Ctrl+J', bytes: '\x0a', hint: t('quickKeyNewline') },
-  { key: 'ctrlu', label: 'Ctrl+U', bytes: '\x15', hint: t('quickKeyClearLine') },
-  { key: 'up', label: '↑', bytes: '\x1b[A', hint: '' },
-  { key: 'down', label: '↓', bytes: '\x1b[B', hint: '' },
-  { key: 'left', label: '←', bytes: '\x1b[D', hint: '' },
-  { key: 'right', label: '→', bytes: '\x1b[C', hint: '' },
-  { key: 'home', label: 'Home', bytes: '\x1b[H', hint: '' },
-  { key: 'end', label: 'End', bytes: '\x1b[F', hint: '' },
-  { key: 'del', label: 'Del', bytes: '\x1b[3~', hint: '' },
-])
 </script>
 
 <style scoped>
@@ -116,7 +99,6 @@ const keys = computed<QuickKey[]>(() => [
   background: var(--bg-secondary);
   border-top: 1px solid var(--border-color);
   flex-shrink: 0;
-  /* 可扩展：键多时横向滚动，不压缩按钮 */
   overflow-x: auto;
   overscroll-behavior-x: contain;
   scrollbar-width: none;
@@ -150,7 +132,6 @@ const keys = computed<QuickKey[]>(() => [
   color: var(--accent-gold);
 }
 
-/* 动作按钮（键盘/选择复制）与字节键区分 */
 .qk-btn.qk-action {
   color: var(--text-primary);
   border-color: var(--accent-color);
@@ -161,7 +142,7 @@ const keys = computed<QuickKey[]>(() => [
   color: var(--accent-color);
 }
 
-/* 键盘开启态：常亮提示当前软键盘已唤出 */
+/* 键盘面板开启态：常亮提示面板已展开 */
 .qk-btn.qk-open {
   background: var(--selected-bg);
   color: var(--accent-gold);
