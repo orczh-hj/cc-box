@@ -94,7 +94,7 @@
  * 与 Shift 异或决定字母大小写）；普通键组装修饰 → vkeyToBytes → emit send，
  * 无论映射成败粘滞全部清空。
  */
-import { computed, reactive, ref } from 'vue'
+import { computed, onUnmounted, reactive, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { vkeyToBytes, SHIFT_SYMBOL, type VirtualKeyEvent } from '@/utils/virtual-keys'
 import { isPrintableAscii, toFullWidth } from '@/utils/fullwidth'
@@ -166,6 +166,10 @@ function onPointerEnd() {
   pressedKey.value = ''
   stopRepeat()
 }
+
+// 组件在长按连发期间被卸载（远端关窗/切视图）时停掉定时器，
+// 否则 80ms 连发 interval 永不停止并持续 emit
+onUnmounted(stopRepeat)
 
 /** click 入口：长按已连发时跳过补发的 click（否则松手会多删一次） */
 function onKeyClick(k: VKey) {

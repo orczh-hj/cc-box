@@ -61,7 +61,7 @@
  * + 高频键（Esc / Enter / 方向键）。次级与危险键（Ctrl+C 等）只在键盘面板
  * 内，工具条不放误触即打断/退出 CLI 的直发键。
  */
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 
 defineProps<{ keyboardOpen?: boolean }>()
@@ -70,8 +70,9 @@ defineEmits<{ select: []; toggleKeyboard: []; paste: []; send: [bytes: string] }
 const { t } = useI18n()
 
 /** 工具条常驻高频键（标签用功能名/符号，不写组合键）。
- *  换行 = Ctrl+J（\x0a）：插入换行不提交，与 Enter 提交互补 */
-const hotKeys = [
+ *  换行 = Ctrl+J（\x0a）：插入换行不提交，与 Enter 提交互补。
+ *  computed 保持 i18n 文案响应式（运行中切换语言即时更新） */
+const hotKeys = computed(() => [
   { key: 'esc', label: 'Esc', bytes: '\x1b' },
   { key: 'enter', label: 'Enter', bytes: '\r' },
   { key: 'newline', label: t('quickKeyNewlineShort'), bytes: '\x0a' },
@@ -79,7 +80,7 @@ const hotKeys = [
   { key: 'down', label: '↓', bytes: '\x1b[B' },
   { key: 'left', label: '←', bytes: '\x1b[D' },
   { key: 'right', label: '→', bytes: '\x1b[C' },
-]
+])
 
 /** 按压中的按键 aria（补偿 :active 被 mousedown.prevent 吞掉的高亮反馈） */
 const pressedKey = ref('')

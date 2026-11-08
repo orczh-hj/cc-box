@@ -21,6 +21,11 @@ App.vue
 │   ├── TerminalHeader.vue          # 终端标题栏（会话名 + 返回按钮；项目名由标签页 title 承载）
 │   └── XTermTerminal.vue           # xterm.js 终端核心
 │
+│   （以下仅手机端 ≤768px 触屏渲染，由 XTermTerminal/终端容器挂载）
+│   ├── QuickKeyBar.vue             # 快捷键工具条（Esc/方向键/换行 + 键盘开关/选择复制/粘贴）
+│   ├── KeyboardPanel.vue           # 软键盘容器（板块切换：字母/数字符号/电脑键盘）
+│   └── VirtualKeyboard.vue         # 软键盘核心（vkeyToBytes 映射、Shift 上档、全角切换、退格长按连发）
+│
 ├── WelcomeView.vue                 # 欢迎引导页（覆盖层，无收藏项目时）
 └── ProjectSelectView.vue           # 项目选择页（覆盖层，有收藏项目时）
 ```

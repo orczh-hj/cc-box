@@ -262,8 +262,11 @@ function handleRefresh() {
 const toast = useToast()
 
 async function handleDeleteHistory(sessionId: string) {
+  // 搜索结果可命中未加载进历史缓存的会话：带上条目自带 projectPath 作回退
+  const entry = sessionStore.historySessions.find(s => s.sessionId === sessionId)
+    ?? sessionStore.messageSearchResults.find(r => r.sessionId === sessionId)
   try {
-    await sessionStore.removeHistorySession(sessionId)
+    await sessionStore.removeHistorySession(sessionId, entry?.projectPath)
   } catch (err) {
     console.error('[SessionsPanel] delete history session failed:', err)
     toast.error(t('deleteHistorySessionFailed', { error: String(err) }), 6000)

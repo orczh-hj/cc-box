@@ -619,11 +619,13 @@ export const useSessionStore = defineStore('session', () => {
 
   /**
    * 删除历史会话：transcript 由后端移入 ~/.cc-box 回收站（30 天后自动清理）。
-   * 成功后从所有项目的缓存里移除该条目（同会话 id 理论上只在一个项目下）
+   * projectPath 可选回退：搜索结果可命中尚未加载进历史缓存的会话（后端按
+   * 项目目录定位 transcript，缓存反查不到时用调用方传入的 projectPath）。
+   * 成功后清理历史缓存、搜索结果与首页近期会话（transcript 已移走，
+   * 近期列表若不刷新，点恢复会对着不存在的 transcript 走 --resume）
    */
-  async function removeHistorySession(sessionId: string) {
-    // 缓存里查该条目拿 projectPath（后端按项目目录定位 transcript）
-    let projectPath = ''
+  async function removeHistorySession(sessionId: string, projectPathFallback?: string) {
+    let projectPath = projectPathFallback ?? ''
     for (const [path, list] of historyCacheMap) {
       if (list.some(s => s.sessionId === sessionId)) {
         projectPath = path
@@ -636,6 +638,8 @@ export const useSessionStore = defineStore('session', () => {
     for (const [path, list] of historyCacheMap) {
       historyCacheMap.set(path, list.filter(s => s.sessionId !== sessionId))
     }
+    messageSearchResults.value = messageSearchResults.value.filter(r => r.sessionId !== sessionId)
+    refreshRecentSessionsFromBackend()
   }
 
   // ---- 搜索 ----

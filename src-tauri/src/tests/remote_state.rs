@@ -970,6 +970,9 @@ async fn Rpc_RenameSession_广播sessionRenamed事件() {
 /// revision 随每次广播单调递增（前端过滤旧事件的依据）
 #[tokio::test]
 async fn RemoteState_StateChanged_广播半链与revision单调递增() {
+    // 全局 uplink 互斥：并行的成员模式测试 set_uplink 后，emit_state_changed
+    // 走成员分支不再本地广播，本测试 recv_timeout 超时（曾致测试套件间歇红）
+    let _uplink_lock = crate::tests::UPLINK_TEST_LOCK.lock();
     let state = RemoteState::new();
     let (_conn, mut rx) = setup_conn(&state);
 

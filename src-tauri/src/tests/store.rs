@@ -1688,3 +1688,20 @@ fn HistoryTrash_SweepExpired_002() {
     assert!(fresh.exists(), "刚回收的条目必须保留");
     assert!(junk.exists(), "无法解析前缀的无关文件不动");
 }
+
+// delete_history_session 的 session_id 形态校验：路径穿越形态直接拒绝，
+// 不会走到文件定位（安全防护分支）
+#[test]
+fn HistoryDelete_RejectTraversalSessionId_003() {
+    for evil in ["../evil", "..\\evil", "a/b", "a\\b", "a:b", ".hidden", ""] {
+        let err = crate::store::delete_history_session("/nonexistent-project", evil)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("Invalid session id"),
+            "session_id {:?} 应被拒绝，实际错误: {}",
+            evil,
+            err
+        );
+    }
+}
