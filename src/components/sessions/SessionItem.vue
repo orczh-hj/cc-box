@@ -336,8 +336,9 @@ function cancelRename() {
   flex-shrink: 0;
 }
 
-/* hover 才显示操作按钮——仅指针设备（触屏 hover:none 无悬停，常显） */
-@media (hover: hover) {
+/* hover 才显示操作按钮——仅精确指针设备（触屏无悬停常显；加 pointer:fine
+ * 防部分触屏设备误报 hover:hover 导致按钮在手机上被隐藏、无法触达） */
+@media (hover: hover) and (pointer: fine) {
   .session-item:not(:hover) .action-btn {
     opacity: 0;
     visibility: hidden;
@@ -348,15 +349,6 @@ function cancelRename() {
     opacity: 1;
     visibility: visible;
     transition: opacity 0.15s ease, visibility 0s;
-  }
-}
-
-/* 手机（≤768px）显式常显：触屏无 hover 可言，部分设备 WebView 还会误报
- * hover: hover（连 (hover: none) 分支都不命中），按宽度兜底最稳 */
-@media (max-width: 768px) {
-  .session-item .action-btn {
-    opacity: 1;
-    visibility: visible;
   }
 }
 
