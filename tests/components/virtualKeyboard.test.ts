@@ -59,13 +59,17 @@ describe('VirtualKeyboard（电脑键盘）', () => {
     expect(emitted[2]).toEqual(['\x1b[A'])
   })
 
-  // 电脑键盘按键显示大写字母，但无 Shift 时发送小写
+  // 电脑键盘默认显示小写字母，发送小写（Shift 时键帽与输出同步变大写）
   it('VirtualKeyboard_ShowsUpperSendsLower_003', async () => {
     const wrapper = mount(VirtualKeyboard)
     const cBtn = key(wrapper, 'c')
-    expect(cBtn.text()).toBe('C')
+    expect(cBtn.text()).toBe('c')
     await cBtn.trigger('click')
     expect(wrapper.emitted('send')![0]).toEqual(['c'])
+    await key(wrapper, 'shift').trigger('click')
+    expect(cBtn.text()).toBe('C')
+    await cBtn.trigger('click')
+    expect(wrapper.emitted('send')![1]).toEqual(['C'])
   })
 
   // 粘滞 Ctrl：高亮 → 点 c 发 '\x03' → 粘滞自动清（再点 a 发 'a'）
@@ -279,6 +283,53 @@ describe('VirtualKeyboard（电脑键盘）', () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+
+  // 键帽动态显示——Shift 粘滞时上档符号：, → <、. → >、/ → ?、[ → {、1 → !
+  it('VirtualKeyboard_ShiftChangesLabels_021', async () => {
+    const wrapper = mount(VirtualKeyboard)
+    expect(key(wrapper, ',').text()).toBe(',')
+    await key(wrapper, 'shift').trigger('click')
+    expect(key(wrapper, ',').text()).toBe('<')
+    expect(key(wrapper, '.').text()).toBe('>')
+    expect(key(wrapper, '/').text()).toBe('?')
+    expect(key(wrapper, '[').text()).toBe('{')
+    expect(key(wrapper, '1').text()).toBe('!')
+    // 字母大小写随 Shift 切换
+    expect(key(wrapper, 'a').text()).toBe('A')
+    await key(wrapper, 'x').trigger('click') // 组合后粘滞清空，恢复下档
+    expect(key(wrapper, ',').text()).toBe(',')
+    expect(key(wrapper, 'a').text()).toBe('a')
+  })
+
+  // 键帽动态显示——Caps 粘滞时字母大写（与 Shift 异或），符号不变
+  it('VirtualKeyboard_CapsChangesLetterLabels_022', async () => {
+    const wrapper = mount(VirtualKeyboard)
+    expect(key(wrapper, 'a').text()).toBe('a')
+    await key(wrapper, 'caps').trigger('click')
+    expect(key(wrapper, 'a').text()).toBe('A')
+    expect(key(wrapper, ',').text()).toBe(',') // Caps 不影响符号
+    await key(wrapper, 'shift').trigger('click')
+    expect(key(wrapper, 'a').text()).toBe('a') // Caps+Shift = 小写
+    await key(wrapper, 'shift').trigger('click') // 关闭 shift
+    await key(wrapper, 'caps').trigger('click') // 关闭 caps
+    expect(key(wrapper, 'a').text()).toBe('a')
+  })
+
+  // 键帽动态显示——全角模式：符号显示全角形态；与 Shift 叠加显示全角上档
+  it('VirtualKeyboard_FullwidthChangesLabels_023', async () => {
+    const wrapper = mount(VirtualKeyboard)
+    await key(wrapper, 'ime').trigger('click')
+    expect(key(wrapper, ',').text()).toBe('，')
+    expect(key(wrapper, 'a').text()).toBe('ａ')
+    expect(key(wrapper, '1').text()).toBe('１')
+    await key(wrapper, 'shift').trigger('click')
+    expect(key(wrapper, ',').text()).toBe('＜')
+    expect(key(wrapper, '1').text()).toBe('！')
+    expect(key(wrapper, 'a').text()).toBe('Ａ')
+    // 静态功能键不受影响
+    expect(key(wrapper, 'esc').text()).toBe('Esc')
+    expect(key(wrapper, 'enter').text()).toBe('Enter')
   })
 
   // mousedown 被阻止（不偷终端 textarea 焦点）

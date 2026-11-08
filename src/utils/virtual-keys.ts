@@ -19,8 +19,10 @@ export interface VirtualKeyEvent {
   shift?: boolean
 }
 
-/** 数字排 + 常用符号排的 Shift 符号表（美式 QWERTY） */
-const SHIFT_SYMBOL: Record<string, string> = {
+/** 数字排 + 常用符号排的 Shift 符号表（美式 QWERTY；mac 与 win 的 US 布局
+ *  在这些键位上一致，差异仅在 Option/Alt 组合——本表不涉及）。
+ *  导出供 VirtualKeyboard 键帽动态显示使用 */
+export const SHIFT_SYMBOL: Record<string, string> = {
   '1': '!', '2': '@', '3': '#', '4': '$', '5': '%',
   '6': '^', '7': '&', '8': '*', '9': '(', '0': ')',
   '-': '_', '=': '+', '[': '{', ']': '}', '\\': '|',

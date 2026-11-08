@@ -6,6 +6,7 @@
        已精简：F1-F12（Claude Code 无绑定）、Win/⌘（终端无序列）、右 Alt（重复）。 -->
   <div
     class="virtual-keyboard"
+    :class="{ 'vk-fw': fullwidth }"
     @mousedown.prevent
     @selectstart.prevent
     @contextmenu.prevent
@@ -24,7 +25,7 @@
         :aria-label="k.key"
         @pointerdown="onPointerDown(k)"
         @click="onKeyClick(k)"
-      >{{ k.label }}</button>
+      >{{ keyLabel(k) }}</button>
     </div>
 
     <!-- 第一排 -->
@@ -38,7 +39,7 @@
         :aria-label="k.key"
         @pointerdown="onPointerDown(k)"
         @click="onKeyClick(k)"
-      >{{ k.label }}</button>
+      >{{ keyLabel(k) }}</button>
     </div>
 
     <!-- 第二排 -->
@@ -52,7 +53,7 @@
         :aria-label="k.key"
         @pointerdown="onPointerDown(k)"
         @click="onKeyClick(k)"
-      >{{ k.label }}</button>
+      >{{ keyLabel(k) }}</button>
     </div>
 
     <!-- 第三排 -->
@@ -66,7 +67,7 @@
         :aria-label="k.key"
         @pointerdown="onPointerDown(k)"
         @click="onKeyClick(k)"
-      >{{ k.label }}</button>
+      >{{ keyLabel(k) }}</button>
     </div>
 
     <!-- 底排：修饰键 / 空格 / 方向键 -->
@@ -82,7 +83,7 @@
         :title="k.disabled ? t('vkSystemKeyHint') : k.key === 'ime' ? imeHint : ''"
         @pointerdown="onPointerDown(k)"
         @click="onKeyClick(k)"
-      >{{ k.label }}</button>
+      >{{ keyLabel(k) }}</button>
     </div>
   </div>
 </template>
@@ -96,7 +97,7 @@
  */
 import { computed, reactive, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { vkeyToBytes, type VirtualKeyEvent } from '@/utils/virtual-keys'
+import { vkeyToBytes, SHIFT_SYMBOL, type VirtualKeyEvent } from '@/utils/virtual-keys'
 import { isPrintableAscii, toFullWidth } from '@/utils/fullwidth'
 
 const props = defineProps<{
@@ -251,6 +252,20 @@ const imeHint = computed(() =>
   isMacTarget.value ? t('vkImeHintMac') : t('vkImeHintWin'),
 )
 
+/** 键帽动态显示：字符键随修饰状态切换形态（响应式——依赖 sticky/caps/fullwidth）。
+ *  - 字母：Shift/Caps 异或决定大小写（无修饰显示小写）
+ *  - 符号/数字：Shift 显示上档符号（, → <、1 → !；美式 QWERTY，mac/win 一致）
+ *  - 全角模式：当前形态再转全角字符（，＜！）；静态功能键（Esc/Tab/⌫…）不变 */
+function keyLabel(k: VKey): string {
+  const isLetter = /^[a-z]$/.test(k.key)
+  if (!isLetter && SHIFT_SYMBOL[k.key] === undefined) return k.label
+  const shift = sticky.shift !== (caps.value && isLetter)
+  let label: string
+  if (isLetter) label = shift ? k.key.toUpperCase() : k.key
+  else label = shift ? SHIFT_SYMBOL[k.key] : k.key
+  return fullwidth.value ? toFullWidth(label) : label
+}
+
 /** 按键视觉状态：按压、粘滞、Caps、全角、禁用（所有排共用） */
 function keyClass(k: VKey) {
   return {
@@ -358,6 +373,13 @@ function press(k: VKey) {
 .vk-btn.pressing {
   background: var(--selected-bg);
   color: var(--accent-gold);
+}
+
+/* 全角模式：字符键换 CJK 字体栈并略放大——全角字形以全宽方块呈现，
+   与半角等宽字形差异一目了然（功能键文字不受影响） */
+.virtual-keyboard.vk-fw .vk-btn {
+  font-family: 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', 'Noto Sans SC', sans-serif;
+  font-size: 12px;
 }
 
 /* 粘滞修饰键、CapsLock 与全角模式开启态 */
