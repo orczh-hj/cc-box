@@ -63,7 +63,7 @@
              桌面鼠标设备窗口再窄也不渲染 -->
         <QuickKeyBar
           v-if="isMobile"
-          :keyboard-open="panelOpen"
+          :keyboard-open="kbMode"
           @select="handleSelectCopy"
           @toggle-keyboard="toggleKeyboardPanel"
           @paste="terminalRef?.pasteFromClipboard()"
@@ -71,14 +71,13 @@
         />
         <!-- 键盘面板（三模式：原生键盘 / 快捷键 / 电脑键盘） -->
         <KeyboardPanel
-          v-if="isMobile && panelOpen"
+          v-if="isMobile && kbMode"
           :active-tab="kbTab"
           :platform="targetPlatform"
           @update:active-tab="kbTab = $event"
           @send="handleQuickKey"
           @paste="terminalRef?.pasteFromClipboard()"
-          @native="handleNativeKeyboard"
-          @close="panelOpen = false"
+          @close="toggleKeyboardPanel"
         />
         <!-- 复制阅读器（手机复制部分内容）：buffer 快照 + 反渲染，系统原生长按选择 -->
         <TerminalCopyReader
@@ -110,7 +109,6 @@ import { useToast } from '@/composables/useToast'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { isTauriEnv } from '@/api/platform'
 import { remoteTransport } from '@/api/remote-transport'
-import { platform as localPlatform } from '@/utils/platform'
 import { shouldOfferLaunchWindow } from '@/utils/remoteWindows'
 import TerminalHeader from './TerminalHeader.vue'
 import XTermTerminal from './XTermTerminal.vue'
@@ -159,30 +157,38 @@ function handleQuickKey(bytes: string) {
   terminalRef.value?.sendText(bytes)
 }
 
-/** 键盘面板开关（唯一键盘入口）：打开时收起已开的软键盘（防面板与软键盘
- *  双重挤压视口）；关闭不自动回弹软键盘。打开时刷新目标电脑平台（决定
- *  Alt/Option、Win/Cmd 键名——hello.ok 可能晚于首帧到达） */
-const panelOpen = ref(false)
-const kbTab = ref<KeyboardTab>('shortcuts')
+/** 键盘模式开关（唯一键盘入口）：打开即进入「原生键盘」——直接唤出系统
+ *  软键盘，顶部常驻三类型切换条（向日葵/ToDesk 同款交互）；切到快捷键/
+ *  电脑键盘时收起软键盘并展开对应面板，切回原生键盘反之。
+ *  打开时刷新目标电脑平台（hello.ok 可能晚于首帧到达） */
+const kbMode = ref(false)
+const kbTab = ref<KeyboardTab>('native')
 const targetPlatform = ref<string | null>(null)
 
 function refreshTargetPlatform() {
-  targetPlatform.value = isTauriEnv ? localPlatform : remoteTransport.remotePlatform
+  targetPlatform.value = remoteTransport.remotePlatform
+}
+
+/** 按 tab 同步系统软键盘：原生键盘开、其余模式关（面板与软键盘互斥，
+ *  避免双重挤压视口） */
+function syncSoftKeyboardForTab(tab: KeyboardTab) {
+  const open = terminalRef.value?.softKeyboardOpen ?? false
+  if (tab === 'native' && !open) terminalRef.value?.toggleSoftKeyboard()
+  else if (tab !== 'native' && open) terminalRef.value?.toggleSoftKeyboard()
 }
 
 function toggleKeyboardPanel() {
-  panelOpen.value = !panelOpen.value
-  if (panelOpen.value) {
+  kbMode.value = !kbMode.value
+  if (kbMode.value) {
+    kbTab.value = 'native' // 每次打开都默认原生键盘
     refreshTargetPlatform()
-    if (terminalRef.value?.softKeyboardOpen) terminalRef.value.toggleSoftKeyboard()
+    syncSoftKeyboardForTab('native')
+  } else if (terminalRef.value?.softKeyboardOpen) {
+    terminalRef.value.toggleSoftKeyboard()
   }
 }
 
-/** 「原生键盘」tab 的选择：收起面板，唤出系统软键盘（未开时） */
-function handleNativeKeyboard() {
-  panelOpen.value = false
-  if (!terminalRef.value?.softKeyboardOpen) terminalRef.value?.toggleSoftKeyboard()
-}
+watch(kbTab, (tab) => syncSoftKeyboardForTab(tab))
 
 /** 「选择复制」按钮：抓 buffer 快照 → 反渲染 → 打开复制阅读器（系统原生长按选择） */
 function handleSelectCopy() {

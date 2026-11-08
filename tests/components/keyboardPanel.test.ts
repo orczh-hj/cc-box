@@ -62,14 +62,19 @@ describe('KeyboardPanel（手机键盘三模式）', () => {
     expect(item.find('.kp-item-keys').text()).toBe('⌥P')
   })
 
-  // 原生键盘 tab：点击即直接 emit native（收起面板 + 唤出系统键盘），
-  // 不再要求第二次点「打开系统键盘」按钮
-  it('KeyboardPanel_NativeTabDirect_006', async () => {
+  // 原生键盘 tab：只切状态（系统软键盘由 TerminalView 监听 activeTab 开合），
+  // 且原生模式下不渲染快捷键/电脑键盘内容
+  it('KeyboardPanel_NativeTab_006', async () => {
     const wrapper = mount(KeyboardPanel, { props: { activeTab: 'shortcuts' } })
     await wrapper.findAll('.kp-tab')[0].trigger('click')
-    expect(wrapper.emitted('native')).toHaveLength(1)
-    expect(wrapper.emitted('update:activeTab')).toBeUndefined()
+    expect(wrapper.emitted('update:activeTab')![0]).toEqual(['native'])
     expect(wrapper.emitted('send')).toBeUndefined()
+
+    const native = mount(KeyboardPanel, { props: { activeTab: 'native' } })
+    expect(native.findAll('.kp-tab')).toHaveLength(3) // 切换条常驻
+    expect(native.find('.kp-shortcuts').exists()).toBe(false)
+    expect(native.find('.virtual-keyboard').exists()).toBe(false)
+    native.unmount()
   })
 
   // 电脑键盘 tab：渲染真实布局并透传 send

@@ -46,17 +46,17 @@
       :platform="platform"
       @send="$emit('send', $event)"
     />
-    <!-- 原生键盘 tab 点击即收起面板并唤出系统软键盘（switchTab 直接 emit native），
-         不会停在此分支；保留空占位仅为模板分支完整性 -->
+    <!-- 原生键盘：不渲染面板内容——系统软键盘由 TerminalView 按 tab 切换唤出/
+         收起。此时仅保留本面板顶部的三 tab 切换条（常驻在软键盘上方） -->
   </div>
 </template>
 
 <script setup lang="ts">
 /**
- * 键盘类型面板：三种模式（原生键盘 / 快捷键 / 电脑键盘）。
+ * 键盘类型切换条 + 面板（三种模式：原生键盘 / 快捷键 / 电脑键盘）。
  * 快捷键数据源 src/config/claude-shortcuts.ts（Claude Code 主会话完整清单）。
- * 「原生键盘」tab 不放软键盘本身——软键盘与面板同时显示会挤压视口，
- * 点击即收起面板并唤出系统软键盘（由 TerminalView 执行）。
+ * 「原生键盘」tab 不渲染面板内容——系统软键盘由 TerminalView 按 tab 唤出/收起，
+ * 本组件此时只显示顶部切换条（常驻于软键盘上方）。
  */
 import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
@@ -76,7 +76,6 @@ const emit = defineEmits<{
   send: [bytes: string]
   /** 粘贴：读系统剪贴板 + 括号粘贴（非字节直发） */
   paste: []
-  native: []
   close: []
 }>()
 
@@ -91,12 +90,7 @@ const tabs: Array<{ id: KeyboardTab; labelKey: string }> = [
 ]
 
 function switchTab(tab: KeyboardTab) {
-  // 原生键盘：选中即执行——收起面板 + 唤出系统软键盘（由 TerminalView 处理），
-  // 不再多一步「打开系统键盘」按钮
-  if (tab === 'native') {
-    emit('native')
-    return
-  }
+  // 纯状态切换；软键盘的开合由 TerminalView 监听 activeTab 变化处理
   emit('update:activeTab', tab)
 }
 </script>
