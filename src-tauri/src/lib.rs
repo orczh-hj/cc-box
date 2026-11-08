@@ -323,29 +323,35 @@ pub fn run(initial_dir: Option<String>, new_window: bool) {
                 }
             }
 
-            // 异步执行非关键初始化（不阻塞 UI 显示）
+            // 异步执行非关键初始化（不阻塞 UI 显示）。同步 fs IO 一律
+            // spawn_blocking：避免占用 async worker，也不互相推迟
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
-                // Plugin 文件部署（版本匹配时跳过）
-                if let Err(e) = hook_config::ensure_plugin_files() {
-                    log::warn!("Failed to create plugin files: {}. Hook monitoring may not work.", e);
+                // Plugin 文件部署（版本匹配时跳过）——同步 fs，放阻塞线程池；
+                // 完成后才起 Hook 服务器（CLI 启动即上报，越早可用越好）
+                match tauri::async_runtime::spawn_blocking(hook_config::ensure_plugin_files).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => log::warn!("Failed to create plugin files: {}. Hook monitoring may not work.", e),
+                    Err(e) => log::warn!("Plugin deploy task join failed: {}", e),
                 }
                 // Hook HTTP 服务器
                 hook_server::init(handle.clone()).await;
 
                 // 手动启动 GUI = 重新打开 CC-Box：清除上次“退出 CC-Box”的
                 // 持久抑制，恢复 Broker（托盘退出后没有 GUI 会再拉起它）。
-                broker::lifecycle::clear_user_quit();
+                // 同步读写盘，放阻塞线程池；完成后再连 Broker（顺序语义）
+                let _ = tauri::async_runtime::spawn_blocking(broker::lifecycle::clear_user_quit).await;
                 // GUI 不再直接持有 LAN/relay：连接/拉起本机 Broker，注册为成员。
                 // 即使远程开关为关也保持 Broker 在线（托盘可再次开启远程）。
                 broker_client::spawn_connect_loop();
 
-                // 文件传输清理：启动扫一次（删崩溃遗留的上传临时文件）
-                file_transfer::startup_cleanup();
-                // 历史会话回收站清理：超过 30 天的 transcript 彻底删除。
-                // 非关键操作，异步执行避免阻塞启动
+                // 文件传输清理：启动扫一次（删崩溃遗留的上传临时文件）。
+                // canonicalize + 扫全部已知项目目录，是启动期最重的同步 IO
+                tauri::async_runtime::spawn_blocking(file_transfer::startup_cleanup);
+                // 历史会话回收站清理：超过 30 天的 transcript 彻底删除
                 tauri::async_runtime::spawn_blocking(crate::store::sweep_trash);
-                // 定时 TTL sweep（惰性清理的兜底：连接断开后再无 file_ 命令触发）
+                // 定时 TTL sweep（惰性清理的兜底：连接断开后再无 file_ 命令触发；
+                // 内存 retain + 少量删文件，开销可忽略，直接在 async 上下文跑）
                 tauri::async_runtime::spawn(async move {
                     let mut interval =
                         tokio::time::interval(std::time::Duration::from_secs(600));
