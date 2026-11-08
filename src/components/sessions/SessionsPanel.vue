@@ -290,7 +290,10 @@ onUnmounted(() => {
   height: 100%;
 }
 
-.sessions-panel :deep(.action-btn:not(.with-hint)) {
+/* :not(.confirming) 排除历史会话删除的二次确认态：该态在 SessionItem 内
+ * 展开「确认删除？」文本（width:auto + padding + 红色），这里的固定
+ * 24px/padding:0/文字色会以特异性平手 + 注入顺序靠后将其全部覆盖 */
+.sessions-panel :deep(.action-btn:not(.with-hint):not(.confirming)) {
   display: flex;
   align-items: center;
   justify-content: center;
@@ -308,7 +311,7 @@ onUnmounted(() => {
   height: 16px;
 }
 
-.sessions-panel :deep(.action-btn:not(.with-hint):hover) {
+.sessions-panel :deep(.action-btn:not(.with-hint):not(.confirming):hover) {
   color: var(--text-primary);
 }
 

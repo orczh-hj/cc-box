@@ -369,6 +369,7 @@ function cancelRename() {
   width: auto;
   padding: 0 4px 0 6px;
   color: #e5484d;
+  background: transparent;
   font-size: 11px;
   white-space: nowrap;
 }
