@@ -283,7 +283,7 @@ UI 已浏览器化（一套 UI 走桌面 Tauri / 宽屏浏览器 / 手机浏览�
 
 - **手机判定 = `(max-width: 768px) and (hover: none)`**：只按宽度会把桌面分屏右半屏误判为手机（底部 IconBar、快捷键工具条、设置顶部 tab 全冒出来）
 - **纯样式分支**写 `@media (max-width: 768px) and (hover: none)`；**结构分支**用 `useIsMobile()`（`MOBILE_MEDIA_QUERY`，与 CSS 一致）；纯内容宽度自适应（按钮换行等）仍可用纯宽度断点
-- **快捷键工具条（QuickKeyBar）只在 `isMobile` 渲染**——桌面端（鼠标设备）无论窗口多窄都不出现；「键盘」图标开关 + 「选择复制」同属工具条；**软键盘只由该图标开关唤出**（点击终端不弹键盘，滚动仍自动收起）
+- **快捷键工具条（QuickKeyBar）只在 `isMobile` 渲染**——桌面端（鼠标设备）无论窗口多窄都不出现；「键盘」图标开关 + 「选择复制」+「粘贴」同属工具条；**软键盘只由该图标开关唤出**（点击终端不弹键盘，滚动仍自动收起）；**手机粘贴必须走「粘贴」按钮**（`XTermTerminal.pasteFromClipboard` → `term.paste` 括号粘贴，与桌面 Ctrl+V 同路径）——Android 软键盘自带粘贴按行拆 `input` 事件，多段长文只剩一段（换行被 xterm 丢弃 + 逐段裸发）
 - 触屏设备所有 "hover 才显示" 的操作按钮必须包 `@media (hover: hover)`
 - 终端字号手机 = 桌面设置 × 0.9；底部栏用 `--safe-area-bottom`；软键盘经 `visualViewport.height` 驱动终端 fit
 - 触摸手势、复制阅读器、符号兜底、构建产物供给、会话身份链等细节 → [docs/development.md](docs/development.md)「响应式与触屏适配」「会话管理约定」

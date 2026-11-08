@@ -1038,7 +1038,8 @@ async function cleanup() {
  *  多段长文会丢换行，故不走原生粘贴） */
 async function pasteFromClipboard() {
   const instance = currentInstance()
-  if (!instance?.term) return
+  // 无底层进程（spawn 失败/CLI 已退出的占位实例）不粘贴
+  if (!instance?.term || !instance.ptyId) return
   try {
     const text = await platformReadText()
     if (text) instance.term.paste(text)
