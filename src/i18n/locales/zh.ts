@@ -387,6 +387,8 @@ export default {
   newBtn: '新建',
   restartBtn: '重启',
   refreshSessions: '刷新会话',
+  confirmDeleteSession: '确认删除？',
+  deleteHistorySessionFailed: '删除会话失败：{error}',
   newSessionTitle: '新建会话 (Alt+N)',
   restartSessionTitle: '重启会话 (Alt+R)',
   waitingForSessionId: '等待会话 ID...',
@@ -532,6 +534,8 @@ export default {
   importFailed: '导入失败',
   providerSaveFailed: '保存失败',
   providerSavedNeedActivate: '保存成功，请点击激活使其生效。',
+  providerActivated: '已激活「{name}」',
+  providerActivateFailed: '激活失败：{error}',
 
   // Provider edit panel
   editProviderTitle: '编辑 Provider: {name}',

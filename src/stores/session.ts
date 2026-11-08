@@ -4,6 +4,7 @@ import { uuid } from '@/utils/uuid'
 import { SESSION_NAME_PLACEHOLDER } from '@/utils/session-name'
 import {
   getSessions,
+  deleteHistorySession,
   ptyKill,
   searchSessionMessages
 } from '@/api/tauri'
@@ -616,6 +617,27 @@ export const useSessionStore = defineStore('session', () => {
     }
   }
 
+  /**
+   * 删除历史会话：transcript 由后端移入 ~/.cc-box 回收站（30 天后自动清理）。
+   * 成功后从所有项目的缓存里移除该条目（同会话 id 理论上只在一个项目下）
+   */
+  async function removeHistorySession(sessionId: string) {
+    // 缓存里查该条目拿 projectPath（后端按项目目录定位 transcript）
+    let projectPath = ''
+    for (const [path, list] of historyCacheMap) {
+      if (list.some(s => s.sessionId === sessionId)) {
+        projectPath = path
+        break
+      }
+    }
+    if (!projectPath) throw new Error(`history session not in cache: ${sessionId}`)
+
+    await deleteHistorySession(projectPath, sessionId)
+    for (const [path, list] of historyCacheMap) {
+      historyCacheMap.set(path, list.filter(s => s.sessionId !== sessionId))
+    }
+  }
+
   // ---- 搜索 ----
 
   function setSearchQuery(query: string) {
@@ -713,6 +735,7 @@ export const useSessionStore = defineStore('session', () => {
     // History
     loadHistorySessions,
     invalidateHistoryCache,
+    removeHistorySession,
 
     // Search
     setSearchQuery,

@@ -57,6 +57,7 @@
               :active-id="null"
               :snippet-map="snippetMap"
               @switch="(id) => $emit('resumeSession', id)"
+              @delete="handleDeleteHistory"
             />
           </div>
 
@@ -105,6 +106,7 @@
             :active-id="null"
             :snippet-map="snippetMap"
             @switch="(id) => $emit('resumeSession', id)"
+            @delete="handleDeleteHistory"
           />
         </div>
 
@@ -172,6 +174,7 @@ import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useSessionStore } from '@/stores/session'
 import { useAppStore } from '@/stores/app'
+import { useToast } from '@/composables/useToast'
 
 const { t } = useI18n()
 import { alt } from '@/utils/platform'
@@ -252,6 +255,18 @@ watch(searchQuery, (query) => {
 function handleRefresh() {
   if (appStore.cwd) {
     sessionStore.loadHistorySessions(appStore.cwd, true)
+  }
+}
+
+// 历史会话删除：原地二次确认由 SessionItem 承担，这里只执行
+const toast = useToast()
+
+async function handleDeleteHistory(sessionId: string) {
+  try {
+    await sessionStore.removeHistorySession(sessionId)
+  } catch (err) {
+    console.error('[SessionsPanel] delete history session failed:', err)
+    toast.error(t('deleteHistorySessionFailed', { error: String(err) }), 6000)
   }
 }
 

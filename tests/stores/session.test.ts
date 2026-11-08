@@ -24,6 +24,7 @@ vi.mock('@/api/tauri', () => ({
   ptyKill: vi.fn().mockResolvedValue(true),
   getSessionCount: vi.fn().mockResolvedValue(0),
   getSessions: vi.fn().mockResolvedValue([]),
+  deleteHistorySession: vi.fn().mockResolvedValue(undefined),
   searchSessionMessages: vi.fn().mockResolvedValue([]),
   // app.ts 使用（经 useAppStore 间接引入）
   getAppConfig: vi.fn().mockResolvedValue({}),
@@ -730,5 +731,36 @@ describe('resetRemoteTabs（切换设备）', () => {
     expect(store.remoteInstances).toEqual([])
     expect(store.remoteInstancesKnown).toBe(false)
     expect(kill).not.toHaveBeenCalled()
+  })
+})
+
+// ==================== removeHistorySession ====================
+
+describe('removeHistorySession', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+  })
+
+  // 删除成功：API 收到缓存条目所属项目路径，且该条目从缓存中消失
+  it('RemoveHistorySession_RemovesFromCache_001', async () => {
+    vi.mocked(getSessions).mockResolvedValue([
+      { sessionId: 's1', name: 'A', projectPath: '/p1', lastActiveAt: 1 },
+      { sessionId: 's2', name: 'B', projectPath: '/p1', lastActiveAt: 2 },
+    ] as any)
+    const { deleteHistorySession } = await import('@/api/tauri')
+    const store = useSessionStore()
+    await store.loadHistorySessions('/p1')
+    await store.removeHistorySession('s1')
+    expect(deleteHistorySession).toHaveBeenCalledWith('/p1', 's1')
+    expect(store.historySessions.map(s => s.sessionId)).toEqual(['s2'])
+  })
+
+  // 缓存里不存在的 id：不调 API 直接报错（防误删未知条目）
+  it('RemoveHistorySession_UnknownId_Throws_002', async () => {
+    const { deleteHistorySession } = await import('@/api/tauri')
+    vi.mocked(deleteHistorySession).mockClear()
+    const store = useSessionStore()
+    await expect(store.removeHistorySession('missing')).rejects.toThrow()
+    expect(deleteHistorySession).not.toHaveBeenCalled()
   })
 })

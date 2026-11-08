@@ -387,6 +387,8 @@ export default {
   newBtn: 'New',
   restartBtn: 'Restart',
   refreshSessions: 'Refresh sessions',
+  confirmDeleteSession: 'Confirm delete?',
+  deleteHistorySessionFailed: 'Failed to delete session: {error}',
   newSessionTitle: 'New session (Alt+N)',
   restartSessionTitle: 'Restart session (Alt+R)',
   waitingForSessionId: 'Waiting for session ID...',
@@ -532,6 +534,8 @@ export default {
   importFailed: 'Import failed',
   providerSaveFailed: 'Failed to save provider',
   providerSavedNeedActivate: 'Saved. Click Activate to apply the changes.',
+  providerActivated: 'Activated "{name}"',
+  providerActivateFailed: 'Activation failed: {error}',
 
   // Provider edit panel
   editProviderTitle: 'Edit Provider: {name}',

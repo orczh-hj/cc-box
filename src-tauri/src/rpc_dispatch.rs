@@ -186,6 +186,8 @@ registry! {
     "get_all_recent_sessions" => read() => |limit: Option<usize>| crate::commands::get_all_recent_sessions,
     "get_session_details" => read() => |project_path: String, session_id: String| crate::commands::get_session_details,
     "search_session_messages" => read() => |project_path: String, query: String, limit: Option<usize>| crate::commands::search_session_messages,
+    // 历史会话删除（transcript 移入回收站）：历史列表按需加载，无需广播 section
+    "delete_history_session" => write(None) => |project_path: String, session_id: String| crate::commands::delete_history_session,
     "get_project_config" => read() => |project_path: String| crate::commands::get_project_config,
     "save_last_project" => read() => |path: String| crate::commands::save_last_project,
     // 会话重命名双端同步（广播中转，session-renamed 事件回环应用）

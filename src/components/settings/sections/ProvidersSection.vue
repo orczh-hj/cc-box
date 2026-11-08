@@ -160,10 +160,14 @@ async function handleOpenUserConfig() {
 }
 
 async function handleActivate(id: string) {
+  // 激活（含重复激活同一 Provider）必须有可见反馈：此前静默成功，用户无法确认已生效
   try {
     await providersStore.activate(id)
+    const name = providersStore.providers.find(p => p.id === id)?.name
+    toast.success(t('providerActivated', { name: name ?? id }), 5000)
   } catch (err) {
     console.error('Activate failed:', err)
+    toast.error(t('providerActivateFailed', { error: String(err) }), 6000)
   }
 }
 

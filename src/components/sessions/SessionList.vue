@@ -21,12 +21,14 @@
             :last-active-at="item.lastActiveAt"
             :can-resume="item.canResume"
             :closable="closable && item.isTab"
+            :can-delete="item.canDelete"
             :snippet="item.snippet"
             :show-time="item.showTime"
             @switch="(id) => $emit('switch', id)"
             @rename="(id, name) => $emit('rename', id, name)"
             @restart="(id) => $emit('restart', id)"
             @close="(id) => $emit('close', id)"
+            @delete="(id) => $emit('delete', id)"
           />
         </template>
       </div>
@@ -44,12 +46,14 @@
       :last-active-at="item.lastActiveAt"
       :can-resume="item.canResume"
       :closable="closable && item.isTab"
+      :can-delete="item.canDelete"
       :snippet="item.snippet"
       :show-time="item.showTime"
       @switch="(id) => $emit('switch', id)"
       @rename="(id, name) => $emit('rename', id, name)"
       @restart="(id) => $emit('restart', id)"
       @close="(id) => $emit('close', id)"
+      @delete="(id) => $emit('delete', id)"
     />
   </div>
 </template>
@@ -73,6 +77,7 @@ defineEmits<{
   rename: [id: string, name: string]
   restart: [id: string]
   close: [id: string]
+  delete: [id: string]
 }>()
 
 interface ListItem {
@@ -83,6 +88,7 @@ interface ListItem {
   isTab: boolean
   lastActiveAt: number
   canResume?: boolean
+  canDelete?: boolean
   snippet?: string
   working?: boolean
   pending?: boolean
@@ -119,6 +125,7 @@ const items = computed<ListItem[]>(() => {
     lastActiveAt: s.lastActiveAt,
     snippet: snippets?.get(s.sessionId),
     showTime: true,
+    canDelete: true,
   }))
 
   return [...tabItems, ...historyItems]

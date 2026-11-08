@@ -480,6 +480,17 @@ pub async fn search_session_messages(
     crate::store::search_session_messages(&project_path, &query, limit).map_err(|e| e.to_string())
 }
 
+/// 删除历史会话：transcript 移入 ~/.cc-box/trash/sessions（30 天后自动清理）。
+/// 写命令不广播 state-changed（历史列表按需加载，无需跨端推送）
+#[cc_command(write)]
+#[tauri::command]
+pub async fn delete_history_session(
+    project_path: String,
+    session_id: String,
+) -> Result<(), String> {
+    crate::store::delete_history_session(&project_path, &session_id).map_err(|e| e.to_string())
+}
+
 /// 获取应用配置
 #[tauri::command]
 pub async fn get_app_config() -> Result<AppConfig, String> {

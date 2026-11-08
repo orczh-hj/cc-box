@@ -235,6 +235,10 @@ export const getAllRecentSessions = (limit?: number): Promise<SessionInfo[]> =>
 export const getSessionDetails = (projectPath: string, sessionId: string): Promise<SessionDetails | null> =>
   invoke<SessionDetails | null>('get_session_details', { projectPath, sessionId });
 
+/** 删除历史会话：transcript 移入 ~/.cc-box 回收站（30 天后自动清理） */
+export const deleteHistorySession = (projectPath: string, sessionId: string): Promise<void> =>
+  invoke<void>('delete_history_session', { projectPath, sessionId });
+
 export const searchSessionMessages = (
   projectPath: string,
   query: string,

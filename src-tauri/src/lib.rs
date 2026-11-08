@@ -342,6 +342,8 @@ pub fn run(initial_dir: Option<String>, new_window: bool) {
 
                 // 文件传输清理：启动扫一次（删崩溃遗留的上传临时文件）
                 file_transfer::startup_cleanup();
+                // 历史会话回收站清理：超过 30 天的 transcript 彻底删除
+                store::sweep_trash();
                 // 定时 TTL sweep（惰性清理的兜底：连接断开后再无 file_ 命令触发）
                 tauri::async_runtime::spawn(async move {
                     let mut interval =
@@ -394,6 +396,7 @@ pub fn run(initial_dir: Option<String>, new_window: bool) {
             commands::get_all_recent_sessions,
             commands::get_session_details,
             commands::search_session_messages,
+            commands::delete_history_session,
             commands::get_app_config,
             commands::update_app_config,
             commands::get_system_locale,

@@ -26,6 +26,14 @@
 | `~/.cc-box/providers.json` | **Provider 配置**（列表 + 通用配置 + 激活状态） |
 | `~/.cc-box/claude-plugin/` | Hook Plugin 文件（运行时生成） |
 | `~/.cc-box/logs/` | 日志文件 |
+| `~/.cc-box/trash/sessions/` | **历史会话回收站**（见下） |
+
+### 历史会话回收站 `~/.cc-box/trash/sessions/`
+
+删除历史会话（会话面板 hover 删除按钮）时 transcript 不直接删除：
+
+- **移入**：`delete_history_session` 把 `<sessionId>.jsonl`/`.txt` rename 进回收站，文件名编码删除时刻（`<millis>_<sessionId>.<ext>`）——rename 保留原 mtime（= 会话最后写入），不能作期限依据；运行中会话的 transcript 被写打开，Windows rename 失败直接报错
+- **清理**：保留 30 天；启动时（lib.rs setup）+ 每次删除后惰性 `sweep_trash`，按文件名毫秒前缀判断超期即彻底删除
 
 ### 项目内传输目录 `.cc-box-files/`（远程文件上传）
 
@@ -80,6 +88,7 @@
 | `get_all_recent_sessions` | 跨项目近期会话 |
 | `get_session_details` | 会话详情 |
 | `search_session_messages` | 搜索会话消息内容 |
+| `delete_history_session` | 删除历史会话（写命令不广播；transcript 移入 `~/.cc-box/trash/sessions/`，30 天后自动清理，见下方「历史会话回收站」） |
 | `get_app_config` | 获取应用配置 |
 | `update_app_config` | 更新应用配置（合并更新） |
 | `get_default_claude_options` | 获取默认启动选项 |

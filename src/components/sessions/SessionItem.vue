@@ -62,6 +62,20 @@
         <line x1="6" y1="6" x2="18" y2="18"/>
       </svg>
     </button>
+    <!-- 删除按钮（历史会话）：原地二次确认——首次点击变「确认删除？」，再点才执行 -->
+    <button
+      v-if="canDelete"
+      class="action-btn delete-btn"
+      :class="{ confirming: confirmingDelete }"
+      @click.stop="onDeleteClick"
+      :title="confirmingDelete ? '' : t('delete')"
+    >
+      <svg v-if="!confirmingDelete" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <polyline points="3 6 5 6 21 6"/>
+        <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+      </svg>
+      <span v-else class="confirm-text">{{ t('confirmDeleteSession') }}</span>
+    </button>
 
     <!-- 时间信息 -->
     <span v-if="showTime" class="time-info">{{ timeAgo }}</span>
@@ -69,7 +83,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, nextTick } from 'vue'
+import { ref, computed, nextTick, onUnmounted } from 'vue'
 import { useI18n } from 'vue-i18n'
 
 const { t } = useI18n()
@@ -87,6 +101,8 @@ const props = defineProps<{
   closable?: boolean
   snippet?: string
   showTime?: boolean
+  /** 历史会话删除按钮开关（手机与桌面一致显示，原地二次确认防误触） */
+  canDelete?: boolean
 }>()
 
 const dotClass = computed(() => {
@@ -103,12 +119,31 @@ const emit = defineEmits<{
   rename: [id: string, name: string]
   restart: [id: string]
   close: [id: string]
+  delete: [id: string]
 }>()
 
 const isRenaming = ref(false)
 const newName = ref('')
 const renameInputRef = ref<HTMLInputElement>()
 const inputWidth = ref('auto')
+
+// 删除原地二次确认：首次点击置位（按钮变「确认删除？」），3 秒未确认自动复位
+const confirmingDelete = ref(false)
+let confirmDeleteTimer: ReturnType<typeof setTimeout> | undefined
+
+function onDeleteClick() {
+  if (!confirmingDelete.value) {
+    confirmingDelete.value = true
+    clearTimeout(confirmDeleteTimer)
+    confirmDeleteTimer = setTimeout(() => { confirmingDelete.value = false }, 3000)
+    return
+  }
+  clearTimeout(confirmDeleteTimer)
+  confirmingDelete.value = false
+  emit('delete', props.id)
+}
+
+onUnmounted(() => clearTimeout(confirmDeleteTimer))
 
 // 计算时间差
 const timeAgo = computed(() => {
@@ -324,6 +359,15 @@ function cancelRename() {
 .action-btn:disabled {
   cursor: not-allowed;
   opacity: 0.4;
+}
+
+/* 二次确认态：按钮展开显示「确认删除？」文本（不显示红色） */
+.action-btn.delete-btn.confirming {
+  width: auto;
+  padding: 0 6px;
+  color: var(--text-primary);
+  font-size: 11px;
+  white-space: nowrap;
 }
 
 .time-info {

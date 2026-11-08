@@ -181,13 +181,21 @@ const error = ref('')
 const busy = ref(false)
 let baseline = ''
 
-const dirty = computed(() => (mode.value === 'json' ? jsonText.value : snapshot()) !== baseline)
+const dirty = computed(() => snapshot() !== baseline)
 
 const canSave = computed(() => (mode.value === 'json' ? !jsonError.value : true))
 
 function snapshot(): string {
-  return JSON.stringify(form.value)
+  return mode.value === 'json' ? jsonText.value : JSON.stringify(form.value)
 }
+
+// 模式切换不置脏：切换前内容相对基线干净时，baseline 平移到新模式的快照
+// （表单序列化与 JSON 文本两种口径形态不同，沿用旧 baseline 会恒不等 → 未修改也弹丢弃确认）
+watch(mode, (m, old) => {
+  if (m === old) return
+  const as = (x: 'form' | 'json') => (x === 'json' ? jsonText.value : JSON.stringify(form.value))
+  if (as(old) === baseline) baseline = as(m)
+})
 
 // 表单改动实时生成 JSON；JSON 失焦时校验并回填表单
 const { regenerate, commitFromText } = useEditorFormSync({

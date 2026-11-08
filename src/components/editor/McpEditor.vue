@@ -175,10 +175,18 @@ function currentConfigJson(): string | null {
   return config ? JSON.stringify(config, null, 2) : null
 }
 
-const dirty = computed(() => {
-  if (mode.value === 'json') return jsonText.value !== baseline
-  return (currentConfigJson() ?? '') + form.value.name !== baseline
+const dirty = computed(() => snapshot() !== baseline)
+
+// 模式切换不置脏：切换前内容相对基线干净时，baseline 平移到新模式的快照
+// （form 与 json 两种口径的字符串形态不同，沿用旧 baseline 会恒不等 → 未修改也弹丢弃确认）
+watch(mode, (m, old) => {
+  if (m === old) return
+  if (snapshotAs(old) === baseline) baseline = snapshotAs(m)
 })
+
+function snapshotAs(m: 'form' | 'json'): string {
+  return m === 'json' ? jsonText.value : (currentConfigJson() ?? '') + form.value.name
+}
 
 const canSave = computed(() => {
   if (mode.value === 'json') return !jsonError.value && !!jsonText.value.trim()

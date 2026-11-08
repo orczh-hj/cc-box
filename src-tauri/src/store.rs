@@ -1213,6 +1213,100 @@ pub fn get_session_details(project_path: &str, session_id: &str) -> Result<Optio
     }))
 }
 
+// ==================== 历史会话回收站 ====================
+
+/// 回收站保留期（秒）：默认一个月后自动删除
+const TRASH_RETENTION_SECS: u64 = 30 * 24 * 3600;
+
+/// 回收站目录：~/.cc-box/trash/sessions/
+fn trash_sessions_dir() -> Result<PathBuf> {
+    Ok(get_gui_config_dir()?.join("trash").join("sessions"))
+}
+
+/// 删除历史会话：transcript 文件移入 ~/.cc-box 回收站（不直接删除，
+/// 30 天后由 sweep_trash 清理）。运行中会话的 transcript 被写打开时
+/// Windows 上 rename 失败，直接报错（前端列表本就不给运行中条目删除按钮）
+pub fn delete_history_session(project_path: &str, session_id: &str) -> Result<()> {
+    // session_id 是 uuid 文件名：拒绝路径分隔符等危险形态（防路径穿越）
+    if session_id.is_empty()
+        || session_id.starts_with('.')
+        || session_id.contains(['/', '\\', ':'])
+    {
+        bail!("Invalid session id");
+    }
+    let file = get_project_dirs(project_path)
+        .iter()
+        .flat_map(|dir| {
+            [
+                dir.join(format!("{}.jsonl", session_id)),
+                dir.join(format!("{}.txt", session_id)),
+            ]
+        })
+        .find(|f| f.exists())
+        .with_context(|| format!("Session transcript not found: {}", session_id))?;
+
+    let trash = trash_sessions_dir()?;
+    fs::create_dir_all(&trash)?;
+    trash_move(&file, session_id, &trash)?;
+    sweep_trash();
+    Ok(())
+}
+
+/// 移入回收站（pub(crate) 供测试直接驱动任意目录）。
+/// 文件名编码删除时刻（毫秒前缀）：rename 保留原 mtime（= 会话最后写入），
+/// 不能作为回收期限依据
+pub(crate) fn trash_move(file: &Path, session_id: &str, trash: &Path) -> Result<()> {
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .context("System time before epoch")?
+        .as_millis();
+    let ext = file
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| format!(".{}", e))
+        .unwrap_or_default();
+    let dest = trash.join(format!("{}_{}{}", now_ms, session_id, ext));
+    fs::rename(file, &dest)
+        .with_context(|| format!("Failed to move {}: {}", file.display(), "file may be in use"))?;
+    log::info!(
+        "[store] history session '{}' moved to trash: {}",
+        session_id,
+        dest.display()
+    );
+    Ok(())
+}
+
+/// 清理回收站中超过保留期的文件（启动时 + 每次删除后惰性触发）。
+/// 删除时刻编码在文件名 `<millis>_<session_id>.<ext>` 前缀里
+pub fn sweep_trash() {
+    if let Ok(dir) = trash_sessions_dir() {
+        sweep_trash_in(&dir);
+    }
+}
+
+/// sweep_trash 的目录参数版（pub(crate) 供测试直接驱动任意目录）
+pub(crate) fn sweep_trash_in(dir: &Path) {
+    let Ok(now_ms) = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+    else {
+        return;
+    };
+    let cutoff = now_ms - (TRASH_RETENTION_SECS as u128) * 1000;
+    let Ok(entries) = fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let Some((ts, _)) = name.split_once('_') else { continue };
+        let Ok(ts) = ts.parse::<u128>() else { continue };
+        if ts < cutoff {
+            if let Err(e) = fs::remove_file(entry.path()) {
+                log::warn!("[store] trash sweep failed for {}: {}", name, e);
+            }
+        }
+    }
+}
+
 /// 会话搜索结果（含消息片段）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionSearchResult {

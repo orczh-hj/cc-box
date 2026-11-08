@@ -1639,3 +1639,52 @@ fn GetSessions_SkipSidechain_001() {
         &std::fs::read_to_string(&main_path).unwrap()
     ));
 }
+
+// ==================== 历史会话回收站 ====================
+
+// trash_move：transcript 移入回收站，原文件消失、目标名带毫秒前缀与扩展名
+#[test]
+fn HistoryTrash_MoveFile_001() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("11111111-2222-3333-4444-555555555555.jsonl");
+    std::fs::write(&src, "{}").unwrap();
+    let trash = dir.path().join("trash");
+    std::fs::create_dir_all(&trash).unwrap();
+
+    crate::store::trash_move(&src, "11111111-2222-3333-4444-555555555555", &trash).unwrap();
+
+    assert!(!src.exists());
+    let names: Vec<String> = std::fs::read_dir(&trash)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(names.len(), 1);
+    assert!(names[0].ends_with("_11111111-2222-3333-4444-555555555555.jsonl"));
+    // 毫秒时间戳前缀可解析（sweep 的期限依据）
+    let ts: u128 = names[0].split('_').next().unwrap().parse().unwrap();
+    assert!(ts > 1_600_000_000_000);
+}
+
+// sweep_trash_in：超期（>30 天）删除、未超期与无法解析前缀的文件保留
+#[test]
+fn HistoryTrash_SweepExpired_002() {
+    let dir = tempfile::tempdir().unwrap();
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
+    let old_ms = now_ms - (31u128 * 24 * 3600 * 1000);
+    let fresh_ms = now_ms - 1000;
+    let old = dir.path().join(format!("{}_old.jsonl", old_ms));
+    let fresh = dir.path().join(format!("{}_fresh.jsonl", fresh_ms));
+    let junk = dir.path().join("not-a-timestamp.jsonl");
+    for f in [&old, &fresh, &junk] {
+        std::fs::write(f, "{}").unwrap();
+    }
+
+    crate::store::sweep_trash_in(dir.path());
+
+    assert!(!old.exists(), "31 天前的条目应被清理");
+    assert!(fresh.exists(), "刚回收的条目必须保留");
+    assert!(junk.exists(), "无法解析前缀的无关文件不动");
+}
