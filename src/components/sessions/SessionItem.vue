@@ -77,8 +77,8 @@
       <span v-else class="confirm-text">{{ t('confirmDeleteSession') }}</span>
     </button>
 
-    <!-- 时间信息 -->
-    <span v-if="showTime" class="time-info">{{ timeAgo }}</span>
+    <!-- 时间信息（删除确认态隐藏：确认按钮展开为文本，避免与时长挤在一起） -->
+    <span v-if="showTime && !confirmingDelete" class="time-info">{{ timeAgo }}</span>
   </div>
 </template>
 
@@ -361,11 +361,11 @@ function cancelRename() {
   opacity: 0.4;
 }
 
-/* 二次确认态：按钮展开显示「确认删除？」文本（不显示红色） */
+/* 二次确认态：按钮展开显示「确认删除？」文本（红色警示，时长文字同步隐藏防重叠） */
 .action-btn.delete-btn.confirming {
   width: auto;
   padding: 0 6px;
-  color: var(--text-primary);
+  color: var(--danger-color, #e5484d);
   font-size: 11px;
   white-space: nowrap;
 }
