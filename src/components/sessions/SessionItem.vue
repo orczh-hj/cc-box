@@ -352,6 +352,15 @@ function cancelRename() {
   }
 }
 
+/* 手机（≤768px）显式常显：触屏无 hover 可言，部分设备 WebView 还会误报
+ * hover: hover（连 (hover: none) 分支都不命中），按宽度兜底最稳 */
+@media (max-width: 768px) {
+  .session-item .action-btn {
+    opacity: 1;
+    visibility: visible;
+  }
+}
+
 .action-btn:hover {
   background: var(--hover-bg);
   color: var(--text-primary);
