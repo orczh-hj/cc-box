@@ -324,7 +324,7 @@ describe('VirtualKeyboard（电脑键盘）', () => {
     expect(key(wrapper, 'a').text()).toBe('ａ')
     expect(key(wrapper, '1').text()).toBe('１')
     await key(wrapper, 'shift').trigger('click')
-    expect(key(wrapper, ',').text()).toBe('＜')
+    expect(key(wrapper, ',').text()).toBe('《') // Shift+, → 《（中文书名号）
     expect(key(wrapper, '1').text()).toBe('！')
     expect(key(wrapper, 'a').text()).toBe('Ａ')
     // 静态功能键不受影响

@@ -15,13 +15,12 @@ describe('toFullWidth（半角 → 全角）', () => {
     expect(toFullWidth('9')).toBe('９')
   })
 
-  // 符号：ASCII 0x21-0x7E 区间整体平移 0xFEE0（. 与 \ 有中文标点覆盖，见 _005）
+  // 符号：ASCII 0x21-0x7E 区间整体平移 0xFEE0（中文标点覆盖见 _005）
   it('FullWidth_Symbols_002', () => {
     expect(toFullWidth('!')).toBe('！') // 0x21 → 0xFF01
-    expect(toFullWidth(',')).toBe('，') // 0x2C → 0xFF0C
     expect(toFullWidth('?')).toBe('？')
-    expect(toFullWidth('_')).toBe('＿')
-    expect(toFullWidth('~')).toBe('～') // 0x7E → 0xFF5E
+    expect(toFullWidth('(')).toBe('（')
+    expect(toFullWidth(')')).toBe('）')
   })
 
   // 空格 → 表意空格 U+3000
@@ -30,14 +29,27 @@ describe('toFullWidth（半角 → 全角）', () => {
     expect(toFullWidth(' ').charCodeAt(0)).toBe(0x3000)
   })
 
-  // 中文标点惯例：句号是 。(U+3002) 而非全角句点 ．(U+FF0E)；
-  // 反斜杠按输入法惯例出顿号 、(U+3001)
+  // 中文标点惯例（用户实测中文输入法行为，优先于 +0xFEE0 平移）：
+  // ~！@#￥%……&*（）——+{}|：“《》？
   it('FullWidth_CjkPunctuation_005', () => {
-    expect(toFullWidth('.')).toBe('。')
-    expect(toFullWidth('.')).not.toBe('．')
-    expect(toFullWidth('\\')).toBe('、')
-    expect(toFullWidth('.').charCodeAt(0)).toBe(0x3002)
-    expect(toFullWidth('\\').charCodeAt(0)).toBe(0x3001)
+    // 有专用中文形式的键
+    expect(toFullWidth(',')).toBe('，') // U+FF0C（平移恰好一致）
+    expect(toFullWidth('.')).toBe('。') // U+3002 句号，非全角句点 ．
+    expect(toFullWidth('\\')).toBe('、') // U+3001 顿号
+    expect(toFullWidth('[')).toBe('【') // U+3010
+    expect(toFullWidth(']')).toBe('】') // U+3011
+    expect(toFullWidth(';')).toBe('；')
+    expect(toFullWidth("'")).toBe('‘') // U+2018 开单引号（与 “ 对称）
+    expect(toFullWidth('"')).toBe('“') // U+201C 开双引号
+    expect(toFullWidth('$')).toBe('￥') // U+FFE5 人民币符，非全角 ＄
+    expect(toFullWidth('^')).toBe('……') // U+2026 省略号
+    expect(toFullWidth('_')).toBe('——') // U+2014×2 破折号
+    expect(toFullWidth('<')).toBe('《') // U+300A 书名号（Shift+,）
+    expect(toFullWidth('>')).toBe('》') // U+300B（Shift+.）
+    // 中文输入法下保持半角的键（不转全角）
+    for (const half of '~@#%&*+{}|') {
+      expect(toFullWidth(half)).toBe(half)
+    }
   })
 
   // 控制字符 / 非 ASCII 原样返回（转义序列不能被全角化）

@@ -6,7 +6,6 @@
        已精简：F1-F12（Claude Code 无绑定）、Win/⌘（终端无序列）、右 Alt（重复）。 -->
   <div
     class="virtual-keyboard"
-    :class="{ 'vk-fw': fullwidth }"
     @mousedown.prevent
     @selectstart.prevent
     @contextmenu.prevent
@@ -375,12 +374,6 @@ function press(k: VKey) {
   color: var(--accent-gold);
 }
 
-/* 全角模式：字符键换 CJK 字体栈并略放大——全角字形以全宽方块呈现，
-   与半角等宽字形差异一目了然（功能键文字不受影响） */
-.virtual-keyboard.vk-fw .vk-btn {
-  font-family: 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', 'Noto Sans SC', sans-serif;
-  font-size: 12px;
-}
 
 /* 粘滞修饰键、CapsLock 与全角模式开启态 */
 .vk-btn.vk-sticky,
