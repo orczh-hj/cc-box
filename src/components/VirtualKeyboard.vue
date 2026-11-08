@@ -1,31 +1,19 @@
 <template>
-  <!-- 电脑键盘（手机端，与真实 PC 键盘同布局）：功能排 + 数字排 + 三排字母 +
-       底排（修饰键/空格/方向键）。粘滞 Ctrl/Alt/Shift/Win 可叠加、组合后自动
+  <!-- 电脑键盘（手机端，贴近真实 PC 键盘）：数字排（Esc 在最左）+ 三排字母 +
+       底排（修饰键/中英/空格/方向键）。粘滞 Ctrl/Alt/Shift 可叠加、组合后自动
        释放；CapsLock 本地切换（与 Shift 异或决定字母大小写）。按键经
-       vkeyToBytes 转 ANSI 序列 emit send。容器 mousedown.prevent 保持终端焦点。 -->
+       vkeyToBytes 转 ANSI 序列 emit send。容器 mousedown.prevent 保持终端焦点。
+       已精简：F1-F12（Claude Code 无绑定）、Win/⌘（终端无序列）、右 Alt（重复）。 -->
   <div
     class="virtual-keyboard"
     @mousedown.prevent
     @selectstart.prevent
     @contextmenu.prevent
-    @pointerdown="onPointerDown"
-    @pointerup="pressedKey = ''"
-    @pointercancel="pressedKey = ''"
-    @pointerleave="pressedKey = ''"
+    @pointerup="onPointerEnd"
+    @pointercancel="onPointerEnd"
+    @pointerleave="onPointerEnd"
   >
-    <!-- 功能排：Esc + F1-F12（横滚） -->
-    <div class="vk-row vk-fn-row">
-      <button
-        v-for="k in fnRow"
-        :key="k.key"
-        class="vk-btn"
-        :class="keyClass(k)"
-        :aria-label="k.key"
-        @click="handleKey(k)"
-      >{{ k.label }}</button>
-    </div>
-
-    <!-- 数字排 -->
+    <!-- 数字排（Esc 在最左） -->
     <div class="vk-row">
       <button
         v-for="k in rowNumber"
@@ -34,7 +22,8 @@
         :style="{ flexGrow: k.units }"
         :class="keyClass(k)"
         :aria-label="k.key"
-        @click="handleKey(k)"
+        @pointerdown="onPointerDown(k)"
+        @click="onKeyClick(k)"
       >{{ k.label }}</button>
     </div>
 
@@ -47,7 +36,8 @@
         :style="{ flexGrow: k.units }"
         :class="keyClass(k)"
         :aria-label="k.key"
-        @click="handleKey(k)"
+        @pointerdown="onPointerDown(k)"
+        @click="onKeyClick(k)"
       >{{ k.label }}</button>
     </div>
 
@@ -60,7 +50,8 @@
         :style="{ flexGrow: k.units }"
         :class="keyClass(k)"
         :aria-label="k.key"
-        @click="handleKey(k)"
+        @pointerdown="onPointerDown(k)"
+        @click="onKeyClick(k)"
       >{{ k.label }}</button>
     </div>
 
@@ -73,7 +64,8 @@
         :style="{ flexGrow: k.units }"
         :class="keyClass(k)"
         :aria-label="k.key"
-        @click="handleKey(k)"
+        @pointerdown="onPointerDown(k)"
+        @click="onKeyClick(k)"
       >{{ k.label }}</button>
     </div>
 
@@ -88,7 +80,8 @@
         :aria-label="k.key"
         :disabled="k.disabled"
         :title="k.disabled ? t('vkSystemKeyHint') : k.key === 'ime' ? imeHint : ''"
-        @click="handleKey(k)"
+        @pointerdown="onPointerDown(k)"
+        @click="onKeyClick(k)"
       >{{ k.label }}</button>
     </div>
   </div>
@@ -131,9 +124,56 @@ const caps = ref(false)
  *  功能键的转义序列不受影响。纯本地状态，不发送字节 */
 const fullwidth = ref(false)
 
-function onPointerDown(e: PointerEvent) {
-  const btn = (e.target as HTMLElement).closest('.vk-btn')
-  pressedKey.value = btn?.getAttribute('aria-label') ?? ''
+/** 可长按连发的键（当前仅退格：手机上逐字点删太慢） */
+const REPEATABLE_KEYS = new Set(['backspace'])
+/** 长按触发延迟与连发间隔（毫秒） */
+const REPEAT_DELAY = 300
+const REPEAT_INTERVAL = 80
+
+let repeatDelayTimer: number | null = null
+let repeatTimer: number | null = null
+/** 长按已连发时，抑制松开后浏览器补发的 click（避免多删一个） */
+let suppressNextClick = false
+
+function stopRepeat() {
+  if (repeatDelayTimer !== null) {
+    window.clearTimeout(repeatDelayTimer)
+    repeatDelayTimer = null
+  }
+  if (repeatTimer !== null) {
+    window.clearInterval(repeatTimer)
+    repeatTimer = null
+  }
+}
+
+function startRepeat(k: VKey) {
+  if (!REPEATABLE_KEYS.has(k.key)) return
+  stopRepeat()
+  repeatDelayTimer = window.setTimeout(() => {
+    suppressNextClick = true
+    press(k) // 长按首次连发（短按首发由 click 完成）
+    repeatTimer = window.setInterval(() => press(k), REPEAT_INTERVAL)
+  }, REPEAT_DELAY)
+}
+
+function onPointerDown(k: VKey) {
+  pressedKey.value = k.key
+  startRepeat(k)
+}
+
+/** 指针离开/抬起：清按压态并停止连发 */
+function onPointerEnd() {
+  pressedKey.value = ''
+  stopRepeat()
+}
+
+/** click 入口：长按已连发时跳过补发的 click（否则松手会多删一次） */
+function onKeyClick(k: VKey) {
+  if (suppressNextClick) {
+    suppressNextClick = false
+    return
+  }
+  handleKey(k)
 }
 
 function toggleSticky(mod: 'ctrl' | 'alt' | 'shift') {
@@ -147,20 +187,14 @@ interface VKey extends Partial<VirtualKeyEvent> {
   units: number
   /** 粘滞修饰键标识 */
   sticky?: 'ctrl' | 'alt' | 'shift'
-  /** 系统键（Win/Cmd）终端无标准序列：只占位不发送 */
+  /** 占位键（无发送功能）：当前布局已无此类键，机制保留供后续扩展 */
   disabled?: boolean
 }
 
-/** 功能排：Esc + F1-F12（横滚，units 不参与比例） */
-const fnRow: VKey[] = [
-  { key: 'esc', label: 'Esc', units: 1 },
-  ...Array.from({ length: 12 }, (_, i) => ({
-    key: `f${i + 1}`, label: `F${i + 1}`, units: 1,
-  })),
-]
-
-/** 数字排：` 1-0 - = ⌫ */
+/** 数字排：Esc ` 1-0 - = ⌫（Esc 并入数字排最左，对应真实键盘左上角位置；
+ *  Claude Code 不绑定任何 F 键，F1-F12 整排已移除） */
 const rowNumber: VKey[] = [
+  { key: 'esc', label: 'Esc', units: 1.6 },
   ...('`1234567890-='.split('') as string[]).map(c => ({ key: c, label: c, units: 1 })),
   { key: 'backspace', label: '⌫', units: 2 },
 ]
@@ -193,23 +227,18 @@ const row3: VKey[] = [
   { key: 'shift', label: 'Shift', units: 2.25, sticky: 'shift' },
 ]
 
-/** 底排（平台差异）：macOS 显示 Option(⌥)/Command(⌘)，其余 Alt/Win。
- *  Command/Win 在终端无标准序列（Windows 终端不接收 Win 键、macOS Cmd 组需
- *  Kitty 协议），故只占位不发送。
+/** 底排（手机精简）：Ctrl / Alt(⌥) / 中英 / 空格 / 方向键。
+ *  已移除 Win(⌘) 与右侧重复 Alt——前者终端无标准序列（纯占位），后者与
+ *  左 Alt 重复且手机单手操作够不到。
  *  「中/英」键 = 全角/半角输出切换（标签与提示按目标平台习惯）：
  *  Windows 输入法用 Shift+Space 切全半角；macOS 用 Caps Lock 切中英。 */
 const bottomRow = computed<VKey[]>(() => {
   const altLabel = isMacTarget.value ? '⌥' : 'Alt'
-  const sysLabel = isMacTarget.value ? '⌘' : 'Win'
   return [
-    // Ctrl 加宽、空格收窄（其余保持标准 1.25），单体宽度更均衡
     { key: 'ctrl', label: 'Ctrl', units: 1.7, sticky: 'ctrl' },
-    { key: 'win', label: sysLabel, units: 1.25, disabled: true },
-    { key: 'alt', label: altLabel, units: 1.25, sticky: 'alt' },
-    { key: 'ime', label: fullwidth.value ? '中' : 'En', units: 1.25 },
-    { key: 'space', label: '', units: 3.2 },
-    { key: 'alt', label: altLabel, units: 1.25, sticky: 'alt' },
-    { key: 'win', label: sysLabel, units: 1.25, disabled: true },
+    { key: 'alt', label: altLabel, units: 1.5, sticky: 'alt' },
+    { key: 'ime', label: fullwidth.value ? '中' : 'En', units: 1.5 },
+    { key: 'space', label: '', units: 6 },
     { key: 'left', label: '←', units: 1.25 },
     { key: 'up', label: '↑', units: 1.25 },
     { key: 'down', label: '↓', units: 1.25 },
@@ -302,21 +331,8 @@ function press(k: VKey) {
   gap: 3px;
 }
 
-.vk-fn-row {
-  overflow-x: auto;
-  overscroll-behavior-x: contain;
-  scrollbar-width: none;
-}
 
-.vk-fn-row::-webkit-scrollbar {
-  display: none;
-}
 
-.vk-fn-row .vk-btn {
-  flex: 0 0 auto;
-  min-width: 34px;
-  font-size: 10px;
-}
 
 .vk-btn {
   /* 同排按键按 units 比例分配宽度；min-width:0 允许压缩不撑破 */

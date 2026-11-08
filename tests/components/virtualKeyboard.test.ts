@@ -20,11 +20,12 @@ function key(wrapper: ReturnType<typeof mount>, label: string) {
 }
 
 describe('VirtualKeyboard（电脑键盘）', () => {
-  // 布局完整性：功能排、数字排、三排字母、底排修饰键与方向键
+  // 布局完整性：数字排（Esc 最左）、三排字母、底排修饰键与方向键。
+  // F1-F12 已移除：Claude Code 无 F 键绑定，整排占屏无收益
   it('VirtualKeyboard_RealLayout_001', () => {
     const wrapper = mount(VirtualKeyboard)
     for (const label of [
-      'esc', 'f1', 'f12',
+      'esc',
       '`', '1', '0', '-', '=', 'backspace',
       'tab', 'q', 'p', '[', ']', '\\',
       'caps', 'a', 'l', ';', "'", 'enter',
@@ -33,6 +34,17 @@ describe('VirtualKeyboard（电脑键盘）', () => {
     ]) {
       key(wrapper, label)
     }
+  })
+
+  // 已精简的键不应存在：F1-F12（无绑定）、Win/⌘（终端无序列）、右 Alt（重复）
+  it('VirtualKeyboard_RemovedKeys_017', () => {
+    const wrapper = mount(VirtualKeyboard)
+    const labels = wrapper.findAll('button').map(b => b.attributes('aria-label'))
+    for (const removed of ['f1', 'f5', 'f12', 'win']) {
+      expect(labels).not.toContain(removed)
+    }
+    // 仅保留一个 Alt（左侧）
+    expect(labels.filter(l => l === 'alt')).toHaveLength(1)
   })
 
   // 普通键直发：c → 'c'、enter → '\r'、up → '\x1b[A'（字面 ANSI 期望）
@@ -130,22 +142,16 @@ describe('VirtualKeyboard（电脑键盘）', () => {
     expect(wrapper.emitted('send')![0]).toEqual(['2'])
   })
 
-  // 平台差异：macOS 目标 Alt 显示 ⌥、Win 显示 ⌘ 且禁用；Windows 目标 Alt/Win
+  // 平台差异：macOS 目标 Alt 显示 ⌥，Windows 目标显示 Alt（Win 键已移除）
   it('VirtualKeyboard_PlatformLabels_011', () => {
     const mac = mount(VirtualKeyboard, { props: { platform: 'macos' } })
     const macAlt = mac.findAll('button').filter(b => b.attributes('aria-label') === 'alt')
     expect(macAlt[0].text()).toBe('⌥')
-    const macWin = mac.findAll('button').filter(b => b.attributes('aria-label') === 'win')
-    expect(macWin[0].text()).toBe('⌘')
-    expect(macWin[0].attributes('disabled')).toBeDefined()
     mac.unmount()
 
     const win = mount(VirtualKeyboard, { props: { platform: 'windows' } })
     const winAlt = win.findAll('button').filter(b => b.attributes('aria-label') === 'alt')
     expect(winAlt[0].text()).toBe('Alt')
-    const winKey = win.findAll('button').filter(b => b.attributes('aria-label') === 'win')
-    expect(winKey[0].text()).toBe('Win')
-    expect(winKey[0].attributes('disabled')).toBeDefined()
     win.unmount()
   })
 
@@ -207,6 +213,72 @@ describe('VirtualKeyboard（电脑键盘）', () => {
     expect(mac.findAll('button').filter(b => b.attributes('aria-label') === 'ime')[0]
       .attributes('title')).toBe('vkImeHintMac')
     mac.unmount()
+  })
+
+  // 长按退格连发：300ms 后开始，每 80ms 一次；松手立即停止且不补发 click
+  it('VirtualKeyboard_LongPressBackspaceRepeats_018', async () => {
+    vi.useFakeTimers()
+    try {
+      const wrapper = mount(VirtualKeyboard)
+      const bsBtn = key(wrapper, 'backspace')
+      await bsBtn.trigger('pointerdown')
+      expect(wrapper.emitted('send')).toBeUndefined() // 延迟期内未发送
+
+      vi.advanceTimersByTime(300)
+      expect(wrapper.emitted('send')).toHaveLength(1) // 首次连发
+
+      vi.advanceTimersByTime(160)
+      expect(wrapper.emitted('send')).toHaveLength(3) // +2 次
+
+      await wrapper.find('.virtual-keyboard').trigger('pointerup')
+      vi.advanceTimersByTime(500)
+      expect(wrapper.emitted('send')).toHaveLength(3) // 松手后停止
+
+      // 长按已连发：松手补发的 click 应被抑制（否则多删一个）
+      await bsBtn.trigger('click')
+      expect(wrapper.emitted('send')).toHaveLength(3)
+
+      // 每次连发的内容都是退格
+      for (const e of wrapper.emitted('send')!) expect(e).toEqual(['\x7f'])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  // 短按（未达长按阈值）：松手 + click 只发送一次，不触发连发
+  it('VirtualKeyboard_ShortPressBackspaceOnce_019', async () => {
+    vi.useFakeTimers()
+    try {
+      const wrapper = mount(VirtualKeyboard)
+      const bsBtn = key(wrapper, 'backspace')
+      await bsBtn.trigger('pointerdown')
+      vi.advanceTimersByTime(100) // 未到 300ms
+      await wrapper.find('.virtual-keyboard').trigger('pointerup')
+      await bsBtn.trigger('click')
+      expect(wrapper.emitted('send')).toEqual([['\x7f']])
+
+      vi.advanceTimersByTime(500) // 计时器应已清除，不再发送
+      expect(wrapper.emitted('send')).toHaveLength(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  // 非退格键不长按连发：按住字母只发 click 一次
+  it('VirtualKeyboard_NonRepeatableKeys_020', async () => {
+    vi.useFakeTimers()
+    try {
+      const wrapper = mount(VirtualKeyboard)
+      const aBtn = key(wrapper, 'a')
+      await aBtn.trigger('pointerdown')
+      vi.advanceTimersByTime(1000)
+      expect(wrapper.emitted('send')).toBeUndefined()
+      await wrapper.find('.virtual-keyboard').trigger('pointerup')
+      await aBtn.trigger('click')
+      expect(wrapper.emitted('send')).toEqual([['a']])
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   // mousedown 被阻止（不偷终端 textarea 焦点）
