@@ -63,6 +63,8 @@ const { toasts, remove } = useToast()
   border: 1px solid transparent;
   font-size: 13px;
   line-height: 1.5;
+  /* 不透明底（与 ConfirmDialog/EditorModal 弹窗一致），下方内容不透出 */
+  background: var(--bg-primary);
   box-shadow: 0 6px 20px rgba(0, 0, 0, 0.18);
 }
 
@@ -102,20 +104,17 @@ const { toasts, remove } = useToast()
 
 .toast-success {
   color: var(--status-success, #22c55e);
-  background: rgba(34, 197, 94, 0.12);
-  border-color: rgba(34, 197, 94, 0.35);
+  border-color: rgba(34, 197, 94, 0.45);
 }
 
 .toast-info {
   color: var(--accent-color, #4a9eff);
-  background: rgba(74, 158, 255, 0.12);
-  border-color: rgba(74, 158, 255, 0.35);
+  border-color: rgba(74, 158, 255, 0.45);
 }
 
 .toast-error {
   color: var(--error-color, #e5534b);
-  background: rgba(229, 83, 75, 0.12);
-  border-color: rgba(229, 83, 75, 0.35);
+  border-color: rgba(229, 83, 75, 0.45);
 }
 
 .toast-enter-active,
