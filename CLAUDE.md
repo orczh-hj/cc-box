@@ -134,7 +134,7 @@ npm run release -- --bump patch --notes "### Features\n- Add feature"
 ### 产品官网（速查）
 
 - **官网 = `website/`**（Vue 3 独立 Vite 站点，与主应用 `src/` 零共享、仅浅色主题），部署在 OSS bucket `cc-box` 根路径，**对外地址 `https://ccbox.orczh.top/`**；三入口 `index.html` / `docs.html` / `reference.html`，bundle 名 `main-*`/`docs-*`/`reference-*`
-- **参考文档数据源**：`website/content/claude-code-docs/` 由 `npm run sync:cc-docs` 本地更新（需代理；**只更新本地不部署**）
+- **参考文档数据源**：`website/content/claude-code-docs/` 由 `npm run sync:cc-docs` 本地更新（需代理；**只更新本地不部署**）；其中 3 处含 CC-Box 定制（安装 tab 首推、platforms 首位），**sync 后需按 `website/content/cc-docs-custom/README.md` 重放** → [docs/website.md](docs/website.md)「官方文档的 CC-Box 定制」
 - 版本号/下载链接**动态 fetch `/cc-box/latest.json`**——发版后官网自动更新，无需重新部署；改入口或域名需同步 sitemap 与 canonical
 - 命令：`npm run dev:site` / `build:site` / `deploy:site`（`--skip-build`、`--clean-assets` 可选）
 - **安全红线**：bucket 根下有更新通道 `cc-box/` 与依赖 `deps/`，绝不 `rm -r oss://cc-box/`；清旧 hash 产物只能 `--clean-assets`（上传前清 `assets/`，勿在上传后手动 rm）

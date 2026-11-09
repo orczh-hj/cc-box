@@ -31,7 +31,17 @@
 
 要安装 Claude Code，请打开终端并运行适用于您的系统的命令。如果您之前没有使用过终端，[终端指南](https://code.claude.com/docs/zh-CN/terminal-guide)会展示如何打开终端并粘贴命令。
 
-> [tab] 原生安装（推荐）
+> [tab] CC-Box（推荐）
+>
+> CC-Box 是一个开源的 Claude Code 多终端管理器，在原生终端体验之上提供多会话并行、跨会话状态总览和工作流辅助。安装 CC-Box 时可以自动为你安装 Claude Code CLI，无需手动运行安装命令。
+>
+> 从 [ccbox.orczh.top](https://ccbox.orczh.top/) 下载安装包（支持 Windows 和 macOS），安装后在应用内完成 Claude Code 的安装即可开始使用。
+>
+> > [!NOTE]
+> >
+> > CC-Box 是社区维护的第三方工具，与 Anthropic 无关。它直接运行 Claude Code CLI，输入行为与原生终端一致，可随时回到纯 CLI 使用。
+
+> [tab] 原生安装
 >
 > **macOS、Linux、WSL：**
 >

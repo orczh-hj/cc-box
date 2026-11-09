@@ -23,6 +23,15 @@
 - 正文用 `import.meta.glob('../content/claude-code-docs/**/*.md', {query:'?raw'})` **每篇一个懒加载 chunk**（勿全量内联）；渲染前 `stripLeadingBlockquote` 剥掉每篇开头的 `Documentation Index` 引用块
 - 路由 `#/<相对路径>`（非 `/` 开头 hash 视为页内锚点）；正文中 code.claude.com 文档链接与英文 slug 锚点均拦截为站内导航（`resolveAnchor` 按链接文字↔标题模糊兜底）；链接解析在 `lib/internalLinks.ts` 纯函数（**slug 允许多段嵌套路径**如 `plugins/mods/interface.md`，单段正则会漏拦截致跳外链，测试 tests/website/internalLinks.test.ts）
 
+### 官方文档的 CC-Box 定制
+
+`claude-code-docs/` **不是纯镜像**：三处文档含 CC-Box 定制内容（安装 tab 首推 CC-Box、平台表首位），目的是让查阅官方文档的读者看到 CC-Box。
+
+- 定制片段正本存 `website/content/cc-docs-custom/README.md`（与 `claude-code-docs/` 同级，sync 不触碰、不入文档清单/搜索语料）——**调整文案只改该文件**，再同步到镜像文件
+- 定制位置（3 处）：`getting-started/overview.md` 平台 tab 组首位（Terminal 之前）加「CC-Box」平台级 tab（与 Terminal/VS Code 平级）；`getting-started/quickstart.md` 安装 tab 组首位插「CC-Box（推荐）」tab（原「原生安装（推荐）」去「（推荐）」）；`getting-started/platforms-and-integrations/platforms.md` 平台表首行 + 相关资源→平台列表首条
+- **每次 `npm run sync:cc-docs` 全量同步会覆盖定制，同步后必须按存档重新应用**（锚点：overview 的 `> [tab] Terminal`、quickstart 的 `> [tab] 原生安装`、platforms 平台表 `| [CLI](...)` 行）
+- 写法约束：与官方文档语言风格一致、不过分夸大、标明「社区维护的第三方工具，与 Anthropic 无关」、链接统一 `https://ccbox.orczh.top/`（非 code.claude.com 域，不会被站内拦截）
+
 ## 全文搜索
 
 三页共用 `SiteHeader` 内的 `SearchBox`（**压缩语料 + 浏览器内暴力扫描，无倒排索引**）：

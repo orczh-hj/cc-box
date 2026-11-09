@@ -14,6 +14,7 @@ Claude Code 在任何地方运行相同的底层引擎，但每个界面都针�
 
 | 平台 | 最适合 | 您获得的功能 |
 | :- | :- | :- |
+| [CC-Box](https://ccbox.orczh.top/) | 终端工作流、并行管理多个 Claude Code 会话 | 原生终端体验、多会话并行、会话状态总览（第三方开源工具） |
 | [CLI](https://code.claude.com/docs/zh-CN/quickstart.md) | 终端工作流、脚本编写、远程服务器 | 完整功能集、[Agent SDK](https://code.claude.com/docs/zh-CN/headless.md)、[计算机使用](https://code.claude.com/docs/zh-CN/computer-use.md)在 macOS 上（Pro、Max 和 Ultra）、第三方提供商 |
 | [Desktop](https://code.claude.com/docs/zh-CN/desktop.md) | 视觉审查、并行会话、托管设置 | Diff 查看器、应用预览、Pro、Max 和 Ultra 上的[计算机使用](https://code.claude.com/docs/zh-CN/desktop.md#let-claude-use-your-computer)和 [Dispatch](https://code.claude.com/docs/zh-CN/desktop.md#sessions-from-dispatch) |
 | [VS Code](https://code.claude.com/docs/zh-CN/vs-code.md) | 在 VS Code 内工作而无需切换到终端 | 内联 diff、集成终端、文件上下文 |
@@ -59,6 +60,7 @@ Claude Code 提供了多种方式在您不在终端时进行工作。它们在�
 
 ### 平台
 
+* [CC-Box](https://ccbox.orczh.top/)：第三方开源多终端管理器，在原生终端体验上并行管理多个 Claude Code 会话
 * [CLI 快速入门](https://code.claude.com/docs/zh-CN/quickstart.md)：在终端中安装并运行您的第一个命令
 * [Desktop](https://code.claude.com/docs/zh-CN/desktop.md)：视觉 diff 审查、并行会话、计算机使用和 Dispatch
 * [VS Code](https://code.claude.com/docs/zh-CN/vs-code.md)：编辑器内的 Claude Code 扩展

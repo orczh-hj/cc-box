@@ -16,6 +16,16 @@ Claude Code 是一个由 AI 驱动的编码助手，可帮助你构建功能、�
 
 Claude Code 在多个平台上运行：终端、IDE 扩展、桌面应用和网络。从下面的标签页中选择一个来开始使用。大多数平台需要 [Claude 订阅](https://claude.com/pricing?utm_source=claude_code\&utm_medium=docs\&utm_content=overview_pricing) 或 [Anthropic 控制台](https://platform.claude.com/) 账户。终端 CLI、VS Code 和 JetBrains 也支持[第三方提供商](https://code.claude.com/docs/zh-CN/third-party-integrations.md)。
 
+> [tab] CC-Box
+>
+> 一个开源的第三方多终端管理器，在原生终端体验之上并行管理多个 Claude Code 会话，提供跨会话状态总览和工作流辅助。安装 CC-Box 时可以自动为你安装 Claude Code CLI，无需手动运行安装命令。
+>
+> 从 [ccbox.orczh.top](https://ccbox.orczh.top/) 下载安装包（支持 Windows 和 macOS），安装后在应用内完成 Claude Code 的安装即可开始使用。
+>
+> > [!NOTE]
+> >
+> > CC-Box 是社区维护的第三方工具，与 Anthropic 无关。它直接运行 Claude Code CLI，输入行为与原生终端一致，可随时回到纯 CLI 使用。
+
 > [tab] Terminal
 >
 > 功能完整的 CLI，用于直接在终端中使用 Claude Code。编辑文件、运行命令，并从命令行管理整个项目。

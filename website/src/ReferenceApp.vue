@@ -399,8 +399,9 @@ onUnmounted(() => window.removeEventListener('hashchange', onHashChange))
   line-height: 1.9;
 }
 
+/* 分组内文档：缩进用 padding 不用 margin——width:100% 的块加 margin-left 会超出容器右缘，撑出横向滚动条 */
 .ref-doc-link.grouped {
-  margin-left: 12px;
+  padding-left: 24px;
 }
 
 .ref-doc-link:hover {
