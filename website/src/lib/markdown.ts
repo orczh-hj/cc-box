@@ -137,6 +137,70 @@ export function transformBlocks(md: string): string {
   return tail > 0 ? `${body}\n${endsLines(tail).join('\n')}` : body
 }
 
+/**
+ * 估算单元格内容宽度权重：CJK/全角字符计 1、半角计 0.55（行内代码等半角内容的近似折算）。
+ * 浏览器 auto 表格布局在可用宽度远小于各列 max-content 之和时，会把剩余空间几乎全给
+ * 短内容列（实测快捷键表：内容最长的「描述/上下文」列被压到 73/102px），这里按各列
+ * 最长单元格的权重生成 colgroup 比例提示，纠正列宽分配。
+ */
+const estimateCellWeight = (c: Tokens.TableCell): number => {
+  // 行内 code 按全宽计（code 视觉宽度接近 CJK 且不宜折行），其余半角按 0.55 折算
+  let w = 0
+  for (const t of c.tokens ?? []) {
+    const ratio = t.type === 'codespan' ? 1 : 0.55
+    for (const ch of t.raw) w += ch.charCodeAt(0) > 0xff ? 1 : ratio
+  }
+  if (!w) {
+    for (const ch of c.text || '') w += ch.charCodeAt(0) > 0xff ? 1 : 0.55
+  }
+  return w
+}
+
+/** 按列内容权重生成 colgroup：每列先保底一段绝对额度（单行放下键名/短标签），
+ * 剩余宽度按超出部分的内容权重分配；最宽列占比封顶（≥3 列 50%、2 列 70%）防饿死其余列 */
+const colgroupFor = (token: Tokens.Table): string => {
+  const cols = token.header.length
+  if (cols < 2) return ''
+  const weights = token.header.map(
+    (_, i) =>
+      Math.max(
+        estimateCellWeight(token.header[i]),
+        ...token.rows.map((r) => (r[i] ? estimateCellWeight(r[i]) : 0)),
+      ) || 1,
+  )
+  // 保底额度（40 ≈ 单行放下 `Ctrl+X Ctrl+K` 一级键名）+ 超出部分按 0.4 系数分配
+  const BASE = 40
+  const EXTRA = 0.4
+  const adj = weights.map((w) => BASE + EXTRA * Math.max(0, w - BASE))
+  const capPct = cols >= 3 ? 0.5 : 0.7
+  // 超长列权重钳到 capPct/(1-capPct)×其余列之和，占比恰好等于封顶值
+  const bound = (capPct / (1 - capPct)) * (adj.reduce((a, w) => a + w, 0) - Math.max(...adj))
+  const capped = adj.map((w) => Math.min(w, bound))
+  const total = capped.reduce((a, w) => a + w, 0)
+  let pct = capped.map((w) => (w / total) * 100)
+  // fixed 布局下列宽即终值：每列兜底 8%（仅常见窄表），超出的部分按比例从宽列扣除
+  if (cols <= 8) {
+    const floor = 8
+    pct = pct.map((p) => Math.max(p, floor))
+    const sum = pct.reduce((a, p) => a + p, 0)
+    const over = sum - 100
+    if (over > 0) {
+      const donors = pct.filter((p) => p > floor)
+      const donorSum = donors.reduce((a, p) => a + p, 0)
+      const scale = (donorSum - over) / donorSum
+      pct = pct.map((p) => (p > floor ? p * scale : p))
+    }
+  }
+  let used = 0
+  const rounded = pct.map((p, i) => {
+    if (i === cols - 1) return Math.round((100 - used) * 10) / 10
+    const r = Math.round(p * 10) / 10
+    used += r
+    return r
+  })
+  return `<colgroup>${rounded.map((p) => `<col style="width:${p}%">`).join('')}</colgroup>`
+}
+
 export function renderMarkdown(md: string): RenderedDoc {
   const toc: TocEntry[] = []
   const seen = new Map<string, number>()
@@ -178,7 +242,7 @@ export function renderMarkdown(md: string): RenderedDoc {
         const body = token.rows
           .map((row) => `<tr>${row.map((c) => cell(c, 'td')).join('')}</tr>`)
           .join('')
-        return `<div class="md-table-wrap"><table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`
+        return `<div class="md-table-wrap"><table>${colgroupFor(token)}<thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`
       },
     },
   })

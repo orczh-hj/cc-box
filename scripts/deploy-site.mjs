@@ -131,10 +131,25 @@ function main() {
     sh(`"${ossutil}" rm -r "oss://${bucketName}/assets/"`)
     logOk('已清空 assets/（旧 hash 产物）')
   }
-  // 顺序：批量资源（含未压缩语料）→ 语料 gzip 版覆盖 → index.html 最后。
+  // 顺序：assets（hash 文件名，immutable 长缓存）→ 根下 HTML/静态文件（no-cache，
+  // 浏览器每次协商缓存，部署后无需强刷即可看到新版——不设头时浏览器启发式缓存
+  // 会让老访客长时间停留在旧页面）→ 语料 gzip 版覆盖 → index.html 最后。
   // 先批量后覆盖而不是用 --exclude 排除：ossutil 的 --exclude 是路径通配，`assets/search-corpus-*.txt`
   // 这类全路径匹配不可靠，覆盖顺序与通配语义无关，更稳。
-  sh(`"${ossutil}" cp -r "website/dist/" "oss://${bucketName}/" -f --exclude "index.html"`)
+  // assets（hash 文件名）immutable 长缓存：cp -r 的 --meta 递归时不落（实测 1.7.14），
+  // 用 set-meta -r 统一补头
+  sh(`"${ossutil}" cp -r "${path.join(SITE_DIST, 'assets')}" "oss://${bucketName}/" -f`)
+  sh(
+    `"${ossutil}" set-meta "oss://${bucketName}/assets/" "Cache-Control:max-age=31536000,immutable" -r -f --update`,
+  )
+  // 根层 HTML/静态文件逐个上传（no-cache）：ossutil --exclude 不支持含目录信息的通配
+  // （`assets/*` 报错），故不递归整目录，改为枚举 dist 根层文件
+  const rootFiles = fs
+    .readdirSync(SITE_DIST)
+    .filter((f) => fs.statSync(path.join(SITE_DIST, f)).isFile() && f !== 'index.html')
+  for (const f of rootFiles) {
+    sh(`"${ossutil}" cp "website/dist/${f}" "oss://${bucketName}/${f}" -f --meta "Cache-Control:no-cache"`)
+  }
   const corpusPath = path.join(SITE_DIST, 'assets', corpusFile)
   const gzPath = `${corpusPath}.gz`
   fs.writeFileSync(gzPath, zlib.gzipSync(fs.readFileSync(corpusPath)))
@@ -143,7 +158,7 @@ function main() {
     `"${ossutil}" cp "${gzPath}" "oss://${bucketName}/assets/${corpusFile}" -f --meta "Content-Encoding:gzip#Cache-Control:max-age=31536000,immutable"`,
   )
   fs.unlinkSync(gzPath)
-  sh(`"${ossutil}" cp "website/dist/index.html" "oss://${bucketName}/index.html" -f`)
+  sh(`"${ossutil}" cp "website/dist/index.html" "oss://${bucketName}/index.html" -f --meta "Cache-Control:no-cache"`)
   logOk('上传完成')
 
   // [4/4] HEAD 校验

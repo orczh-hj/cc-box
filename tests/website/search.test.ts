@@ -154,6 +154,15 @@ describe('searchCorpus', () => {
     expect(searchCorpus(corpus, sections, 'CCBOXDOC')).toEqual([])
   })
 
+  it('SearchCorpus_8 搜索不区分大小写：小写关键词命中大写正文，反之亦然', () => {
+    const text8 = buildCorpusText([
+      { ty: 'docs', key: 'x', title: 'X', body: '## Hooks 配置\nWebhook 与 hooks 都在此。' },
+    ])
+    const { corpus: c, sections: s } = parseCorpus(text8)
+    expect(searchCorpus(c, s, 'hooks')).toHaveLength(1)
+    expect(searchCorpus(c, s, 'WEBHOOK')).toHaveLength(1)
+  })
+
   it('SearchCorpus_6 结果最多 12 条且带摘要', () => {
     const body = Array.from({ length: 20 }, (_, i) => `## 章节${i}\n都包含磁盘关键字。`).join('\n\n')
     const text6 = buildCorpusText([{ ty: 'docs', key: 'x', title: 'X', body }])
@@ -176,6 +185,11 @@ describe('makeSnippet', () => {
   it('MakeSnippet_2 命中在开头时起点钳到 0', () => {
     const s = makeSnippet('关键词' + 'B'.repeat(100), 0, 105, ['关键词'])
     expect(s.startsWith('«')).toBe(true)
+  })
+
+  it('MakeSnippet_3 大小写不敏感匹配且 «» 保留原文大小写', () => {
+    const s = makeSnippet('配置 Hooks 面板', 0, 12, ['hooks'])
+    expect(s).toContain('«Hooks»')
   })
 })
 

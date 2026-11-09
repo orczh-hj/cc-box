@@ -103,12 +103,16 @@ export function searchCorpus(
 ): SearchHit[] {
   const keywords = query.split(/\s+/).filter(Boolean)
   if (keywords.length === 0) return []
+  // 大小写不敏感：关键词与正文/标题统一小写后比较（摘要标记在 makeSnippet 内处理）
+  const lowerKws = keywords.map((k) => k.toLowerCase())
   const hits: (SearchHit & { score: number })[] = []
   for (const s of sections) {
-    const text = corpus.slice(s.start, s.end)
+    const text = corpus.slice(s.start, s.end).toLowerCase()
+    const sectionTitle = s.sectionTitle.toLowerCase()
+    const docTitle = s.docTitle.toLowerCase()
     let bodyCount = 0
     let all = true
-    for (const kw of keywords) {
+    for (const kw of lowerKws) {
       const n = countOccurrences(text, kw)
       if (n === 0) {
         all = false
@@ -117,8 +121,8 @@ export function searchCorpus(
       bodyCount += n
     }
     if (!all) continue
-    const titleHit = keywords.some((kw) => s.sectionTitle.includes(kw)) ? 2 : 0
-    const docHit = keywords.some((kw) => s.docTitle.includes(kw)) ? 1 : 0
+    const titleHit = lowerKws.some((kw) => sectionTitle.includes(kw)) ? 2 : 0
+    const docHit = lowerKws.some((kw) => docTitle.includes(kw)) ? 1 : 0
     hits.push({
       ty: s.ty,
       key: s.key,
@@ -132,7 +136,8 @@ export function searchCorpus(
   return hits.slice(0, limit).map(({ score: _score, ...hit }) => hit)
 }
 
-/** 首个命中位置前后 ~40 字的摘要，关键词以 «» 包裹（前端渲染为 <mark>） */
+/** 首个命中位置前后 ~40 字的摘要，关键词以 «» 包裹（前端渲染为 <mark>）；
+ * 匹配不区分大小写，«» 内保留原文大小写 */
 export function makeSnippet(
   corpus: string,
   start: number,
@@ -140,17 +145,13 @@ export function makeSnippet(
   keywords: string[],
 ): string {
   const text = corpus.slice(start, end)
-  let first = -1
-  for (const kw of keywords) {
-    const i = text.indexOf(kw)
-    if (i !== -1 && (first === -1 || i < first)) first = i
-  }
-  if (first === -1) return text.slice(0, 80)
-  const kwLen = keywords.reduce((m, k) => Math.max(m, k.length), 0)
-  const raw = text.slice(Math.max(0, first - 40), Math.min(text.length, first + 40 + kwLen))
-  let out = raw
-  for (const kw of keywords) out = out.split(kw).join(`«${kw}»`)
-  return out
+  const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const re = new RegExp(`(${keywords.map((k) => esc(k.toLowerCase())).join('|')})`, 'gi')
+  const m = re.exec(text)
+  if (!m) return text.slice(0, 80)
+  const first = m.index
+  const raw = text.slice(Math.max(0, first - 40), Math.min(text.length, first + 40 + m[1].length))
+  return raw.replace(re, '«$1»')
 }
 
 /** 跳转 URL：reference 带 ?a= 编码章节标题（ReferenceApp 文字兜底）；docs 锚点 = slug（与 h2 id 规则一致） */

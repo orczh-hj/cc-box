@@ -11,6 +11,7 @@
 ## 文档页（docs.html）
 
 - 内容存 `website/content/*.md`（claude-code.md / cc-box.md，客观清单风格、自包含不外链），经 marked 运行时渲染（`lib/markdown.ts`：h2 生成锚点 id + 提取 TOC，DocsApp 双栏布局 + scrollspy）；客户端渲染导致 hash 定位需挂载后补跳（DocsApp onMounted）
+- **表格列宽分配**（`lib/markdown.ts` `colgroupFor`，docs/reference 通用）：渲染期按各列最长单元格的内容权重（CJK 计 1、半角 0.55、行内 code 全宽）生成 `<colgroup>` 百分比——每列先保底 40 字符额度（单行放下键名/短标签），超出部分按 0.4 系数分配，最宽列封顶 50%（2 列 70%），极短列 8% 兜底。配套 CSS（`doc.css`）：`.md-table-wrap table` 用 `table-layout: fixed; width: 100%`。**两个坑**：auto 布局在长文表格上不遵守百分比 col 提示（剩余空间几乎全给短内容列，长文列被压到 min-content）；fixed 布局下 `width: auto` 会让百分比 col 无参照被整组忽略。容器内还必须取消 `td:first-child` 的 `nowrap`（定宽 + nowrap 溢出盖住相邻列）
 
 ## 参考文档页（reference.html）
 
@@ -28,9 +29,10 @@
 
 - **构建期**（`website/vite.config.mts` 的 `ccDocsSearchPlugin`）：读全部语料（`claude-code-docs/**/*.md` + `cc-box.md` + `claude-code.md`），`stripForSearch` 剥 code fence 与表格行，拼成单文本（每篇一行 `@@@CCBOXDOC ty=… key=… title=…` 分隔头）；产物 `assets/search-corpus-<hash>.txt`（`emitFile`，构建在 `buildStart` 无条件产出），doc 更新 → hash 变 → 旧缓存自然失效
 - **虚拟模块** `virtual:cc-docs-search` 只下发 `corpusUrl`；dev 由 `configureServer` 中间件返回同一纯函数生成的未压缩语料（`/__search-corpus.txt`），保证 dev/prod 行为一致
-- **运行时**（`lib/search.ts`，纯函数）：首次搜索才 fetch 语料（模块级 Promise 缓存）→ `parseCorpus` 切文档/章节 → `searchCorpus` 按空白拆词、**AND 语义**、标题命中优先排序、前 12 条 → `makeSnippet` 截命中前后 ~40 字并以 `«»` 标记（前端渲染 `<mark>`）
+- **运行时**（`lib/search.ts`，纯函数）：首次搜索才 fetch 语料（模块级 Promise 缓存）→ `parseCorpus` 切文档/章节 → `searchCorpus` 按空白拆词、**AND 语义、不区分大小写**（关键词与正文/标题统一小写比较）、标题命中优先排序、前 12 条 → `makeSnippet` 用大小写不敏感 regex 定位并截命中前后 ~40 字，`«»` 内保留原文大小写（前端渲染 `<mark>`）
+- **结果收起**（SearchBox）：点击搜索框外部 / 结果底部「收起结果」按钮收起（hits 保留），重新聚焦输入框恢复上次结果；Esc 清空输入（移动端浮层另由 SiteHeader 点击外部监听关闭）
 - **跳转**：reference → `reference.html#/<key>?a=<encodeURIComponent(章节标题)>`（ReferenceApp 用文字兜底 `resolveAnchor` 定位，构建期不算锚点 id）；docs → `docs.html#<slug(标题)>`（与 `lib/markdown.ts` h2 id 规则一致）
-- **缓存语义**：内容 hash 文件名 + `deploy:site` 上传时预 gzip 并设 `Content-Encoding: gzip` / `Cache-Control: max-age=31536000, immutable`；上传顺序为「批量资源（未压缩语料）→ 语料 gzip 版覆盖 → index.html」，**不用 `--exclude`**（ossutil 路径通配不可靠，覆盖顺序与通配语义无关）；HEAD 校验含语料 URL 与其 gzip 头（另见 `--clean-assets` 随 assets 目录整体替换）
+- **缓存语义**：内容 hash 文件名；`deploy:site` 缓存头策略——**HTML/根层文件（index/docs/reference.html、robots、sitemap 等）`Cache-Control: no-cache`**（每次协商，部署后老访客无需强刷；不设头时浏览器启发式缓存会让旧页面滞留，实测踩坑）、**`assets/`（hash 文件名）`max-age=31536000, immutable`**、语料预 gzip 并设 `Content-Encoding: gzip` + immutable。上传顺序为「assets 批量 → `set-meta -r` 统一补 immutable → 根层文件逐个（no-cache）→ 语料 gzip 版覆盖 → index.html 最后」。**两个 ossutil 坑**：`cp -r` 的 `--meta` 递归时不落（用 `set-meta -r` 补）；`--exclude` 不支持含目录信息的通配（`assets/*` 报错，根层文件只能枚举逐个传）；HEAD 校验含语料 URL 与其 gzip 头（另见 `--clean-assets` 随 assets 目录整体替换）
 - **已知限制**：无模糊/拼写容错；code block 与表格内容不可搜；docs.html 两篇文档 h2 撞名时只落第一篇
 
 ## 手机适配

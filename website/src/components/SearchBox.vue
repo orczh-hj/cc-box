@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { onBeforeUnmount, onMounted, ref } from 'vue'
 import { corpusUrl } from 'virtual:cc-docs-search'
 import { buildJumpUrl, makeSnippet, parseCorpus, searchCorpus, type SearchHit } from '../lib/search'
 
@@ -17,11 +17,31 @@ function loadCorpus() {
   return corpusPromise
 }
 
+const rootEl = ref<HTMLElement | null>(null)
 const query = ref('')
 const hits = ref<SearchHit[]>([])
 const activeIndex = ref(-1)
 const state = ref<'idle' | 'loading' | 'ready' | 'error'>('idle')
+// 结果面板收起态：点击面板外/关闭按钮置 true（hits 保留），聚焦输入框恢复展示
+const collapsed = ref(false)
 let debounceTimer: ReturnType<typeof setTimeout> | undefined
+
+function collapse() {
+  collapsed.value = true
+  activeIndex.value = -1
+}
+
+// 点击搜索框外部收起结果面板（header 内点击由 SiteHeader @click.stop 挡住，不会误触）
+function onDocClick(e: MouseEvent) {
+  if (!collapsed.value && rootEl.value && !rootEl.value.contains(e.target as Node)) collapse()
+}
+onMounted(() => document.addEventListener('click', onDocClick))
+onBeforeUnmount(() => document.removeEventListener('click', onDocClick))
+
+function onFocus() {
+  // 聚焦恢复上次结果展示；输入内容变化自然触发新一轮搜索
+  collapsed.value = false
+}
 
 async function runSearch() {
   const q = query.value.trim()
@@ -31,6 +51,7 @@ async function runSearch() {
     state.value = 'idle'
     return
   }
+  collapsed.value = false
   state.value = 'loading'
   try {
     const { corpus, sections } = await loadCorpus()
@@ -88,34 +109,40 @@ function onKeydown(e: KeyboardEvent) {
 </script>
 
 <template>
-  <div class="search-box">
+  <div ref="rootEl" class="search-box">
     <input
       v-model="query"
       class="search-input"
       type="search"
       placeholder="搜索文档…"
       @input="onInput"
+      @focus="onFocus"
       @keydown="onKeydown"
     />
-    <div v-if="state === 'loading' && !hits.length" class="search-tip">加载搜索索引…</div>
-    <div v-else-if="state === 'error'" class="search-tip search-tip-error">
-      搜索暂不可用，
-      <a href="#" @click.prevent="runSearch">重试</a>
-    </div>
-    <div v-else-if="state === 'ready' && !hits.length" class="search-tip">没有匹配结果，换个关键词试试</div>
-    <ul v-else-if="hits.length" class="search-results">
-      <li
-        v-for="(hit, i) in hits"
-        :key="hit.ty + hit.key + hit.sectionTitle"
-        class="search-result"
-        :class="{ active: i === activeIndex }"
-        @click="go(hit)"
-        @mousemove="activeIndex = i"
-      >
-        <div class="search-result-title">{{ hit.docTitle }} › {{ hit.sectionTitle }}</div>
-        <div class="search-result-snippet" v-html="renderSnippet(hit.snippet)"></div>
-      </li>
-    </ul>
+    <template v-if="!collapsed">
+      <div v-if="state === 'loading' && !hits.length" class="search-tip">加载搜索索引…</div>
+      <div v-else-if="state === 'error'" class="search-tip search-tip-error">
+        搜索暂不可用，
+        <a href="#" @click.prevent="runSearch">重试</a>
+      </div>
+      <div v-else-if="state === 'ready' && !hits.length" class="search-tip">没有匹配结果，换个关键词试试</div>
+      <div v-else-if="hits.length" class="search-results">
+        <ul class="search-result-list">
+          <li
+            v-for="(hit, i) in hits"
+            :key="hit.ty + hit.key + hit.sectionTitle"
+            class="search-result"
+            :class="{ active: i === activeIndex }"
+            @click="go(hit)"
+            @mousemove="activeIndex = i"
+          >
+            <div class="search-result-title">{{ hit.docTitle }} › {{ hit.sectionTitle }}</div>
+            <div class="search-result-snippet" v-html="renderSnippet(hit.snippet)"></div>
+          </li>
+        </ul>
+        <button class="search-close" type="button" @click="collapse">收起结果</button>
+      </div>
+    </template>
   </div>
 </template>
 
@@ -147,16 +174,42 @@ function onKeydown(e: KeyboardEvent) {
   top: calc(100% + 6px);
   left: 0;
   right: 0;
-  max-height: 60vh;
-  overflow-y: auto;
   margin: 0;
-  padding: 6px;
-  list-style: none;
   background: var(--bg-primary);
   border: 1px solid var(--border-light);
   border-radius: var(--radius-lg);
   box-shadow: var(--shadow-lg);
   z-index: 200;
+}
+
+.search-results {
+  max-height: 60vh;
+  display: flex;
+  flex-direction: column;
+  padding: 6px;
+}
+
+.search-result-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  overflow-y: auto;
+}
+
+.search-close {
+  flex-shrink: 0;
+  margin: 4px 2px 0;
+  padding: 6px 0;
+  border: none;
+  border-top: 1px solid var(--border-light);
+  background: none;
+  font-size: 12.5px;
+  color: var(--text-tertiary);
+  cursor: pointer;
+}
+
+.search-close:hover {
+  color: var(--accent-primary);
 }
 
 .search-tip {

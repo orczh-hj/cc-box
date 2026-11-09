@@ -140,8 +140,11 @@
 
 .md-body .md-table-wrap table {
   margin: 0;
-  width: auto;
-  min-width: 100%;
+  width: 100%;
+  /* 列宽由渲染期生成的 colgroup 比例决定：auto 布局在长文表格上不遵守百分比
+     提示（剩余空间几乎全给短内容列，长文列被压到 min-content），fixed + 定宽
+     让分配确定；width:auto 下百分比 col 无参照宽度会被整组忽略 */
+  table-layout: fixed;
 }
 
 .md-body table {
@@ -185,6 +188,12 @@
 
 .md-body td:only-child,
 .md-body th:only-child {
+  white-space: normal;
+}
+
+/* colgroup 表（fixed 布局）内取消首列 nowrap：定宽列 + nowrap 会溢出盖住相邻列 */
+.md-body .md-table-wrap td,
+.md-body .md-table-wrap th {
   white-space: normal;
 }
 
