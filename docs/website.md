@@ -65,6 +65,7 @@ npm run sync:cc-docs    # 更新参考文档数据源（只本地，不部署）
 ```
 
 - `--clean-assets`：上传前清 `assets/`（完整镜像替换、自动清理旧 bundle）；**勿在上传后手动 rm 旧产物**
+- **踩坑（2026-11-09 实测）**：`deploy:site` 的 `ossutil cp -r <本地assets> oss://bucket/ -f`（Windows）对**本次新产生的 hash 文件会静默丢失**——输出照样报 `OK num: 239`，但新名字文件不在 OSS 上，只有末尾 HEAD 校验能发现（此时重跑同一命令无效，cp -r 仍会丢）。处置：拿本地 `website/dist/assets/` 逐个 HEAD 比对找出 404 清单，对缺失文件逐个 `ossutil cp <单文件> oss://cc-box/assets/<name> -f` 补传（单文件 cp 正常），再重跑 `deploy:site -- --skip-build` 走完整校验 + set-meta
 - 前端（主应用 src/）改动发布只需 `npm run deploy:web`（见 CLAUDE.md「版本发布」），与 deploy:site 是两条独立链路
 
 ## 安全红线
