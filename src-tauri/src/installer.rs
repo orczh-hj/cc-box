@@ -601,9 +601,31 @@ fn extract_portable_git(archive_path: &Path, target_dir: &Path, app: &AppHandle,
     }
 
     // 移动临时目录到目标目录
-    if let Err(e) = fs::rename(&temp_extract_dir, target_dir) {
+    // 杀软实时扫描会短暂锁定刚解压出的文件，目录 rename 报 os error 5
+    // （拒绝访问）——带退避重试（实测约 1~2 秒后释放），仍失败才放弃
+    let mut rename_err = None;
+    for attempt in 1..=5 {
+        match fs::rename(&temp_extract_dir, target_dir) {
+            Ok(()) => {
+                rename_err = None;
+                break;
+            }
+            Err(e) => {
+                log::warn!(
+                    "[Installer] Move attempt {}/5 failed ({} → {}): {}",
+                    attempt,
+                    temp_extract_dir.display(),
+                    target_dir.display(),
+                    e
+                );
+                rename_err = Some(e);
+                std::thread::sleep(std::time::Duration::from_millis(1000));
+            }
+        }
+    }
+    if let Some(e) = rename_err {
         log::error!(
-            "[Installer] Failed to move {} to {}: {}",
+            "[Installer] Failed to move {} to {} after retries: {}",
             temp_extract_dir.display(),
             target_dir.display(),
             e

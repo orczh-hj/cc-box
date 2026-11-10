@@ -582,6 +582,14 @@ fn refresh_path_windows() {
     let local_app_data = std::env::var("LOCALAPPDATA")
         .unwrap_or_else(|_| format!("{}\\AppData\\Local", user_profile));
 
+    // 注册表 PATH 合并：Broker/托盘拉起的窗口继承父进程创建时的 PATH 快照，
+    // 用户在此期间新装的软件（写入注册表）不在快照里——`where git` 等探测
+    // 全部失败。把注册表用户/系统 PATH 中进程缺失的条目补进进程 PATH。
+    for extra in read_registry_path_extras(&path) {
+        log::info!("[Platform] Merged registry PATH entry missing from process: {}", extra);
+        path = format!("{};{}", path, extra);
+    }
+
     // Claude: %USERPROFILE%\.local\bin
     let claude_dir = format!("{}\\.local\\bin", user_profile);
     if Path::new(&claude_dir).exists() {
@@ -604,6 +612,67 @@ fn refresh_path_windows() {
 
     std::env::set_var("PATH", &path);
     log::debug!("[Platform] Windows PATH refreshed");
+}
+
+/// 解析 `reg query` PATH 输出中的条目，返回 (注册表条目列表)
+///
+/// 输出形如 `    Path    REG_EXPAND_SZ    C:\a;C:\b`；含 `%VAR%` 未展开形式的
+/// 条目跳过（reg query 不展开 REG_EXPAND_SZ，误并入 PATH 会产生无效条目）。
+#[cfg(target_os = "windows")]
+pub(crate) fn parse_registry_path_output(stdout: &str) -> Vec<String> {
+    let mut entries = Vec::new();
+    for line in stdout.lines() {
+        // 值行：缩进 + 名称 + 类型 + 数据
+        if let Some(pos) = line.find("REG_EXPAND_SZ") {
+            let data = &line[pos + "REG_EXPAND_SZ".len()..];
+            push_path_entries(&mut entries, data);
+        } else if let Some(pos) = line.find("REG_SZ") {
+            let data = &line[pos + "REG_SZ".len()..];
+            push_path_entries(&mut entries, data);
+        }
+    }
+    entries
+}
+
+/// 拆分 PATH 数据并过滤（纯函数，可单测）
+#[cfg(target_os = "windows")]
+pub(crate) fn push_path_entries(out: &mut Vec<String>, data: &str) {
+    for entry in data.split(';') {
+        let entry = entry.trim();
+        if entry.is_empty() || entry.contains('%') {
+            continue;
+        }
+        out.push(entry.to_string());
+    }
+}
+
+/// 读注册表（HKCU + HKLM）PATH，返回进程 PATH 中缺失的条目
+#[cfg(target_os = "windows")]
+fn read_registry_path_extras(current_path: &str) -> Vec<String> {
+    let current: std::collections::HashSet<String> = current_path
+        .split(';')
+        .map(|e| e.trim().to_lowercase())
+        .filter(|e| !e.is_empty())
+        .collect();
+
+    let mut extras = Vec::new();
+    for key in [
+        r"HKCU\Environment",
+        r"HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment",
+    ] {
+        let mut cmd = new_command("reg");
+        cmd.args(["query", key, "/v", "Path"]);
+        if let Ok(output) = cmd.output() {
+            if output.status.success() {
+                for entry in parse_registry_path_output(&String::from_utf8_lossy(&output.stdout)) {
+                    if !current.contains(&entry.to_lowercase()) {
+                        extras.push(entry);
+                    }
+                }
+            }
+        }
+    }
+    extras
 }
 
 #[cfg(unix)]

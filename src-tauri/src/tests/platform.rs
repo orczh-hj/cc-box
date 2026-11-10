@@ -280,3 +280,43 @@ fn GetClaudeShell_WithGitBash_001() {
         assert!(args.is_empty());
     }
 }
+
+// ==================== 注册表 PATH 解析（陈旧 PATH 合并） ====================
+
+#[cfg(target_os = "windows")]
+use crate::platform::{parse_registry_path_output, push_path_entries};
+
+// reg query 标准输出：REG_EXPAND_SZ 与 REG_SZ 两类值行均解析出条目
+#[test]
+#[cfg(target_os = "windows")]
+fn ParseRegistryPath_BothTypes_001() {
+    let stdout = "\r\nHKEY_CURRENT_USER\\Environment\r\n    Path    REG_EXPAND_SZ    C:\\Users\\u\\.local\\bin;C:\\Tools\r\n\r\n";
+    let entries = parse_registry_path_output(stdout);
+    assert_eq!(entries, vec!["C:\\Users\\u\\.local\\bin", "C:\\Tools"]);
+}
+
+// 含 %VAR% 的未展开条目被跳过（误并入 PATH 会产生无效路径）
+#[test]
+#[cfg(target_os = "windows")]
+fn ParseRegistryPath_SkipUnexpanded_002() {
+    let stdout = "    Path    REG_EXPAND_SZ    %USERPROFILE%\\bin;C:\\Absolute\r\n";
+    let entries = parse_registry_path_output(stdout);
+    assert_eq!(entries, vec!["C:\\Absolute"]);
+}
+
+// 空条目（连续分号/首尾分号）被过滤
+#[test]
+#[cfg(target_os = "windows")]
+fn PushPathEntries_SkipEmpty_003() {
+    let mut out = Vec::new();
+    push_path_entries(&mut out, ";;C:\\A;;C:\\B;");
+    assert_eq!(out, vec!["C:\\A", "C:\\B"]);
+}
+
+// reg query 失败输出（值不存在/错误信息行）不产出任何条目
+#[test]
+#[cfg(target_os = "windows")]
+fn ParseRegistryPath_ErrorOutput_004() {
+    let stdout = "ERROR: The system was unable to find the specified registry key or value.\r\n";
+    assert!(parse_registry_path_output(stdout).is_empty());
+}

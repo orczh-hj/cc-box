@@ -117,6 +117,11 @@ UI 已浏览器化（一套 UI 走桌面 Tauri / 宽屏浏览器 / 手机浏览�
 
 **已知边界**：per-item 互斥与运行序号均为**进程内**状态——多个 GUI 窗口（独立进程）同时 Auto Install 时仍可能互踩（run_id 都从 1 起，`PortableGit-temp-1` 跨进程同名）。新用户首装场景单窗口概率极高，未做跨进程锁；若要支持，可复用 `~/.cc-box/locks/` 文件锁。
 
+**续案（2026-11-10 晚，用户真机 0.17.10 日志定位两根因）**：
+
+1. **rename 被杀软锁定**：SFX 解压成功后 `fs::rename(temp → PortableGit)` 报 `os error 5 拒绝访问`——杀软实时扫描刚解压出的几百个可执行文件，短暂锁目录。修复：rename 带 5 次×1s 退避重试（实测 1~2 秒后句柄释放）。
+2. **Broker 拉起窗口的陈旧 PATH**：用户装完 Git（写入注册表 PATH）后，由 Broker/托盘拉起的新窗口继承的是 Broker 创建时的 PATH 快照（早于装 Git）→ `where git` 失败、检查误报未安装；同一时段用户手动启动的窗口（explorer 收 WM_SETTINGCHANGE）却正常。修复：`refresh_path_windows` 除自家目录外，新增 `reg query` 读 HKCU/HKLM 注册表 PATH，把进程缺失的条目合并进进程 PATH（含 `%VAR%` 未展开形式的条目跳过，避免无效路径）。解析纯函数测试见 `tests/platform.rs` `ParseRegistryPath_*`。
+
 ## 远程服务机制要点
 
 - `remote_server.rs`：局域网直连（axum WS + Web UI，web-assets 磁盘优先/内嵌兜底 + token 认证）；**stop 轮询等待端口释放**——Windows abort 后 IOCP 清理延迟曾致端口长期 LISTENING 残留、bind 10048
