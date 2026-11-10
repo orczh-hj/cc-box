@@ -206,6 +206,31 @@
       </footer>
     </div>
 
+    <!-- 新建窗口确认（远程端点击后先展示窗口列表，确认才创建） -->
+    <div v-if="newWindowConfirm" class="confirm-overlay" @click.self="newWindowConfirm = false">
+      <div class="confirm-dialog new-window-dialog">
+        <p class="confirm-text">{{ t('newWindowConfirmTitle') }}</p>
+        <p class="confirm-hint">{{ t('newWindowConfirmHint') }}</p>
+        <div class="window-list">
+          <p class="window-list-title">{{ t('newWindowCurrentTitle') }}</p>
+          <p v-if="sessionStore.knownInstances.length === 0" class="window-list-empty">
+            {{ t('newWindowNoneHint') }}
+          </p>
+          <p
+            v-for="inst in sessionStore.knownInstances"
+            :key="inst.id"
+            class="window-list-item"
+          >
+            {{ inst.name }}
+          </p>
+        </div>
+        <div class="confirm-actions">
+          <button class="btn-cancel" @click="newWindowConfirm = false">{{ t('cancel') }}</button>
+          <button class="btn-primary" @click="confirmNewWindow">{{ t('newWindowConfirmBtn') }}</button>
+        </div>
+      </div>
+    </div>
+
     <!-- 隐藏项目确认对话框（样式与设置页删除确认一致） -->
     <div v-if="hideConfirmPath" class="confirm-overlay" @click.self="hideConfirmPath = null">
       <div class="confirm-dialog">
@@ -272,12 +297,21 @@ const launchButtonText = computed(() =>
   sessionStore.remoteInstances.length === 0 ? t('launchWindow') : t('newWindow'),
 )
 const launching = ref(false)
+/** 新建窗口确认弹窗（远程端点按钮先展示窗口列表，确认才创建） */
+const newWindowConfirm = ref(false)
 
-async function handleLaunchWindow() {
+function handleLaunchWindow() {
+  if (launching.value) return
+  newWindowConfirm.value = true
+}
+
+async function confirmNewWindow() {
+  newWindowConfirm.value = false
   if (launching.value) return
   launching.value = true
   try {
     await spawnNewInstance()
+    toast.success(t('newWindowCreated'))
   } catch (err) {
     toast.error(t('launchWindowFailed', { error: String(err) }))
   } finally {
@@ -1000,6 +1034,63 @@ async function handleSaveDefault() {
 
 .confirm-actions .btn-cancel:hover {
   background: var(--hover-bg);
+}
+
+.confirm-actions .btn-primary {
+  padding: 7px 18px;
+  background: var(--accent-primary);
+  color: #fff;
+  border: none;
+  border-radius: var(--radius-md);
+  font-size: 13px;
+  cursor: pointer;
+  font-family: var(--font-sans);
+}
+
+.confirm-actions .btn-primary:hover {
+  opacity: 0.9;
+}
+
+/* 新建窗口确认：当前窗口列表（只读展示，帮助远程端确认目标设备状态） */
+.new-window-dialog {
+  min-width: min(360px, calc(100vw - 64px));
+}
+
+.window-list {
+  margin: 0 0 18px 0;
+  padding: 8px 10px;
+  background: var(--bg-secondary);
+  border-radius: var(--radius-md);
+  max-height: 160px;
+  overflow-y: auto;
+}
+
+.window-list-title {
+  margin: 0 0 6px 0;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.window-list-item {
+  margin: 0;
+  padding: 5px 0;
+  font-size: 13px;
+  color: var(--text-primary);
+  border-bottom: 1px solid var(--border-color);
+}
+
+.window-list-item:last-child {
+  border-bottom: none;
+}
+
+.window-list-empty {
+  margin: 0;
+  padding: 4px 0;
+  font-size: 12px;
+  color: var(--text-tertiary);
 }
 
 .confirm-actions .btn-danger {
