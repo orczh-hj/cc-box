@@ -654,6 +654,10 @@ function initAfterChecks() {
 async function autoInstall() {
   isInstalling.value = true
 
+  // 立即解绑上一轮监听：旧轮次残留事件不得写入本轮进度条
+  unlistenInstallProgress?.()
+  unlistenInstallProgress = null
+
   // 初始化任务列表
   installTasks.value = []
 
@@ -712,8 +716,27 @@ async function autoInstall() {
       )
     }
 
-    // 等待所有安装完成（任何一个失败/取消都会 reject）
-    await Promise.all(installPromises)
+    // 等待所有安装完成：allSettled 而非 all——某项失败时另一项继续在后台跑，
+    // all 提前 reject 会让 isInstalling 复位、监听解绑，后台孤儿下载的进度
+    // 事件被下一轮监听接收，进度条被两路事件来回改写（曾致反复横跳）
+    const results = await Promise.allSettled(installPromises)
+
+    const failed = results.find(r => r.status === 'rejected') as PromiseRejectedResult | undefined
+    if (failed) {
+      const errorMsg = String(failed.reason)
+      // 区分取消与其他错误
+      const isCancelled = errorMsg === 'cancelled'
+      for (const task of installTasks.value) {
+        if (task.status === 'done') continue
+        // 已被 progress 事件标记为 error/cancelled 的，保留其具体 message
+        if (task.status === 'error' || task.status === 'cancelled') continue
+        task.status = isCancelled ? 'cancelled' : 'error'
+        task.message = isCancelled ? t('stageCancelled') : (errorMsg || t('installFailed', { error: errorMsg }))
+      }
+      if (!isCancelled) {
+        console.error('Auto install failed:', failed.reason)
+      }
+    }
 
     // 延迟一秒后重新检查
     await new Promise(r => setTimeout(r, 1000))
@@ -734,19 +757,7 @@ async function autoInstall() {
       }
     }
   } catch (e) {
-    const errorMsg = String(e)
-    // 区分取消与其他错误
-    const isCancelled = errorMsg === 'cancelled'
-    for (const task of installTasks.value) {
-      if (task.status === 'done') continue
-      // 已被 progress 事件标记为 error/cancelled 的，保留其具体 message
-      if (task.status === 'error' || task.status === 'cancelled') continue
-      task.status = isCancelled ? 'cancelled' : 'error'
-      task.message = isCancelled ? t('stageCancelled') : (errorMsg || t('installFailed', { error: errorMsg }))
-    }
-    if (!isCancelled) {
-      console.error('Auto install failed:', e)
-    }
+    console.error('Auto install failed:', e)
   } finally {
     isInstalling.value = false
     unlistenInstallProgress?.()

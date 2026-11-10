@@ -213,6 +213,18 @@ fn check_git_bash(config_path: &Option<String>) -> CheckResult {
         }
     }
 
+    // 2.5 安装器默认位置（%LOCALAPPDATA%\PortableGit\bin\bash.exe）
+    // 自动安装解压成功但因故未走到写配置步骤时，仍能识别为已安装
+    #[cfg(target_os = "windows")]
+    if let Some(bash_path) = detect_portable_git_default() {
+        return CheckResult::pass_with_path(
+            "Git Bash",
+            "checkFoundAuto",
+            &format!("Found: {}", bash_path),
+            &bash_path,
+        );
+    }
+
     // 3. where git → 在 git 安装目录下找 bash.exe
     if let Some(bash_path) = detect_git_bash_from_git() {
         return CheckResult::pass_with_path(
@@ -231,6 +243,27 @@ fn check_git_bash(config_path: &Option<String>) -> CheckResult {
         "installGitForWindows",
         "https://git-scm.com/download/win",
     )
+}
+
+/// 探测安装器默认落盘位置 %LOCALAPPDATA%\PortableGit\bin\bash.exe
+///
+/// 只读探测，不写配置；自动安装成功路径最终仍会写 gitBashPath（优先级更高）。
+#[cfg(target_os = "windows")]
+pub(crate) fn detect_portable_git_default() -> Option<String> {
+    let local_app_data = std::env::var("LOCALAPPDATA").ok()?;
+    let bash_path = Path::new(&local_app_data)
+        .join("PortableGit")
+        .join("bin")
+        .join("bash.exe");
+    if bash_path.exists() {
+        log::info!(
+            "[Check] Git Bash found at installer default location: {}",
+            bash_path.display()
+        );
+        Some(bash_path.to_string_lossy().to_string())
+    } else {
+        None
+    }
 }
 
 /// 通过 where git 查找 Git 安装目录下的 bash.exe

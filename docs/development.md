@@ -92,6 +92,31 @@ UI 已浏览器化（一套 UI 走桌面 Tauri / 宽屏浏览器 / 手机浏览�
 
 **发布注意**：前端产物修复后 `npm run build` + `scp -r dist/* root@orczh.top:/opt/cc-box/web/`（生产已磁盘分离，免重编/免重启）；仅 relay 二进制改动才需 `npm run deploy:relay`。手机端强刷获取新 bundle。
 
+## 依赖自动安装（installer.rs）防重入与可观测性（2026-11-10 修复）
+
+**症状**（Win10 新用户，日志 2026-11-10）：Auto Install 进度条反复横跳；Git 便携版下载 4 次、解压 4 次无一成功且 error.log 无任何解压错误；最终用户手动装 Git 才进入应用。
+
+**根因链**：
+
+1. `download_and_install_claude/git` 无并发互斥——某项失败后 `Promise.all` 提前 reject 复位 `isInstalling`，另一项的 342MB 下载变成后台孤儿任务继续发进度事件，被下一轮监听接收，两路事件来回改写同一进度条。
+2. 下载/解压共用**固定路径**（`%TEMP%\PortableGit-x.x.7z.exe`、`PortableGit-temp`）：下一轮重试会截断正被上一轮 SFX 读取的归档、删除正被占用的解压目录（Windows sharing violation），重试必然互相拆台。
+3. `extract_portable_git` 所有失败路径（SFX 非零退出、remove/rename 失败、bash.exe 缺失）零日志、`wait()` 无超时——失败原因完全不可考（首轮失败疑似杀软拦 SFX）。
+4. claude.exe 直接下载到最终路径：半截 exe 被 `where claude` + 扩展名检查误判为已安装（检查假阳性，让后续轮只重装 Git）。
+5. `check_git_bash` 只认配置/环境变量/`where git`，不认安装器默认落盘位置 `%LOCALAPPDATA%\PortableGit\bin\bash.exe`——解压成功但未走到写配置步骤时永远显示未安装。
+
+**修复**（installer.rs / checks.rs / pty.rs / App.vue）：
+
+- `ACTIVE_AUTO_INSTALL` 改 per-item map：同 item 二次注册直接拒绝（`INSTALL_IN_PROGRESS_MSG`），Claude 与 Git 可并发；`cancel_auto_install` 取消全部活动标志。
+- 归档路径与临时解压目录带 `INSTALL_RUN_SEQ` 运行序号后缀；解压成功后顺手清理遗留 `PortableGit-temp-*`。
+- SFX 等待加 `wait_with_timeout`（10 分钟，超时 kill 并报「可能被杀毒软件拦截」）；全部失败路径补 `log::error`。
+- claude.exe 先下 `.tmp-<run>` 再原子改名，消除检查假阳性。
+- `check_git_bash`/`pty::detect_git_bash` 增加 `checks::detect_portable_git_default()` 探测步骤（只读，不写配置）。
+- App.vue `autoInstall`：开头立即解绑上一轮监听；`Promise.all` → `allSettled`（某项失败不再放出孤儿任务）。
+
+**测试**：`src-tauri/src/tests/installer.rs` 的 `AutoInstallGate_*`（同 item 互斥 / 异 item 并存 / 取消语义）。
+
+**已知边界**：per-item 互斥与运行序号均为**进程内**状态——多个 GUI 窗口（独立进程）同时 Auto Install 时仍可能互踩（run_id 都从 1 起，`PortableGit-temp-1` 跨进程同名）。新用户首装场景单窗口概率极高，未做跨进程锁；若要支持，可复用 `~/.cc-box/locks/` 文件锁。
+
 ## 远程服务机制要点
 
 - `remote_server.rs`：局域网直连（axum WS + Web UI，web-assets 磁盘优先/内嵌兜底 + token 认证）；**stop 轮询等待端口释放**——Windows abort 后 IOCP 清理延迟曾致端口长期 LISTENING 残留、bind 10048

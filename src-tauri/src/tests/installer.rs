@@ -1,7 +1,7 @@
 use crate::installer::{
-    clean_and_prepend_path, clean_rc_content, decide_download_action, extract_semver,
-    is_newer_version, parse_version_output, ClaudeVersionEntry, ClaudeVersions,
-    DownloadAction,
+    cancel_all_auto_installs, clean_and_prepend_path, clean_rc_content, decide_download_action,
+    extract_semver, is_newer_version, parse_version_output, register_auto_install,
+    release_auto_install, ClaudeVersionEntry, ClaudeVersions, DownloadAction,
 };
 
 // 版本号 "1.0.33" 直接提取
@@ -365,4 +365,58 @@ fn DecideDownload_Cancelled_NoCache_001() {
 #[test]
 fn DecideDownload_EmptyFileZeroExpected_001() {
     assert_eq!(decide_download_action(true, 0, 0, false), DownloadAction::ReuseCache);
+}
+
+// ============================================
+// 自动安装 in-flight 互斥测试
+// （bug 复现背景：同一依赖可并发跑两路安装，旧下载持续发进度事件，
+//  新一轮进度条被两路事件来回改写；且固定归档路径被下一轮截断互相拆台）
+// ============================================
+
+// 全局 map 是共享状态，cargo test 默认并行——三个测试共用一把锁串行，
+// 否则 CancelAll 的「无活动任务」断言会撞上其他测试持有的注册
+static GATE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+// 同一 item 二次注册被拒绝（互斥）；释放后可重新注册
+#[test]
+fn AutoInstallGate_SameItemMutex_001() {
+    let _guard = GATE_TEST_LOCK.lock().unwrap();
+    let item = "test-mutex-a";
+    let first = register_auto_install(item);
+    assert!(first.is_some(), "首次注册应成功");
+    // 互斥：活动任务存在期间，同 item 的再次注册必须被拒绝
+    let second = register_auto_install(item);
+    assert!(second.is_none(), "同 item 并发注册应被拒绝");
+    // 释放后可重新注册
+    release_auto_install(item);
+    let third = register_auto_install(item);
+    assert!(third.is_some(), "释放后应允许重新注册");
+    release_auto_install(item);
+}
+
+// 不同 item 可并存（Claude 与 Git 并发安装是正常路径）
+#[test]
+fn AutoInstallGate_DifferentItemsCoexist_001() {
+    let _guard = GATE_TEST_LOCK.lock().unwrap();
+    let a = register_auto_install("test-coexist-a");
+    let b = register_auto_install("test-coexist-b");
+    assert!(a.is_some() && b.is_some(), "不同 item 应可并发注册");
+    // 任一完成释放不得清掉另一 item 的标志（旧单槽位实现会互相覆盖）
+    release_auto_install("test-coexist-a");
+    let b_again = register_auto_install("test-coexist-b");
+    assert!(b_again.is_none(), "释放 a 不应影响 b 的互斥");
+    release_auto_install("test-coexist-b");
+}
+
+// cancel_all_auto_installs 只影响当前活动标志，且释放后无活动可取消
+#[test]
+fn AutoInstallGate_CancelAll_001() {
+    use std::sync::atomic::Ordering;
+    let _guard = GATE_TEST_LOCK.lock().unwrap();
+    let item = "test-cancel-a";
+    assert!(!cancel_all_auto_installs(), "无活动任务时应返回 false");
+    let flag = register_auto_install(item).expect("注册失败");
+    assert!(cancel_all_auto_installs(), "有活动任务时应返回 true");
+    assert!(flag.load(Ordering::SeqCst), "取消后标志应为 true");
+    release_auto_install(item);
 }

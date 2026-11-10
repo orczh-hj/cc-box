@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 #[cfg(not(target_os = "windows"))]
 use std::process::Command;
@@ -39,12 +39,53 @@ fn oss_client(timeout: std::time::Duration) -> reqwest::Result<reqwest::blocking
 static ACTIVE_CLAUDE_DOWNLOADS: LazyLock<Mutex<HashMap<String, Arc<AtomicBool>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-/// 正在进行的自动安装（首次启动 Auto Install）：单一取消标志
+/// 正在进行的自动安装（首次启动 Auto Install）：item → 取消标志
 ///
-/// 同一时间最多一次自动安装（Auto Install 按钮触发），不存在并发，用单一 Option 即可。
-/// `cancel_auto_install` 命令把它置为 true，下载循环检测后立即中断。
-static ACTIVE_AUTO_INSTALL: LazyLock<Mutex<Option<Arc<AtomicBool>>>> =
-    LazyLock::new(|| Mutex::new(None));
+/// per-item 互斥：Claude 与 Git 可并发安装，但同一 item 同时只允许一个活动任务。
+/// 重复调用直接拒绝（曾致同一 342MB 下载跑两路、进度条互相回退）。
+/// `cancel_auto_install` 把所有活动标志置 true，下载循环检测后立即中断。
+static ACTIVE_AUTO_INSTALL: LazyLock<Mutex<HashMap<String, Arc<AtomicBool>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// 安装运行序号：归档/临时目录的唯一后缀
+///
+/// 旧实现用固定路径（如 `%TEMP%\PortableGit-x.x.7z.exe`），下一轮重试会截断
+/// 正被上一轮 SFX 读取的归档、删除正被占用的解压目录，导致重试必然互相拆台。
+static INSTALL_RUN_SEQ: AtomicU64 = AtomicU64::new(1);
+
+fn next_install_run_id() -> u64 {
+    INSTALL_RUN_SEQ.fetch_add(1, Ordering::SeqCst)
+}
+
+/// 安装已在进行中的稳定错误文案（前端原样展示）
+pub(crate) const INSTALL_IN_PROGRESS_MSG: &str = "该依赖正在安装中，请等待当前安装完成";
+
+/// 注册一项自动安装；该 item 已有活动任务时返回 None（in-flight 互斥）
+pub(crate) fn register_auto_install(item: &str) -> Option<Arc<AtomicBool>> {
+    let mut map = ACTIVE_AUTO_INSTALL.lock().unwrap();
+    if map.contains_key(item) {
+        return None;
+    }
+    let flag = Arc::new(AtomicBool::new(false));
+    map.insert(item.to_string(), flag.clone());
+    Some(flag)
+}
+
+/// 释放一项自动安装的注册（任务结束/失败时调用）
+pub(crate) fn release_auto_install(item: &str) {
+    ACTIVE_AUTO_INSTALL.lock().unwrap().remove(item);
+}
+
+/// 取消所有活动自动安装（`cancel_auto_install` 命令的实现体）
+pub(crate) fn cancel_all_auto_installs() -> bool {
+    let mut found = false;
+    let map = ACTIVE_AUTO_INSTALL.lock().unwrap();
+    for flag in map.values() {
+        flag.store(true, Ordering::SeqCst);
+        found = true;
+    }
+    found
+}
 
 /// 安装路径
 #[cfg(target_os = "windows")]
@@ -263,18 +304,17 @@ fn get_current_platform() -> String {
 pub async fn download_and_install_claude(app: AppHandle) -> Result<(), String> {
     log::info!("[Installer] Starting Claude CLI installation");
 
-    // 注册取消标志到全局 AUTO INSTALL map
-    let cancel_flag = Arc::new(AtomicBool::new(false));
-    {
-        let mut map = ACTIVE_AUTO_INSTALL.lock().unwrap();
-        *map = Some(cancel_flag.clone());
-    }
+    // 注册取消标志（in-flight 互斥：已有同 item 任务在跑时直接拒绝）
+    let cancel_flag = match register_auto_install("claude") {
+        Some(f) => f,
+        None => {
+            log::warn!("[Installer] Claude install already in progress, rejecting");
+            return Err(INSTALL_IN_PROGRESS_MSG.to_string());
+        }
+    };
 
     // 退出时清理标志
-    let cleanup = || {
-        let mut map = ACTIVE_AUTO_INSTALL.lock().unwrap();
-        *map = None;
-    };
+    let cleanup = || release_auto_install("claude");
 
     emit_progress(&app, "claude", "fetching", 0, "获取版本信息...");
 
@@ -334,15 +374,20 @@ pub async fn download_and_install_claude(app: AppHandle) -> Result<(), String> {
 
     let claude_path = claude_dir.join(filename);
 
+    // 先下载到带运行序号的临时文件再原子改名：半截 exe 落在最终路径会被
+    // `where claude` + 扩展名检查误判为已安装（检查假阳性，曾让后续轮只重装 Git）
+    let run_id = next_install_run_id();
+    let tmp_path = claude_dir.join(format!(".{}.tmp-{}", filename, run_id));
+
     // 下载文件（带取消标志）
     emit_progress(&app, "claude", "downloading", 0, "开始下载...");
-    let claude_path_clone = claude_path.clone();
+    let tmp_path_clone = tmp_path.clone();
     let app_clone = app.clone();
     let cancel_for_task = cancel_flag.clone();
     let download_result = tokio::task::spawn_blocking(move || {
         download_file(
             &download_url,
-            &claude_path_clone,
+            &tmp_path_clone,
             &app_clone,
             "claude",
             Some(&cancel_for_task),
@@ -350,8 +395,10 @@ pub async fn download_and_install_claude(app: AppHandle) -> Result<(), String> {
     })
     .await
     .map_err(|e| {
+        // JoinError（blocking 任务 panic）：必须释放注册，否则该 item 永久锁死
         let msg = format!("任务调度失败：{}", e);
         emit_progress(&app, "claude", "error", 0, msg.as_str());
+        cleanup();
         msg
     })?;
 
@@ -362,6 +409,25 @@ pub async fn download_and_install_claude(app: AppHandle) -> Result<(), String> {
         }
         // download_file 已经 emit 了 error 事件和具体原因
         return Err(e.to_string());
+    }
+
+    // 下载完成才落到最终路径（Windows rename 不覆盖已存在文件，先移除旧文件）
+    if claude_path.exists() {
+        if let Err(e) = fs::remove_file(&claude_path) {
+            let msg = format!("移除旧文件失败：{}", e);
+            log::error!("[Installer] {}", msg);
+            emit_progress(&app, "claude", "error", 0, msg.as_str());
+            cleanup();
+            return Err(msg);
+        }
+    }
+    if let Err(e) = fs::rename(&tmp_path, &claude_path) {
+        let msg = format!("放置 claude 可执行文件失败：{}", e);
+        log::error!("[Installer] {}", msg);
+        let _ = fs::remove_file(&tmp_path);
+        emit_progress(&app, "claude", "error", 0, msg.as_str());
+        cleanup();
+        return Err(msg);
     }
 
     // 设置权限（Unix）
@@ -396,12 +462,7 @@ pub async fn download_and_install_claude(app: AppHandle) -> Result<(), String> {
 /// 返回 true 表示找到了活动安装并已标记取消；false 表示当前没有活动安装。
 #[tauri::command]
 pub async fn cancel_auto_install() -> Result<bool, String> {
-    let flag = {
-        let map = ACTIVE_AUTO_INSTALL.lock().unwrap();
-        map.as_ref().cloned()
-    };
-    if let Some(f) = flag {
-        f.store(true, Ordering::SeqCst);
+    if cancel_all_auto_installs() {
         log::info!("[Installer] Cancel requested for auto install");
         Ok(true)
     } else {
@@ -443,9 +504,34 @@ fn fetch_git_latest() -> io::Result<GitLatestInfo> {
 }
 
 #[cfg(target_os = "windows")]
+/// SFX 解压等待上限：解压约需 1~3 分钟；杀软拦截 SFX 时进程可能挂住不退出，
+/// 超时 kill 防止安装永久卡死（曾致 4 轮解压无一生还且无任何错误日志）
+const GIT_EXTRACT_TIMEOUT_SECS: u64 = 10 * 60;
+
+#[cfg(target_os = "windows")]
+/// 等待子进程退出，超时 kill 并返回 TimedOut 错误
+fn wait_with_timeout(mut child: std::process::Child, timeout: std::time::Duration) -> io::Result<std::process::ExitStatus> {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(status);
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait()?; // 收尸；已 kill，状态无意义
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!("解压进程超过 {} 秒未退出，已终止（可能被杀毒软件拦截）", timeout.as_secs()),
+            ));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+}
+
+#[cfg(target_os = "windows")]
 /// 解压 PortableGit.7z.exe
-fn extract_portable_git(archive_path: &Path, target_dir: &Path, app: &AppHandle) -> io::Result<()> {
-    log::info!("[Installer] Extracting PortableGit to {}", target_dir.display());
+fn extract_portable_git(archive_path: &Path, target_dir: &Path, app: &AppHandle, run_id: u64) -> io::Result<()> {
+    log::info!("[Installer] Extracting PortableGit (run {}) to {}", run_id, target_dir.display());
 
     emit_progress(app, "git", "extracting", 0, "开始解压...");
 
@@ -455,12 +541,19 @@ fn extract_portable_git(archive_path: &Path, target_dir: &Path, app: &AppHandle)
     let local_app_data = std::env::var("LOCALAPPDATA")
         .unwrap_or_else(|_| format!("{}\\AppData\\Local", std::env::var("USERPROFILE").unwrap_or_default()));
 
-    // 创建临时解压目录
-    let temp_extract_dir = PathBuf::from(&local_app_data).join("PortableGit-temp");
+    // 临时解压目录带运行序号：固定名会被下一轮重试删除，
+    // Windows 下上一轮 SFX 仍持有句柄时 remove_dir_all 直接 sharing violation
+    let temp_extract_dir = PathBuf::from(&local_app_data).join(format!("PortableGit-temp-{}", run_id));
     if temp_extract_dir.exists() {
-        fs::remove_dir_all(&temp_extract_dir)?;
+        if let Err(e) = fs::remove_dir_all(&temp_extract_dir) {
+            log::error!("[Installer] Failed to remove stale temp dir {}: {}", temp_extract_dir.display(), e);
+            return Err(e);
+        }
     }
-    fs::create_dir_all(&temp_extract_dir)?;
+    if let Err(e) = fs::create_dir_all(&temp_extract_dir) {
+        log::error!("[Installer] Failed to create temp dir {}: {}", temp_extract_dir.display(), e);
+        return Err(e);
+    }
 
     // 解压到临时目录
     // PortableGit.7z.exe 参数：-y (自动确认), -o"path" (输出目录)
@@ -468,19 +561,31 @@ fn extract_portable_git(archive_path: &Path, target_dir: &Path, app: &AppHandle)
 
     let mut cmd = crate::platform::new_command(&archive_path.to_string_lossy());
     cmd.args(["-y", &format!("-o{}", temp_extract_str)]);
-    let status = cmd
+    let status = match cmd
         .spawn()
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?
-        .wait()
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))
+    {
+        Ok(child) => match wait_with_timeout(child, std::time::Duration::from_secs(GIT_EXTRACT_TIMEOUT_SECS)) {
+            Ok(status) => status,
+            Err(e) => {
+                log::error!("[Installer] Git SFX wait failed: {}", e);
+                fs::remove_dir_all(&temp_extract_dir).ok();
+                return Err(e);
+            }
+        },
+        Err(e) => {
+            log::error!("[Installer] Failed to spawn Git SFX {}: {}", archive_path.display(), e);
+            fs::remove_dir_all(&temp_extract_dir).ok();
+            return Err(e);
+        }
+    };
 
     if !status.success() {
+        let msg = format!("解压程序退出码异常: {}", status);
+        log::error!("[Installer] {}", msg);
         // 清理临时目录
         fs::remove_dir_all(&temp_extract_dir).ok();
-        return Err(io::Error::new(
-            io::ErrorKind::Other,
-            format!("Extract failed with status: {}", status),
-        ));
+        return Err(io::Error::new(io::ErrorKind::Other, msg));
     }
 
     emit_progress(app, "git", "extracting", 50, "移动文件...");
@@ -488,12 +593,35 @@ fn extract_portable_git(archive_path: &Path, target_dir: &Path, app: &AppHandle)
     // 如果目标目录已存在，先删除
     if target_dir.exists() {
         log::info!("[Installer] Removing existing PortableGit directory");
-        fs::remove_dir_all(target_dir)?;
+        if let Err(e) = fs::remove_dir_all(target_dir) {
+            log::error!("[Installer] Failed to remove existing PortableGit dir {}: {}", target_dir.display(), e);
+            fs::remove_dir_all(&temp_extract_dir).ok();
+            return Err(e);
+        }
     }
 
     // 移动临时目录到目标目录
-    fs::rename(&temp_extract_dir, target_dir)?;
+    if let Err(e) = fs::rename(&temp_extract_dir, target_dir) {
+        log::error!(
+            "[Installer] Failed to move {} to {}: {}",
+            temp_extract_dir.display(),
+            target_dir.display(),
+            e
+        );
+        fs::remove_dir_all(&temp_extract_dir).ok();
+        return Err(e);
+    }
     log::info!("[Installer] PortableGit moved to {}", target_dir.display());
+
+    // 顺手清理历史崩溃遗留的 PortableGit-temp-* 目录（尽力而为）
+    if let Ok(entries) = fs::read_dir(&local_app_data) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            if name.to_string_lossy().starts_with("PortableGit-temp") {
+                let _ = fs::remove_dir_all(entry.path());
+            }
+        }
+    }
 
     // 验证解压结果
     let bash_path = target_dir.join("bin").join("bash.exe");
@@ -503,10 +631,9 @@ fn extract_portable_git(archive_path: &Path, target_dir: &Path, app: &AppHandle)
         if alt_bash_path.exists() {
             log::info!("[Installer] bash.exe found in usr/bin");
         } else {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
-                format!("bash.exe not found after extraction"),
-            ));
+            let msg = "解压完成但未找到 bash.exe（归档可能损坏或被杀毒软件拦截）".to_string();
+            log::error!("[Installer] {}", msg);
+            return Err(io::Error::new(io::ErrorKind::Other, msg));
         }
     }
 
@@ -521,17 +648,16 @@ fn extract_portable_git(archive_path: &Path, target_dir: &Path, app: &AppHandle)
 pub async fn download_and_install_git(app: AppHandle) -> Result<(), String> {
     log::info!("[Installer] Starting Git portable installation");
 
-    // 注册取消标志到全局 AUTO INSTALL map
-    let cancel_flag = Arc::new(AtomicBool::new(false));
-    {
-        let mut map = ACTIVE_AUTO_INSTALL.lock().unwrap();
-        *map = Some(cancel_flag.clone());
-    }
-
-    let cleanup = || {
-        let mut map = ACTIVE_AUTO_INSTALL.lock().unwrap();
-        *map = None;
+    // 注册取消标志（in-flight 互斥：已有同 item 任务在跑时直接拒绝）
+    let cancel_flag = match register_auto_install("git") {
+        Some(f) => f,
+        None => {
+            log::warn!("[Installer] Git install already in progress, rejecting");
+            return Err(INSTALL_IN_PROGRESS_MSG.to_string());
+        }
     };
+
+    let cleanup = || release_auto_install("git");
 
     emit_progress(&app, "git", "fetching", 0, "获取版本信息...");
 
@@ -567,9 +693,11 @@ pub async fn download_and_install_git(app: AppHandle) -> Result<(), String> {
     let (_, git_dir) = get_install_dirs();
     let _parent_dir = git_dir.parent().unwrap();
 
-    // 下载到临时目录
+    // 下载到临时目录（带运行序号后缀：固定路径会被下一轮重试截断，
+    // 正被本轮 SFX 读取的归档损坏导致解压必然失败）
+    let run_id = next_install_run_id();
     let temp_dir = std::env::temp_dir();
-    let archive_path = temp_dir.join(&latest.file);
+    let archive_path = temp_dir.join(format!("{}.{}", latest.file, run_id));
 
     emit_progress(&app, "git", "downloading", 0, "开始下载...");
     let archive_path_clone = archive_path.clone();
@@ -586,8 +714,10 @@ pub async fn download_and_install_git(app: AppHandle) -> Result<(), String> {
     })
     .await
     .map_err(|e| {
+        // JoinError（blocking 任务 panic）：必须释放注册，否则该 item 永久锁死
         let msg = format!("任务调度失败：{}", e);
         emit_progress(&app, "git", "error", 0, msg.as_str());
+        cleanup();
         msg
     })?;
 
@@ -605,17 +735,20 @@ pub async fn download_and_install_git(app: AppHandle) -> Result<(), String> {
     let git_dir_clone = git_dir.clone();
     let app_clone = app.clone();
     let extract_result = tokio::task::spawn_blocking(move || {
-        extract_portable_git(&archive_path_clone, &git_dir_clone, &app_clone)
+        extract_portable_git(&archive_path_clone, &git_dir_clone, &app_clone, run_id)
     })
     .await
     .map_err(|e| {
+        // JoinError（blocking 任务 panic）：必须释放注册，否则该 item 永久锁死
         let msg = format!("任务调度失败：{}", e);
         emit_progress(&app, "git", "error", 0, msg.as_str());
+        cleanup();
         msg
     })?;
 
     if let Err(e) = extract_result {
         let msg = format!("解压 PortableGit 失败：{}", e);
+        log::error!("[Installer] {}", msg);
         emit_progress(&app, "git", "error", 0, msg.as_str());
         cleanup();
         return Err(msg);

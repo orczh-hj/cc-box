@@ -171,7 +171,13 @@ impl PtyManager {
             }
         }
 
-        // 3. where git → 推导安装目录下的 bash.exe（与启动检查同一实现；
+        // 3. 安装器默认位置（与启动检查同一实现：解压成功但未写配置时仍可启动）
+        #[cfg(target_os = "windows")]
+        if let Some(bash_path) = crate::checks::detect_portable_git_default() {
+            return Some(bash_path);
+        }
+
+        // 4. where git → 推导安装目录下的 bash.exe（与启动检查同一实现；
         //    git.exe 常在 <install>\cmd，bash.exe 在 <install>\bin，不能只看同目录）
         #[cfg(target_os = "windows")]
         if let Some(bash_path) = crate::checks::detect_git_bash_from_git() {
