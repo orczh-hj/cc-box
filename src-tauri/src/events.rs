@@ -34,6 +34,9 @@ pub mod names {
     pub const STATE_CHANGED: &str = "state-changed";
     /// 多实例：实例上/下线或会话集合变化（前端重拉聚合会话列表）
     pub const INSTANCES_CHANGED: &str = "instances-changed";
+    /// 市场清单后台版本检查发现更新并完成重拉（payload {id: 市场名}；
+    /// 前端在市场面板可见时自动重拉列表，不可见则下次打开自然读到新缓存）
+    pub const MARKET_UPDATED: &str = "market-updated";
 }
 
 /// 控制类事件统一出口：Tauri emit + 远程 rpc.event 广播

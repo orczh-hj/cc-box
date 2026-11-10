@@ -1476,8 +1476,11 @@ pub fn get_app_config() -> Result<AppConfig> {
     }
 
     let content = fs::read_to_string(&config_path)?;
+    // 容忍 UTF-8 BOM：部分编辑器/PowerShell 写回会带 BOM，serde_json 直接报错
+    // 会让整个配置读不出来（安装器写路径、前端更新配置全部失败）
+    let content = content.strip_prefix('\u{feff}').unwrap_or(&content);
     let config: AppConfig =
-        serde_json::from_str(&content).context("Failed to parse config.json")?;
+        serde_json::from_str(content).context("Failed to parse config.json")?;
 
     Ok(config)
 }
@@ -4723,12 +4726,18 @@ pub struct MarketplaceInfo {
     pub icon: Option<String>,
 }
 
-/// 市场列表内存缓存（组件目录扫描 + plugins list 的代价随插件数量增长）
-static MARKET_LIST_CACHE: Mutex<Option<(std::time::Instant, Vec<MarketplaceInfo>)>> = Mutex::new(None);
+/// 市场列表内存缓存（组件目录扫描 + plugins list 的代价随插件数量增长）；
+/// 元组第二项为代际（见 MARKET_CACHE_GEN），防止慢加载把失效后的旧数据写回缓存
+static MARKET_LIST_CACHE: Mutex<Option<(std::time::Instant, u64, Vec<MarketplaceInfo>)>> =
+    Mutex::new(None);
 const MARKET_LIST_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+/// 缓存代际：每次失效 +1；加载完成时若代际已变（期间有人失效，如后台刷新完成），
+/// 放弃写回——否则旧数据带新时间戳驻留缓存，自动更新在 TTL 内不生效
+static MARKET_CACHE_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// 失效市场列表缓存（市场增删/刷新、插件安装或启停后调用）
 pub(crate) fn invalidate_plugin_market_cache() {
+    MARKET_CACHE_GEN.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     if let Ok(mut guard) = MARKET_LIST_CACHE.lock() {
         *guard = None;
     }
@@ -4739,15 +4748,20 @@ pub(crate) fn invalidate_plugin_market_cache() {
 /// 结果按 60s 内存缓存：打开市场浏览器与刷新后立即重读都不再重复扫描插件目录。
 pub fn get_plugin_marketplaces() -> Result<Vec<MarketplaceInfo>> {
     if let Ok(guard) = MARKET_LIST_CACHE.lock() {
-        if let Some((at, data)) = guard.as_ref() {
+        if let Some((at, _gen, data)) = guard.as_ref() {
             if at.elapsed() < MARKET_LIST_TTL {
                 return Ok(data.clone());
             }
         }
     }
+    let gen = MARKET_CACHE_GEN.load(std::sync::atomic::Ordering::SeqCst);
     let data = load_plugin_marketplaces()?;
+    // 拿锁后在锁内复核代际（失效方先 gen+1 再拿同一把锁）：锁外复核存在
+    // 「复核后、拿锁前」被失效插入的窗口，旧数据会带新时间戳多活一个 TTL
     if let Ok(mut guard) = MARKET_LIST_CACHE.lock() {
-        *guard = Some((std::time::Instant::now(), data.clone()));
+        if MARKET_CACHE_GEN.load(std::sync::atomic::Ordering::SeqCst) == gen {
+            *guard = Some((std::time::Instant::now(), gen, data.clone()));
+        }
     }
     Ok(data)
 }
@@ -4855,7 +4869,30 @@ fn market_browse_local_copy(source: &str) -> Result<MarketSource> {
     }
 }
 
-/// 强制刷新浏览缓存（先清理再重新拉取）
+/// 市场缓存刷新串行化（进程内）：手动刷新与后台自动检查可能同时重拉同一市场，
+/// 不互斥会争抢同一 tmp/目标目录（clone 到非空目录报错 / rename 竞争）
+static MARKET_REFRESH_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// 市场缓存刷新跨进程互斥（进程间）：多 GUI 实例共享 ~/.cc-box 浏览缓存，
+/// 启动预检查可能同时触发。锁文件集中 ~/.cc-box/locks/（不污染缓存目录），
+/// OS advisory 锁进程崩溃自动释放。最多等 3s（另一实例的刷新通常秒级完成，
+/// 手动刷新用户等一等比直接报错体验好），仍拿不到才让调用方报错。
+fn acquire_market_refresh_lock(url: &str) -> Option<crate::file_lock::FileLock> {
+    let dir = get_gui_config_dir().ok()?.join("locks");
+    let _ = fs::create_dir_all(&dir);
+    let path = dir.join(format!("market-refresh-{}.lock", short_hash(url)));
+    for _ in 0..40 {
+        if let Ok(lock) = crate::file_lock::FileLock::try_exclusive(&path) {
+            return Some(lock);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(75));
+    }
+    log::warn!("[PluginMarket] cross-process refresh lock timeout: {}", url);
+    None
+}
+
+/// 强制刷新浏览缓存。git 源在互斥下 clone 到唯一临时目录后换入
+/// （避免 remove 与 clone 完成之间的窗口期读到半成品/缺失清单）。
 fn refresh_market_browse_copy(source: &str) -> Result<MarketSource> {
     match classify_market_source(source)? {
         MarketSource::Dir(p) => Ok(MarketSource::Dir(p)),
@@ -4866,13 +4903,201 @@ fn refresh_market_browse_copy(source: &str) -> Result<MarketSource> {
             Ok(MarketSource::Dir(cache))
         }
         MarketSource::Git(url) => {
+            let _guard = MARKET_REFRESH_LOCK.lock();
+            // 跨进程互斥：另一实例正在刷新同一市场时等它完成（结果等价），
+            // 3s 仍拿不到锁才报错（锁文件不可用或对方刷新异常缓慢）
+            let _xproc = acquire_market_refresh_lock(&url)
+                .context("获取市场刷新锁失败（另一实例可能正在刷新，请稍后重试）")?;
             let dir = market_browse_cache_dir()?.join(format!("src-{}", short_hash(&url)));
-            let _ = fs::remove_dir_all(&dir);
-            clone_market_repo(&url, &dir)?;
+            // tmp 带 pid：进程间也唯一（进程内已由 MARKET_REFRESH_LOCK 串行化）
+            let tmp = market_browse_cache_dir()?
+                .join(format!("src-{}.{}.tmp", short_hash(&url), std::process::id()));
+            let _ = fs::remove_dir_all(&tmp);
+            // 换入三步：旧目录 rename 到 .old（比直接 remove 可回滚）→
+            // tmp rename 入位 → 删 .old；第二步失败则把 .old rename 回去，
+            // 保证任意时刻磁盘上都有一份完整缓存（宁可中止也不毁旧缓存）
+            let old = market_browse_cache_dir()?
+                .join(format!("src-{}.{}.old", short_hash(&url), std::process::id()));
+            let _ = fs::remove_dir_all(&old);
+            let refresh = (|| -> Result<()> {
+                clone_market_repo(&url, &tmp)
+                    .with_context(|| format!("刷新市场缓存失败: {}", url))?;
+                let swap = (|| -> Result<()> {
+                    if dir.exists() {
+                        fs::rename(&dir, &old).context("旧缓存目录暂存失败")?;
+                    }
+                    match fs::rename(&tmp, &dir) {
+                        Ok(()) => {
+                            let _ = fs::remove_dir_all(&old);
+                            Ok(())
+                        }
+                        Err(e) => {
+                            // 回滚：旧目录归位后再报错，缓存保持可用
+                            if old.exists() {
+                                let _ = fs::rename(&old, &dir);
+                            }
+                            Err(anyhow::Error::new(e).context("市场缓存目录换入失败"))
+                        }
+                    }
+                })();
+                if swap.is_err() {
+                    let _ = fs::remove_dir_all(&tmp);
+                }
+                swap
+            })();
+            refresh?;
             Ok(MarketSource::Dir(dir))
         }
     }
 }
+
+// ==================== 市场清单轻量版本检查（应用启动时预检查，异步） ====================
+
+const MARKET_MANIFEST_REL_PATH: &str = ".claude-plugin/marketplace.json";
+
+/// git URL → raw marketplace.json 候选 URL 列表（按主机推导专用路径，
+/// 未知主机尝试通用 /raw/ 路径；获取不到版本文件即退化——不自动检查，靠手动刷新）。
+/// 仅支持 `https://host/owner/repo` 形态（classify 已把 GitHub 简写展开为 https）。
+pub(crate) fn marketplace_raw_urls(url: &str) -> Vec<String> {
+    // 归一化：去查询串（?…）、尾斜杠、.git 后缀
+    let u = url
+        .trim()
+        .split('?')
+        .next()
+        .unwrap_or("")
+        .trim_end_matches('/')
+        .trim_end_matches(".git");
+    let Some(rest) = u.strip_prefix("https://") else {
+        return Vec::new();
+    };
+    let Some((host, rest)) = rest.split_once('/') else {
+        return Vec::new();
+    };
+    let Some((owner, repo)) = rest.split_once('/') else {
+        return Vec::new();
+    };
+    // repo 段之后不允许再有路径（子目录部署的仓库无法推导 raw 路径，退化）
+    if repo.is_empty() || owner.is_empty() || repo.contains('/') || host.is_empty() {
+        return Vec::new();
+    }
+    let (host, owner, repo) = (host.to_string(), owner.to_string(), repo.to_string());
+    match host.as_str() {
+        "github.com" => vec![format!(
+            "https://raw.githubusercontent.com/{}/{}/HEAD/{}",
+            owner, repo, MARKET_MANIFEST_REL_PATH
+        )],
+        "gitee.com" => vec![
+            format!("https://gitee.com/{}/{}/raw/master/{}", owner, repo, MARKET_MANIFEST_REL_PATH),
+            format!("https://gitee.com/{}/{}/raw/main/{}", owner, repo, MARKET_MANIFEST_REL_PATH),
+        ],
+        "gitlab.com" => vec![format!(
+            "https://gitlab.com/{}/{}/-/raw/HEAD/{}",
+            owner, repo, MARKET_MANIFEST_REL_PATH
+        )],
+        // 自建托管（gitea/gitlab 等）多数提供 /raw/<branch>/；
+        // 不存在则 GET 失败，静默退化
+        _ => vec![
+            format!("https://{}/{}/{}/raw/master/{}", host, owner, repo, MARKET_MANIFEST_REL_PATH),
+            format!("https://{}/{}/{}/raw/main/{}", host, owner, repo, MARKET_MANIFEST_REL_PATH),
+        ],
+    }
+}
+
+/// 两份 marketplace.json 是否语义不同（JSON 解析成功按值比较，容空白/键序差异；
+/// 解析失败退化为原文 trim 比较）
+pub(crate) fn market_manifest_changed(local: &str, remote: &str) -> bool {
+    match (
+        serde_json::from_str::<serde_json::Value>(local),
+        serde_json::from_str::<serde_json::Value>(remote),
+    ) {
+        (Ok(a), Ok(b)) => a != b,
+        _ => local.trim() != remote.trim(),
+    }
+}
+
+/// 检查某未注册市场的浏览副本是否过期：只拉 raw marketplace.json（KB 级），
+/// 与本地缓存语义比较；无缓存/来源不可推导/版本文件拉取失败均返回 false（退化）。
+fn check_market_browse_update(source: &str) -> bool {
+    let (candidates, cache_path) = match classify_market_source(source) {
+        Ok(MarketSource::Dir(_)) => return false, // 本地目录实时读，无需检查
+        Ok(MarketSource::JsonUrl(url)) => {
+            let cache = market_browse_cache_dir()
+                .ok()
+                .map(|d| d.join(format!("src-{}.json", short_hash(&url))));
+            (vec![url], cache)
+        }
+        Ok(MarketSource::Git(url)) => {
+            let cache = market_browse_cache_dir().ok().map(|d| {
+                d.join(format!("src-{}", short_hash(&url)))
+                    .join(MARKET_MANIFEST_REL_PATH)
+            });
+            (marketplace_raw_urls(&url), cache)
+        }
+        Err(_) => return false,
+    };
+    // 本地无缓存说明尚未成功添加，交给首次浏览/手动刷新路径
+    let Some(cache_path) = cache_path.filter(|p| p.is_file()) else {
+        return false;
+    };
+    let Ok(local) = fs::read_to_string(&cache_path) else {
+        return false;
+    };
+    for url in &candidates {
+        if let Ok(remote) = http_get_market_json(url) {
+            return market_manifest_changed(&local, &remote);
+        }
+    }
+    false
+}
+
+/// 收集需要版本检查的市场（name, source）：CC-Box 列表中的未注册市场
+/// （含内置 ccbox-market；已注册的归 Claude 管理更新，不检查）。
+/// 不走插件目录扫描（重），只读 config + known_marketplaces.json + 推荐清单。
+fn collect_unregistered_markets() -> Vec<(String, String)> {
+    let custom = get_app_config()
+        .map(|c| c.custom_markets.unwrap_or_default())
+        .unwrap_or_default();
+    let presets = get_market_presets().unwrap_or_default();
+    with_builtin_market(&custom, &presets)
+        .into_iter()
+        .filter(|m| !market_registered(&m.name).unwrap_or(false))
+        .map(|m| (m.name, m.source))
+        .collect()
+}
+
+/// 应用启动时的市场清单预检查（lib.rs 异步初始化阶段调用）：
+/// 后台线程逐个未注册市场只拉 raw marketplace.json（KB 级）与本地缓存做
+/// 语义比较，检测到更新才重拉浏览缓存、失效列表缓存，并广播
+/// `market-updated {id: 市场名}`（前端市场面板可见时自动重拉列表）。
+/// 用户打开面板即可见最新条目，面板本身读缓存零阻塞。
+/// 市场收集也放线程内（get_market_presets 冷启动含 5s 网络，不能占
+/// async worker 或推迟同任务后续启动步骤）；单线程顺序执行（进程内无
+/// 并发触发点）；多实例刷新冲突由 refresh 内跨进程文件锁让位兜底。
+/// 注：刷新完成只广播 market-updated、不做跨实例 state-changed——其他
+/// 实例的 60s 列表缓存靠 TTL 自然收敛（影响有界，刻意取舍）。
+pub fn startup_market_version_check() {
+    std::thread::spawn(|| {
+        for (name, source) in collect_unregistered_markets() {
+            if !check_market_browse_update(&source) {
+                continue;
+            }
+            log::info!("[PluginMarket] marketplace manifest updated, refreshing: {}", name);
+            match refresh_market_browse_copy(&source) {
+                Ok(_) => {
+                    invalidate_plugin_market_cache();
+                    crate::remote_state::emit_event(
+                        crate::events::names::MARKET_UPDATED,
+                        &name,
+                        "",
+                    );
+                }
+                Err(e) => log::warn!("[PluginMarket] refresh after update failed: {}", e),
+            }
+        }
+    });
+}
+
+
 
 /// 清理某来源的浏览缓存
 fn clean_market_browse_copy(source: &str) {

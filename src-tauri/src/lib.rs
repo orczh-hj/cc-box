@@ -350,6 +350,10 @@ pub fn run(initial_dir: Option<String>, new_window: bool) {
                 tauri::async_runtime::spawn_blocking(file_transfer::startup_cleanup);
                 // 历史会话回收站清理：超过 30 天的 transcript 彻底删除
                 tauri::async_runtime::spawn_blocking(crate::store::sweep_trash);
+                // 插件市场清单预检查（自带后台线程，不阻塞启动）：未注册市场
+                // 只拉 raw marketplace.json 比对，有更新才重拉缓存并广播
+                // market-updated——用户打开市场面板即可见最新条目
+                crate::store::startup_market_version_check();
                 // 定时 TTL sweep（惰性清理的兜底：连接断开后再无 file_ 命令触发；
                 // 内存 retain + 少量删文件，开销可忽略，直接在 async 上下文跑）
                 tauri::async_runtime::spawn(async move {

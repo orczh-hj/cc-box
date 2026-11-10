@@ -363,8 +363,9 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onUnmounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
+import { transport } from '@/api/transport'
 import { useAppStore } from '@/stores/app'
 import {
   addPluginMarketplace,
@@ -493,6 +494,25 @@ watch(
     else railOpen.value = false
   }
 )
+
+// 后台版本检查发现市场更新并重拉完成（market-updated {id: 市场名}）：
+// 面板可见时自动重拉列表；不可见则不动作，下次打开自然读到新缓存
+let unlistenMarketUpdated: Awaited<ReturnType<typeof transport.listen>> | undefined
+
+onMounted(async () => {
+  unlistenMarketUpdated = await transport.listen<{ id: string }>('market-updated', ({ id }) => {
+    if (!props.visible) return
+    // 正在安装/刷新等动作进行中不打断（动作完成后缓存已失效，列表自然重读）
+    if (busyKey.value) return
+    // 只在未选中市场或更新的正是当前市场时重拉（fetchMarkets 本身是全量拉取）
+    if (selected.value && id && selected.value.name.toLowerCase() !== id.toLowerCase()) return
+    void fetchMarkets()
+  })
+})
+
+onUnmounted(() => {
+  void unlistenMarketUpdated?.()
+})
 
 function close() {
   railOpen.value = false

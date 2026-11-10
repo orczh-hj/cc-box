@@ -1510,6 +1510,27 @@ fn HideProject_PersistAndDedup_002() {
     assert_eq!(hidden.len(), 2);
 }
 
+// 带 UTF-8 BOM 的 config.json 仍可解析（部分编辑器/PowerShell 写回带 BOM；
+// 曾致安装器写路径失败 + 前端 unhandled rejection，整份配置读不出来）
+#[test]
+fn GetAppConfig_TolerateBom_003() {
+    use std::io::Write;
+
+    let _cfg_lock = super::CONFIG_DIR_TEST_LOCK.lock();
+    let _cfg_guard = super::TestConfigDirGuard::new("config-bom");
+
+    let config_path = crate::store::get_gui_config_dir().unwrap().join("config.json");
+    let mut f = std::fs::File::create(&config_path).unwrap();
+    // UTF-8 BOM + 合法 JSON（含中文字段验证多字节不被破坏）
+    f.write_all("\u{feff}{\"fontSize\": 14, \"lastOpenedProject\": \"E:\\\\中文项目\"}".as_bytes())
+        .unwrap();
+    drop(f);
+
+    let config = get_app_config().unwrap();
+    assert_eq!(config.font_size, Some(14));
+    assert_eq!(config.last_opened_project.as_deref(), Some("E:\\中文项目"));
+}
+
 // 取消隐藏：按归一化移除；未隐藏路径调用无副作用
 #[test]
 fn UnhideProject_RemoveNormalized_003() {
@@ -1704,4 +1725,93 @@ fn HistoryDelete_RejectTraversalSessionId_003() {
             err
         );
     }
+}
+
+// ==================== 市场清单轻量版本检查（marketplace_raw_urls / market_manifest_changed） ====================
+
+/// github git URL（含 .git 后缀）推导出唯一 raw 候选（HEAD 引用，不依赖默认分支名）
+#[test]
+fn MarketplaceRawUrls_Github_HeadRef() {
+    let urls = crate::store::marketplace_raw_urls("https://github.com/Imbad0202/academic-research-skills.git");
+    assert_eq!(
+        urls,
+        vec!["https://raw.githubusercontent.com/Imbad0202/academic-research-skills/HEAD/.claude-plugin/marketplace.json"]
+    );
+}
+
+/// gitee git URL 推导 master/main 两个候选（gitee raw 不支持 HEAD 引用）
+#[test]
+fn MarketplaceRawUrls_Gitee_MasterMain() {
+    let urls = crate::store::marketplace_raw_urls("https://gitee.com/orczh/ccbox-market.git");
+    assert_eq!(
+        urls,
+        vec![
+            "https://gitee.com/orczh/ccbox-market/raw/master/.claude-plugin/marketplace.json",
+            "https://gitee.com/orczh/ccbox-market/raw/main/.claude-plugin/marketplace.json",
+        ]
+    );
+}
+
+/// 未知主机尝试通用 /raw/<branch>/ 候选（自建 gitea/gitlab 多数支持；
+/// 版本文件不存在则 GET 失败，静默退化为不自动检查）
+#[test]
+fn MarketplaceRawUrls_UnknownHost_GenericRaw() {
+    let urls = crate::store::marketplace_raw_urls("https://git.mycorp.io/team/plugins");
+    assert_eq!(
+        urls,
+        vec![
+            "https://git.mycorp.io/team/plugins/raw/master/.claude-plugin/marketplace.json",
+            "https://git.mycorp.io/team/plugins/raw/main/.claude-plugin/marketplace.json",
+        ]
+    );
+}
+
+/// 子目录部署（owner/repo 之外还有路径）与非 https 源不可推导 → 空候选（退化）
+#[test]
+fn MarketplaceRawUrls_DeepPathOrNonHttps_Empty() {
+    assert!(crate::store::marketplace_raw_urls("https://github.com/a/b/c").is_empty());
+    assert!(crate::store::marketplace_raw_urls("ssh://git@github.com/a/b.git").is_empty());
+    assert!(crate::store::marketplace_raw_urls("not-a-url").is_empty());
+}
+
+/// 语义比较：仅空白/键序差异不算更新；插件条目新增才算
+#[test]
+fn MarketManifestChanged_SemanticCompare() {
+    let local = r#"{"name":"m","plugins":[{"name":"a"}]}"#;
+    // 空白与键序不同，语义相同 → 无更新
+    let reformatted = "{\n  \"plugins\": [ { \"name\" : \"a\" } ] ,  \"name\": \"m\"\n}";
+    assert!(!crate::store::market_manifest_changed(local, reformatted));
+    // 新增插件条目 → 有更新
+    let updated = r#"{"name":"m","plugins":[{"name":"a"},{"name":"b"}]}"#;
+    assert!(crate::store::market_manifest_changed(local, updated));
+    // version 字段提升 → 有更新
+    let bumped = r#"{"name":"m","metadata":{"version":"0.6.0"},"plugins":[{"name":"a"}]}"#;
+    assert!(crate::store::market_manifest_changed(local, bumped));
+}
+
+/// 任一侧不是合法 JSON 时退化为原文 trim 比较（本地缓存被截断等异常场景）
+#[test]
+fn MarketManifestChanged_InvalidJson_FallbackTrim() {
+    let a = "  {broken json  ";
+    assert!(!crate::store::market_manifest_changed(a, "{broken json"));
+    assert!(crate::store::market_manifest_changed(a, "different"));
+}
+
+/// URL 归一化：尾斜杠与查询串不影响推导
+#[test]
+fn MarketplaceRawUrls_TrailingSlashAndQuery_Normalized() {
+    let urls = crate::store::marketplace_raw_urls("https://github.com/a/b.git/?t=1");
+    assert_eq!(
+        urls,
+        vec!["https://raw.githubusercontent.com/a/b/HEAD/.claude-plugin/marketplace.json"]
+    );
+}
+
+/// 混合情形：一侧合法 JSON、另一侧非法 → 走 trim 回退（内容不同即视为有更新，
+/// 保守触发重拉；重拉后本地恢复合法，下次比较回到语义路径）
+#[test]
+fn MarketManifestChanged_MixedValidity_FallbackTrim() {
+    let valid = r#"{"name":"m"}"#;
+    assert!(crate::store::market_manifest_changed(valid, "{broken"));
+    assert!(!crate::store::market_manifest_changed("  {broken", "{broken"));
 }
