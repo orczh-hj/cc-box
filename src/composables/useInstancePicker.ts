@@ -10,6 +10,9 @@ export interface PickableInstance {
   name: string
 }
 
+/** 选择器「＋ 新建窗口」项的返回值（调用方据此拉起窗口并等待其上线） */
+export const NEW_INSTANCE = '__new__'
+
 const visible = ref(false)
 const instances = ref<PickableInstance[]>([])
 let resolver: ((id?: string) => void) | null = null

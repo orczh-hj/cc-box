@@ -98,7 +98,7 @@ import { ref, onMounted, onUnmounted, watch, nextTick, computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useAppStore } from '@/stores/app'
 import { useSessionStore } from '@/stores/session'
-import { useInstancePicker } from '@/composables/useInstancePicker'
+import { useInstancePicker, NEW_INSTANCE } from '@/composables/useInstancePicker'
 import { useSidebarStore, type SidebarPanelType } from '@/stores/sidebar'
 import { useConfigStore } from '@/stores/config'
 import { openInFileManager, logMessage, onRemoteSessionCreated, onRemoteSessionClosed, onSessionRenamed, renameSession, spawnNewInstance, updateMemberWindowTitle } from '@/api/tauri'
@@ -109,7 +109,7 @@ import { useToast } from '@/composables/useToast'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { isTauriEnv } from '@/api/platform'
 import { remoteTransport } from '@/api/remote-transport'
-import { shouldOfferLaunchWindow } from '@/utils/remoteWindows'
+import { shouldOfferLaunchWindow, waitForNewInstance } from '@/utils/remoteWindows'
 import TerminalHeader from './TerminalHeader.vue'
 import XTermTerminal from './XTermTerminal.vue'
 import IconBar from './IconBar.vue'
@@ -124,6 +124,8 @@ import { checkCodeText } from '@/utils/check-i18n'
 
 const emit = defineEmits<{
   back: []
+  /** 打开项目（远程承接会话时窗口停在项目页/其他项目 → 切到该会话项目） */
+  selectProject: [path: string]
 }>()
 
 const props = defineProps<{
@@ -141,6 +143,38 @@ let unlistenRemoteClosed: (() => void) | null = null
 let unlistenSessionRenamed: (() => void) | null = null
 const sessionStore = useSessionStore()
 const { pick } = useInstancePicker()
+
+/**
+ * 选目标实例（三处新建/恢复入口共用）：
+ * - 选「＋ 新建窗口」：拉起窗口并等待其上线，返回新实例 id
+ * - 取消（多实例弹窗）：返回 undefined，调用方中止
+ * - 其余：返回实例 id（单实例/桌面无感，可能为 null = 默认路由）
+ *
+ * 零窗口（known 为空）时 pick 直接 resolve undefined 也按取消中止——
+ * 原实现继续走默认路由，但无成员时 session.create 必然 NoInstance 失败，
+ * 中止更合理；新建入口已由 showLaunchWindow 分支先行拦截转拉起窗口。
+ */
+async function pickTargetInstance(): Promise<string | null | undefined> {
+  const known = sessionStore.knownInstances
+  const inst = await pick(known)
+  if (inst === NEW_INSTANCE) {
+    const knownIds = new Set(sessionStore.remoteInstances.map((i) => i.id))
+    try {
+      await spawnNewInstance()
+    } catch (err) {
+      toast.error(t('launchWindowFailed', { error: String(err) }))
+      return undefined
+    }
+    const newId = await waitForNewInstance(knownIds)
+    if (!newId) {
+      toast.error(t('waitNewInstanceTimeout'))
+      return undefined
+    }
+    return newId
+  }
+  if (inst === undefined && known.length > 1) return undefined // 取消
+  return inst ?? null
+}
 const toast = useToast()
 const sidebarStore = useSidebarStore()
 const configStore = useConfigStore()
@@ -278,9 +312,9 @@ async function startResumeSession(projectPath: string, sessionId: string, sessio
   // 多实例远程：未命中已有 Tab（将新建）时先选目标实例——单实例/桌面无感
   const existing = sessionStore.getTabBySessionId(sessionId)
   if (!existing || existing.projectPath !== projectPath) {
-    const inst = await pick(sessionStore.knownInstances)
-    if (inst === undefined && sessionStore.knownInstances.length > 1) return // 取消
-    sessionStore.pendingInstanceId = inst ?? null
+    const inst = await pickTargetInstance()
+    if (inst === undefined) return // 取消
+    sessionStore.pendingInstanceId = inst
   }
   // 复用优先（resumeSessionTab）：已有该对话的 Tab 切换/重启，未命中才新建
   const { tabId } = sessionStore.resumeSessionTab(projectPath, sessionId, sessionName)
@@ -329,6 +363,12 @@ onMounted(async () => {
     sessionStore.setTabPty(tabId, id)
     sessionStore.setActiveTab(tabId)
     void nextTick(() => terminalRef.value?.startTab(tabId))
+    // 桌面窗口承接远程会话：窗口停在项目页/其他项目时切到该会话的项目
+    // （复用 App.handleOpenProject 全流程；进入终端页后 visible watcher 会
+    // 同步窗口标题给 Broker → 托盘/手机分组名跟随项目名）
+    if (isTauriEnv && cwd !== appStore.cwd) {
+      emit('selectProject', cwd)
+    }
   })
 
   // 远程（手机）显式关闭会话：桌面同步关闭对应 Tab（pty-exit 只置 stopped
@@ -461,9 +501,9 @@ async function handleNewSession() {
     logMessage('warn', 'handleNewSession: no terminalRef')
     return
   }
-  const inst = await pick(sessionStore.knownInstances)
-  if (inst === undefined && sessionStore.knownInstances.length > 1) return // 取消
-  sessionStore.pendingInstanceId = inst ?? null
+  const inst = await pickTargetInstance()
+  if (inst === undefined) return // 取消
+  sessionStore.pendingInstanceId = inst
   terminalRef.value.startNewSession(cwd)
 }
 
@@ -486,9 +526,9 @@ async function handleResumeSession(sessionId: string) {
 
   const existing = sessionStore.getTabBySessionId(sessionId)
   if (!existing || existing.projectPath !== cwd) {
-    const inst = await pick(sessionStore.knownInstances)
-    if (inst === undefined && sessionStore.knownInstances.length > 1) return // 取消
-    sessionStore.pendingInstanceId = inst ?? null
+    const inst = await pickTargetInstance()
+    if (inst === undefined) return // 取消
+    sessionStore.pendingInstanceId = inst
   }
   const { tabId } = sessionStore.resumeSessionTab(cwd, sessionId, name)
   sessionStore.setActiveTab(tabId)

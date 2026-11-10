@@ -13,6 +13,10 @@
           >
             {{ inst.name }}
           </button>
+          <!-- 新建窗口：拉起后自动把会话路由到新窗口 -->
+          <button class="picker-item picker-new" @click="choose(NEW_INSTANCE)">
+            {{ t('instancePickerNew') }}
+          </button>
           <button class="picker-cancel" @click="choose(undefined)">
             {{ t('cancel') }}
           </button>
@@ -24,7 +28,7 @@
 
 <script setup lang="ts">
 import { useI18n } from 'vue-i18n'
-import { useInstancePicker } from '@/composables/useInstancePicker'
+import { useInstancePicker, NEW_INSTANCE } from '@/composables/useInstancePicker'
 
 const { t } = useI18n()
 const { visible, instances, choose } = useInstancePicker()
@@ -71,6 +75,11 @@ const { visible, instances, choose } = useInstancePicker()
 }
 .picker-item:active {
   border-color: var(--accent-primary, #1e3a5f);
+}
+/* 「＋ 新建窗口」：虚线边框弱化为动作项（非既有窗口） */
+.picker-new {
+  border-style: dashed;
+  color: var(--text-secondary, #5a5550);
 }
 .picker-cancel {
   padding: 10px;

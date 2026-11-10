@@ -80,13 +80,13 @@
         <div class="header-row">
           <h2>{{ t('projects') }}</h2>
           <div class="header-actions">
-            <!-- 浏览器/手机：宿主零窗口时提供“启动窗口”（Broker 经 RPC 拉起空窗口） -->
+            <!-- 浏览器/手机：新建窗口（Broker 经 RPC 拉起空窗口；零窗口时文案为“启动窗口”） -->
             <button
-              v-if="showLaunchWindow"
+              v-if="showNewWindowBtn"
               class="header-btn launch-window-btn"
               :disabled="launching"
-              :title="launching ? t('launchingWindow') : t('launchWindow')"
-              :aria-label="t('launchWindow')"
+              :title="launching ? t('launchingWindow') : launchButtonText"
+              :aria-label="launching ? t('launchingWindow') : launchButtonText"
               @click="handleLaunchWindow"
             >
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -232,7 +232,7 @@ import { snapWindow } from '@/composables/useAppShortcuts'
 import { ctrl, cmd } from '@/utils/platform'
 import { isTauriEnv } from '@/api/platform'
 import { spawnNewInstance, type SessionInfo } from '@/api/tauri'
-import { shouldOfferLaunchWindow } from '@/utils/remoteWindows'
+import { canLaunchNewWindow } from '@/utils/remoteWindows'
 import { useDeviceSwitcher } from '@/composables/useDeviceSwitcher'
 
 const { t } = useI18n()
@@ -263,13 +263,13 @@ const localOptions = ref({
 const isSaving = ref(false)
 const saveSuccess = ref(false)
 
-/** 宿主零窗口：浏览器/手机可拉起一个新 GUI 窗口（Broker RPC） */
-const showLaunchWindow = computed(() =>
-  shouldOfferLaunchWindow(
-    isTauriEnv,
-    sessionStore.remoteInstancesKnown,
-    sessionStore.remoteInstances.length,
-  )
+/** 远程模式：首页常驻「新建/启动窗口」按钮（不限窗口数，Broker 侧兜底上限） */
+const showNewWindowBtn = computed(() =>
+  canLaunchNewWindow(isTauriEnv, sessionStore.remoteInstancesKnown),
+)
+/** 零窗口用「启动窗口」（引导语义），有窗口用「新建窗口」 */
+const launchButtonText = computed(() =>
+  sessionStore.remoteInstances.length === 0 ? t('launchWindow') : t('newWindow'),
 )
 const launching = ref(false)
 
