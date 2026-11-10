@@ -40,7 +40,9 @@
 
 ## 远程功能本地全链路测试（改远程相关代码后的标准动作）
 
-改 `remote/`（协议/relay）或远程相关前端/Rust 后，**在本地把中继链路完整跑一遍再部署**（relay debug 实时读 dist，两端都是新代码；比只测 8747 直连多覆盖 relay 透传与嵌入 UI）：
+改 `remote/`（协议/relay）或远程相关前端/Rust 后，**在本地把中继链路完整跑一遍再部署**（relay debug 实时读 dist，两端都是新代码；比只测 8747 直连多覆盖 relay 透传与嵌入 UI）。
+
+> **踩坑：`tauri:dev` 下桌面与手机的前端代码不同步**。桌面窗口走 vite dev server（:1420，前端改动即时生效），但手机端 UI——无论 8747 直连还是 relay 页面——读的都是磁盘 `dist/`（debug 构建实时读 dist，见 `remote_server.rs`）。**改了前端只用 `tauri:dev` 验证，手机会一直看到旧代码**；让手机看到新代码必须 `npm run build`（Rust 无需重编、dev 进程无需重启）。典型误判：桌面验证 OK、手机"没有看到变化"，误以为代码没生效。
 
 ```bash
 npm run dev:relay

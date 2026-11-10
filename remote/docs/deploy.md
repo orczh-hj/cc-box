@@ -124,6 +124,8 @@ sudo certbot -d cc.orczh.top   # 签发证书并自动配 443
 | **Rust 桌面**（src-tauri/） | 重启 `npm run tauri:dev` | 同左 | 无需动 relay |
 | **relay**（remote/relay/） | 无 | 无 | 交叉编译 + scp + 重启 |
 
+> **dev 模式两端不同步陷阱**：`tauri:dev` 下桌面窗口走 vite HMR（前端改动即时生效），但手机端 UI（8747 直连与 relay 页面）读磁盘 `dist/`——只跑 `tauri:dev` 不 `npm run build`，手机会一直看到旧前端（典型误判："桌面是新的、手机没变化，以为代码没生效"）。
+
 > **票据下载（远程文件直链）**：中继侧**零改动**——票据页面走现有 `/?dl=` 静态入口与 WS 透传（`<device_id>.<ticket>` 复用 token v2 前缀路由），relay 二进制无需重编/重启；只需按下方「仅前端更新」运行 `npm run deploy:web`。桌面必须同步升级（提供 `/dl` 与 `file_download_ticket`），否则前端自动降级为旧 Blob 分块下载。
 
 **仅前端更新（免重编 relay，生产已启用）**——relay 二进制**不内嵌 UI**，`CC_BOX_RELAY_WEB_DIR=/opt/cc-box/web` 指向的磁盘目录是 UI 的唯一来源（systemd 已配置；未配置或磁盘 miss 即 404）：
