@@ -5817,6 +5817,10 @@ fn install_plugin_lifecycle(
     // 无论成败都失效缓存：CLI 可能已部分写入
     invalidate_plugins_list_cache();
     invalidate_plugin_market_cache();
+    if let Err(e) = &res {
+        // 失败详情落日志：错误字符串只返回前端 toast，排查需完整错误链（含 CLI stderr）
+        log::warn!("[PluginMarket] {} {} failed: {:?}", action, plugin_ref, e);
+    }
     res.with_context(|| format!("Failed to {} '{}'", action, plugin_ref))?;
     Ok(())
 }
