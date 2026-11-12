@@ -94,7 +94,6 @@ export default {
 
   // Quick key bar (mobile breakpoint)
   quickKeySelectCopy: 'Select & Copy',
-  quickKeyPaste: 'Paste',
   quickKeyNewlineShort: 'Line break',
   quickKeyKeyboardHint: 'Show/hide soft keyboard',
   vkbCloseHint: 'Close keyboard panel',
@@ -140,7 +139,6 @@ export default {
   scBackspace: 'Backspace',
   scMoveLeft: 'Move cursor left',
   scMoveRight: 'Move cursor right',
-  scPaste: 'Paste',
   scPrevHistory: 'Previous history',
   scNextHistory: 'Next history',
   scAcceptCompletion: 'Accept completion',

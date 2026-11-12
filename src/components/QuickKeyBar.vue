@@ -38,11 +38,6 @@
       :aria-label="'select'"
       @click="$emit('select')"
     >{{ t('quickKeySelectCopy') }}</button>
-    <button
-      class="qk-btn qk-action"
-      :aria-label="'paste'"
-      @click="$emit('paste')"
-    >{{ t('quickKeyPaste') }}</button>
     <!-- 高频键常驻工具条（功能名/符号为主，不写组合键） -->
     <button
       v-for="k in hotKeys"
@@ -57,15 +52,16 @@
 
 <script setup lang="ts">
 /**
- * 快捷键工具条（手机断点）：键盘面板唯一入口（图标）+ 选择复制 + 粘贴
+ * 快捷键工具条（手机断点）：键盘面板唯一入口（图标）+ 选择复制
  * + 高频键（Esc / Enter / 方向键）。次级与危险键（Ctrl+C 等）只在键盘面板
- * 内，工具条不放误触即打断/退出 CLI 的直发键。
+ * 内，工具条不放误触即打断/退出 CLI 的直发键。粘贴走原生键盘输入法路径
+ * （XTermTerminal 的 input 事件拦截改道 term.paste）。
  */
 import { computed, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 
 defineProps<{ keyboardOpen?: boolean }>()
-defineEmits<{ select: []; toggleKeyboard: []; paste: []; send: [bytes: string] }>()
+defineEmits<{ select: []; toggleKeyboard: []; send: [bytes: string] }>()
 
 const { t } = useI18n()
 

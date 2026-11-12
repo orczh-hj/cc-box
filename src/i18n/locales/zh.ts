@@ -94,7 +94,6 @@ export default {
 
   // 快捷键工具条（手机断点）
   quickKeySelectCopy: '选择复制',
-  quickKeyPaste: '粘贴',
   quickKeyNewlineShort: '换行',
   quickKeyKeyboardHint: '显示/收起软键盘',
   vkbCloseHint: '收起键盘面板',
@@ -140,7 +139,6 @@ export default {
   scBackspace: '退格',
   scMoveLeft: '光标左移',
   scMoveRight: '光标右移',
-  scPaste: '粘贴',
   scPrevHistory: '上一条历史',
   scNextHistory: '下一条历史',
   scAcceptCompletion: '接受补全',

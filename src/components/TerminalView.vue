@@ -66,7 +66,6 @@
           :keyboard-open="kbMode"
           @select="handleSelectCopy"
           @toggle-keyboard="toggleKeyboardPanel"
-          @paste="terminalRef?.pasteFromClipboard()"
           @send="handleQuickKey"
         />
         <!-- 键盘面板（三模式：原生键盘 / 快捷键 / 电脑键盘） -->
@@ -76,7 +75,6 @@
           :platform="targetPlatform"
           @update:active-tab="kbTab = $event"
           @send="handleQuickKey"
-          @paste="terminalRef?.pasteFromClipboard()"
           @close="toggleKeyboardPanel"
         />
         <!-- 复制阅读器（手机复制部分内容）：buffer 快照 + 反渲染，系统原生长按选择 -->

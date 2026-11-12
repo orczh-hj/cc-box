@@ -98,14 +98,11 @@ describe('KeyboardPanel（手机键盘三模式）', () => {
     expect(wrapper.emitted('send')![0]).toEqual(['c'])
   })
 
-  // 粘贴项（本地动作）：emit paste，不发字节
-  it('KeyboardPanel_PasteAction_009', async () => {
+  // 快捷键面板不含粘贴项（已撤除：粘贴走原生键盘输入法路径，见 utils/ime-paste）
+  it('KeyboardPanel_NoPasteAction_009', () => {
     const wrapper = mount(KeyboardPanel, { props: { activeTab: 'shortcuts' } })
     const pasteBtn = wrapper.findAll('button').find(b => b.attributes('aria-label') === 'paste')
-    expect(pasteBtn).toBeDefined()
-    await pasteBtn!.trigger('click')
-    expect(wrapper.emitted('paste')).toHaveLength(1)
-    expect(wrapper.emitted('send')).toBeUndefined()
+    expect(pasteBtn).toBeUndefined()
   })
 
   // 终端范围外的键不收录：退出会话(Ctrl+D)、外部编辑器(Ctrl+G)、暂停(Ctrl+Z)、

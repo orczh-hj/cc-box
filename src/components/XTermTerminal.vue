@@ -63,6 +63,7 @@ import { safeDispose } from '@/utils/dispose'
 import { relativizePath } from '@/utils/path'
 import { mapTerminalGlyphs } from '@/utils/terminal-glyphs'
 import { buildTapMouseInit } from '@/utils/tap-mouse'
+import { shouldInterceptImeInput } from '@/utils/ime-paste'
 import { loadOsc52Clipboard } from '@/utils/osc52-clipboard'
 import { lightTheme, darkTheme } from '@/utils/terminal-theme'
 import type { SnapshotData } from '@/utils/terminal-reflow'
@@ -239,7 +240,24 @@ function loadRendererAddons(term: Terminal) {
     console.warn('[XTerm] Unicode 11 addon unavailable, fallback to default:', err)
   }
 
+  attachNativePasteIntercept(term)
   attachWebgl(term)
+}
+
+/** 原生键盘粘贴修复（软键盘剪贴板/长按粘贴走 textarea input 事件）：
+ *  xterm 只处理 insertText 且 data 原样发 PTY——insertFromPaste 被整体忽略
+ *  （粘贴无反应）、带换行的整段粘贴 \n 不归一且无括号包裹（换行丢失）。
+ *  capture 阶段拦截改走 term.paste（换行归一 + 括号粘贴，与桌面 Ctrl+V 同路径） */
+function attachNativePasteIntercept(term: Terminal) {
+  const el = term.element
+  if (!el) return
+  el.addEventListener('input', (e: Event) => {
+    const ev = e as InputEvent
+    if (!shouldInterceptImeInput(ev)) return
+    e.preventDefault()
+    e.stopImmediatePropagation()
+    term.paste(ev.data ?? '')
+  }, true)
 }
 
 // 跟踪每个 Terminal 的 WebGL addon 实例(用于 reload)
@@ -1033,20 +1051,6 @@ async function cleanup() {
 // 向活跃终端发送文字。移动端一律不聚焦：软键盘只由工具条「键盘」按钮唤出
 // （gesturetap 兜底），侧边栏插入/工具条按键/拖放等程序化路径聚焦会突然弹出
 // 键盘打断操作；桌面无软键盘问题，保持聚焦（接管/插入后键盘输入立即可用）
-/** 手机工具条「粘贴」：读系统剪贴板 → term.paste（xterm 括号粘贴，
- *  与桌面 Ctrl+V 同一路径；Android 软键盘自带粘贴按行拆 input 事件，
- *  多段长文会丢换行，故不走原生粘贴） */
-async function pasteFromClipboard() {
-  const instance = currentInstance()
-  // 无底层进程（spawn 失败/CLI 已退出的占位实例）不粘贴
-  if (!instance?.term || !instance.ptyId) return
-  try {
-    const text = await platformReadText()
-    if (text) instance.term.paste(text)
-  } catch {
-    /* 剪贴板不可用（权限/空）静默 */
-  }
-}
 
 function sendText(text: string, focusAfter = true) {
   const tabId = currentDisplayTabId.value
@@ -1319,8 +1323,6 @@ defineExpose({
   restartCurrentPty,
   cleanup,
   sendText,
-  /** 手机工具条「粘贴」（括号粘贴，与桌面 Ctrl+V 同路径） */
-  pasteFromClipboard,
   fitCurrentTerminal,
   refreshRemoteSessions,
   captureSnapshot,

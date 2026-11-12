@@ -18,11 +18,8 @@ export interface ShortcutItem {
   keys: string
   /** macOS 键名差异（Option=⌥ 等）；缺省同 keys */
   keysMac?: string
-  /** 发送到 PTY 的序列（平台间一致：Alt 在 mac 上是 Option/Meta，字节相同）。
-   *  action 项无 bytes */
+  /** 发送到 PTY 的序列（平台间一致：Alt 在 mac 上是 Option/Meta，字节相同） */
   bytes?: string
-  /** 本地动作（非字节发送）：paste = 读剪贴板并括号粘贴 */
-  action?: 'paste'
 }
 
 export interface ShortcutGroup {
@@ -58,14 +55,13 @@ export const CLAUDE_SHORTCUTS: ShortcutGroup[] = [
   },
   {
     // 次常用：翻历史、移动光标、粘贴（手机输入场景高频）
-    // 方向键/粘贴不在 Claude Code 文档绑定表内，但由终端与 CLI 直接处理
+    // 方向键不在 Claude Code 文档绑定表内，但由终端与 CLI 直接处理
     titleKey: 'scGroupCursor',
     items: [
       { labelKey: 'scPrevHistory', keys: '↑', bytes: '\x1b[A' },
       { labelKey: 'scNextHistory', keys: '↓', bytes: '\x1b[B' },
       { labelKey: 'scMoveLeft', keys: '←', bytes: '\x1b[D' },
       { labelKey: 'scMoveRight', keys: '→', bytes: '\x1b[C' },
-      { labelKey: 'scPaste', keys: '', action: 'paste' },
       { labelKey: 'scAcceptCompletion', keys: 'Tab', bytes: '\t' },
     ],
   },

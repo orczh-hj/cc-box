@@ -30,8 +30,8 @@
             v-for="item in group.items"
             :key="item.labelKey"
             class="kp-item"
-            :aria-label="item.action ?? item.bytes"
-            @click="item.action === 'paste' ? $emit('paste') : $emit('send', item.bytes!)"
+            :aria-label="item.bytes"
+            @click="$emit('send', item.bytes!)"
           >
             <span v-if="item.keys || item.keysMac" class="kp-item-keys">{{ item.keysMac && isMacTarget ? item.keysMac : item.keys }}</span>
             <span class="kp-item-label">{{ t(item.labelKey) }}</span>
@@ -74,8 +74,6 @@ const props = defineProps<{
 const emit = defineEmits<{
   'update:activeTab': [tab: KeyboardTab]
   send: [bytes: string]
-  /** 粘贴：读系统剪贴板 + 括号粘贴（非字节直发） */
-  paste: []
   close: []
 }>()
 
