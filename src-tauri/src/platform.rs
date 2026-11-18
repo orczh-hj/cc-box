@@ -16,6 +16,9 @@ const CREATE_NO_WINDOW: u32 = 0x08000000;
 ///
 /// Windows 上调用 `.creation_flags(CREATE_NO_WINDOW)` 抑制子进程控制台窗口。
 /// Unix 上无操作。
+/// **契约**：`creation_flags` 是整体覆盖语义——需要叠加其他 flag 的调用方
+/// （如 broker_client 的进程组隔离）必须在 configure **之后**重设，且重设值
+/// 必须包含 CREATE_NO_WINDOW（参见守卫测试 tests/process_spawn_guard.rs）。
 pub(crate) fn configure_command(cmd: &mut Command) {
     #[cfg(target_os = "windows")]
     {

@@ -197,21 +197,35 @@ fn run_broker_with_tray() {
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
             let handle = app.handle().clone();
-            // 托盘先装上：即使服务启动失败/已有实例，用户也能看到并退出
-            if let Err(e) = broker::tray::install(&handle) {
-                log::warn!("[broker] tray unavailable: {}", e);
-            }
+            // 托盘不在这里装：必须等 broker 线程拿到单实例锁且 IPC 入口就绪后
+            // 再装（run_headless_with 的 on_ready）。否则竞态拉起的第二个 broker
+            // 进程会先装图标再因锁失败退出，Windows 上留下僵尸托盘图标
+            // （macOS 表现为菜单栏图标闪烁）。
             // 托盘更新红点：Broker 常驻期间定期检查新版本
             broker::update::spawn_checker(handle.clone());
 
             // Broker 服务跑在独立 tokio 线程；Tauri 事件循环只负责托盘
+            let tray_handle = handle.clone();
             std::thread::spawn(move || {
                 let rt = tokio::runtime::Builder::new_multi_thread()
                     .enable_all()
                     .build()
                     .expect("failed to build broker runtime");
                 rt.block_on(async move {
-                    broker::run_headless().await;
+                    broker::run_headless_with(Some(Box::new(move || {
+                        let install_handle = tray_handle.clone();
+                        // 托盘须在主线程安装；退出竞态时调用失败仅记日志
+                        if let Err(e) =
+                            tray_handle.run_on_main_thread(move || {
+                                if let Err(e) = broker::tray::install(&install_handle) {
+                                    log::warn!("[broker] tray unavailable: {}", e);
+                                }
+                            })
+                        {
+                            log::warn!("[broker] tray install dispatch failed: {}", e);
+                        }
+                    })))
+                    .await;
                     handle.exit(0);
                 });
             });
@@ -222,8 +236,14 @@ fn run_broker_with_tray() {
         .run(|_app, event| {
             // 只有外部事件导致的 ExitRequested（code=None）才阻止；
             // app.exit(0) 必须能真正退出
-            if let tauri::RunEvent::ExitRequested { code: None, api, .. } = event {
+            if let tauri::RunEvent::ExitRequested { code: None, ref api, .. } = event {
                 api.prevent_exit();
+            }
+            // 显式清托盘：进程退出不保证托盘 Drop（Windows 上沉淀僵尸图标）
+            if let tauri::RunEvent::Exit = event {
+                if let Some(tray) = _app.tray_by_id(broker::tray::TRAY_ID) {
+                    let _ = tray.set_visible(false);
+                }
             }
         });
 }

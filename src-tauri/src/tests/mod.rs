@@ -35,6 +35,8 @@ mod file_transfer;
 #[cfg(test)]
 mod plugin_market;
 #[cfg(test)]
+mod process_spawn_guard;
+#[cfg(test)]
 mod store_edit;
 
 /// EVENT_HOOK 全局单例的测试互斥锁：整体 set/clear hook 的测试（remote_state

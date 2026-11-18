@@ -820,8 +820,14 @@ pub async fn set_mcp_server_enabled(
 /// #[cc_command] 自动）
 #[cc_command(write = "plugins")]
 #[tauri::command]
-pub async fn set_plugin_enabled(plugin_id: String, enabled: bool) -> Result<(), String> {
-    crate::store::set_plugin_enabled(&plugin_id, enabled).map_err(|e| e.to_string())
+pub async fn set_plugin_enabled(
+    plugin_id: String,
+    enabled: bool,
+    scope: Option<String>,
+    project_path: Option<String>,
+) -> Result<(), String> {
+    crate::store::set_plugin_enabled_scoped(&plugin_id, enabled, scope.as_deref(), project_path.as_deref())
+        .map_err(|e| e.to_string())
 }
 
 // ---------- Plugin 市场（浏览 + 安装管理）----------
@@ -840,10 +846,16 @@ where
         .map_err(|e| e.to_string())
 }
 
-/// 读取 Claude 已注册市场与各市场插件条目（含 installed/enabled 徽标）
+/// 读取 Claude 已注册市场与各市场插件条目（含 installed/enabled 徽标，
+/// 按 project_path 项目视角判定——与 Plugins 面板同一口径）
 #[tauri::command]
-pub async fn get_plugin_marketplaces() -> Result<Vec<crate::store::MarketplaceInfo>, String> {
-    blocking(|| crate::store::get_plugin_marketplaces()).await
+pub async fn get_plugin_marketplaces(
+    project_path: Option<String>,
+) -> Result<Vec<crate::store::MarketplaceInfo>, String> {
+    blocking(move || {
+        crate::store::get_plugin_marketplaces(project_path.as_deref().unwrap_or(""))
+    })
+    .await
 }
 
 /// 推荐市场（OSS data/plugin-markets.json 热更新；离线回退磁盘缓存）

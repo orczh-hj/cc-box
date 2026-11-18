@@ -80,6 +80,14 @@
         <div class="header-row">
           <h2>{{ t('projects') }}</h2>
           <div class="header-actions">
+            <!-- 浏览器远程：连接断开指示（断开即现，恢复自动消失；与终端 header 一致） -->
+            <div
+              v-if="!isTauriEnv && connLevel !== 'ok'"
+              class="header-btn conn-indicator"
+              :title="t('connHeaderReconnecting')"
+            >
+              <span class="mini-spinner" aria-hidden="true"></span>
+            </div>
             <!-- 浏览器/手机：新建窗口（Broker 经 RPC 拉起空窗口；零窗口时文案为“启动窗口”） -->
             <button
               v-if="showNewWindowBtn"
@@ -259,6 +267,7 @@ import { isTauriEnv } from '@/api/platform'
 import { spawnNewInstance, type SessionInfo } from '@/api/tauri'
 import { canLaunchNewWindow } from '@/utils/remoteWindows'
 import { useDeviceSwitcher } from '@/composables/useDeviceSwitcher'
+import { useConnHealth } from '@/composables/useConnHealth'
 
 const { t } = useI18n()
 
@@ -274,6 +283,7 @@ const sessionStore = useSessionStore()
 const sidebarStore = useSidebarStore()
 const toast = useToast()
 const { open: openDeviceSwitcher } = useDeviceSwitcher()
+const { level: connLevel } = useConnHealth()
 const searchQuery = ref('')
 const projectListRef = ref<HTMLElement | null>(null)
 const isMobile = useIsMobile()
@@ -786,6 +796,19 @@ async function handleSaveDefault() {
 
 .header-btn.active {
   color: var(--accent-color);
+}
+
+.mini-spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--border-color);
+  border-top-color: var(--accent-color);
+  border-radius: 50%;
+  animation: conn-spin 0.9s linear infinite;
+}
+
+@keyframes conn-spin {
+  to { transform: rotate(360deg); }
 }
 
 .projects-panel .panel-header h2 {

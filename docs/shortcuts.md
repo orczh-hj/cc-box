@@ -36,6 +36,16 @@
 | Ctrl+Shift+/ | 显示快捷键面板 | / 是 shortcuts 的首字母 |
 | Ctrl+Shift+S | 切换 Sessions 面板 | S=Sessions，最高频面板需要键盘直达 |
 
+### 复制与粘贴
+
+> 终端内的复制粘贴由 CC-Box 拦截，不依赖系统菜单。**macOS 同样用 Ctrl+C 复制，不是 Cmd+C。**
+
+| 快捷键 | 功能 | 说明 |
+|--------|------|------|
+| Ctrl+C | 复制选中内容 | 无选中时才把 Ctrl+C 传给 Claude（中断/清除草稿）；macOS 也走 Ctrl+C |
+| Ctrl+Shift+C | 强制复制 | 无论选中与否都按复制处理（与 CLI 的 Ctrl+Shift+C 不冲突） |
+| Ctrl+V / Cmd+V | 粘贴剪贴板文本 | 图像粘贴见下方 Claude CLI 的 Ctrl+V / Alt+V |
+
 ### 字体缩放
 
 | 快捷键 | 功能 | 说明 |
@@ -64,24 +74,31 @@
 
 ### 会话控制
 
-| 快捷键 | 功能 |
-|--------|------|
-| Ctrl+C | 取消当前输入或生成 |
-| Ctrl+D | 退出 Claude Code |
-| Ctrl+L | 清屏并重绘 |
-| Ctrl+R | 反向搜索历史 |
-| Ctrl+B | 后台运行任务 |
-| Ctrl+O | 切换 Transcript 查看器 |
-| Ctrl+T | 切换任务列表 |
-| Esc Esc | 回退或摘要 |
-
-### 模式切换
+> 完整可重绑定清单见 Claude Code 文档 `configuration/interface/keybindings.md`。
 
 | 快捷键 | 功能 |
 |--------|------|
+| Ctrl+C | 中断当前操作；空输入时清除草稿，再按退出 |
+| Esc | 中断 Claude 或关闭对话框 |
+| Shift+Tab | 循环权限模式（Windows 无 VT 输入模式时为 Alt+M） |
+| Esc Esc | 清除草稿；空输入时打开回退 / 摘要菜单 |
 | Alt+P | 切换模型（不清除输入） |
+| Ctrl+O | 切换会话记录查看器 |
+| Ctrl+T | 切换 Claude 待办清单（非 /tasks 后台任务） |
+| Ctrl+R | 反向搜索历史 |
+| Ctrl+B | 后台运行任务（tmux 用户按两次） |
+| Ctrl+L | 重绘屏幕（保留输入与对话） |
+| Ctrl+S | 隐藏 / 恢复当前输入 |
+| Ctrl+V / Alt+V | 粘贴剪贴板图像（Windows / WSL 用 Alt+V） |
+| Ctrl+Enter / Ctrl+X Ctrl+S | 立即发送排队消息（v2.1.275+） |
 | Alt+T | 切换扩展思考 |
 | Alt+O | 切换快速模式 |
+| Ctrl+G / Ctrl+X Ctrl+E | 在外部编辑器中编辑提示词 |
+| Ctrl+_ / Ctrl+Shift+- | 撤销上一次输入编辑 |
+| Ctrl+X Ctrl+K | 停止本会话所有后台子代理（连按两次确认） |
+| Ctrl+D | 退出 Claude Code（800ms 内按两次） |
+
+快捷键配置文件：`~/.claude/keybindings.json`（`/keybindings` 打开），按 `Global` / `Chat` / `HistorySearch` 等上下文分组，修改自动生效、无需重启。
 
 ### 文本编辑
 
@@ -89,12 +106,15 @@
 |--------|------|
 | Ctrl+A | 光标移到行首 |
 | Ctrl+E | 光标移到行尾 |
-| Ctrl+W | 删除前一个单词 |
-| Ctrl+K | 删除光标到行尾 |
+| Ctrl+W | 删除到上一个空格（`src/a/b.ts` 整体删除） |
 | Ctrl+U | 删除光标到行首 |
+| Ctrl+K | 删除光标到行尾 |
 | Ctrl+Y | 粘贴已删除文本 |
+| Ctrl+Backspace / Option+Delete | 只删除前一个单词 |
 | Alt+B | 光标后退一个单词 |
 | Alt+F | 光标前进一个单词 |
+| Alt+D | 删除到单词末尾 |
+| Alt+Y | 循环粘贴此前删除的文本 |
 
 ### 多行输入
 
@@ -102,15 +122,19 @@
 |--------|------|
 | \ + Enter | 插入换行 |
 | Ctrl+J | 插入换行（通用终端） |
-| Shift+Enter | 插入换行（已支持） |
+| Shift+Enter | 插入换行（iTerm2、WezTerm、Windows Terminal 等原生支持） |
+| Option+Enter | 插入换行（macOS，需开启 Option 作为 Meta） |
+| 直接粘贴 | 粘贴代码块、日志 |
 
 ### 快速输入
 
 | 输入 | 功能 |
 |------|------|
 | / 开头 | 命令或 Skill |
-| ! 开头 | Bash 模式 — 直接运行命令 |
+| ! 开头 | Shell 模式 — 直接运行命令并把输出加入会话 |
 | @ | 文件路径提及（自动补全） |
+| : | 表情符号简码 |
+| ?（空输入） | 打开快捷键帮助面板（需全屏渲染） |
 
 ### Slash 命令
 
@@ -118,24 +142,31 @@
 |------|------|
 | /clear | 新对话（别名 /reset, /new） |
 | /compact | 压缩对话以释放上下文 |
-| /model | 切换 AI 模型 |
-| /cost | 显示会话费用（别名 /usage, /stats） |
-| /permissions | 管理工具权限规则 |
-| /init | 初始化项目 CLAUDE.md |
-| /config | 打开设置（别名 /settings） |
-| /resume | 恢复历史会话（别名 /continue） |
-| /diff | 交互式变更查看器 |
-| /help | 显示可用命令 |
+| /model | 切换 AI 模型（左右箭头调 effort） |
+| /usage | 会话费用与套餐用量（别名 /cost, /stats） |
 | /context | 可视化上下文窗口使用 |
-| /doctor | 诊断 Claude Code 安装 |
-| /theme | 切换颜色主题 |
-| /memory | 编辑 CLAUDE.md 记忆文件 |
-| /rename | 重命名当前会话 |
-| /btw \<q\> | 快速旁问（不影响上下文） |
-| /plan | 进入规划模式 |
-| /branch | 分支对话（别名 /fork） |
+| /resume | 恢复历史会话（别名 /continue） |
+| /config | 打开设置（别名 /settings） |
+| /permissions | 管理工具权限规则（别名 /allowed-tools） |
+| /init | 初始化项目 CLAUDE.md |
+| /diff | 审查工作树中的变更 |
+| /plan | 进入规划模式（可附带任务描述） |
+| /review | 审查代码 / PR（/code-review 别名） |
 | /copy | 复制上次回复到剪贴板 |
-| /review | 在会话中审查 Pull Request |
+| /export | 导出当前对话 |
+| /tasks | 查看后台任务与子代理（别名 /bashes） |
+| /skills | 列出可用 Skill |
+| /effort | 设置 effort 级别 |
+| /theme | 切换颜色主题 |
+| /memory | 编辑 CLAUDE.md 并管理自动记忆 |
+| /rename | 重命名当前会话 |
+| /btw \<q\> | 附带提问，不加入对话上下文 |
+| /branch | 分流当前对话（原对话保留） |
+| /fork | 复制对话到独立后台会话 |
+| /keybindings | 打开快捷键配置文件 |
+| /tui | 切换渲染器（default / fullscreen） |
+| /help | 显示可用命令 |
+| /doctor | 诊断安装、设置与扩展 |
 | /exit | 退出 CLI（别名 /quit） |
 
 ## 冲突分析

@@ -2957,22 +2957,21 @@ fn capitalize_scope(scope: &str) -> String {
 fn claude_command() -> std::process::Command {
     let configured = get_app_config().ok().and_then(|c| c.claude_path);
     let mut cmd = match crate::platform::cli_target(configured.as_deref()) {
-        crate::platform::CliTarget::Explicit(path) => std::process::Command::new(path),
+        crate::platform::CliTarget::Explicit(path) => crate::platform::new_command(&path),
         crate::platform::CliTarget::PathLookup => {
             #[cfg(unix)]
             {
                 // Unix：解析成可运行路径再 exec，避免依赖 GUI 继承的 PATH
                 match crate::platform::find_executable("claude") {
-                    Some(path) => std::process::Command::new(path),
-                    None => std::process::Command::new("claude"),
+                    Some(path) => crate::platform::new_command(&path),
+                    None => crate::platform::new_command("claude"),
                 }
             }
             #[cfg(not(unix))]
             {
                 // Windows：CreateProcess 不能直接执行 npm 的 .cmd 包装，这里依赖
                 // PATH 能解析到可执行文件（npm 安装通常同时提供 claude.exe）。
-                // 该行为与本次修复前一致，未在本机（macOS）验证。
-                std::process::Command::new("claude")
+                crate::platform::new_command("claude")
             }
         }
     };
@@ -3028,7 +3027,7 @@ fn run_claude_command_strict(args: &str) -> Result<String> {
 /// plugins/skills/agents/mcp 四个 section，每个 section 都会 spawn 一个 claude
 /// 子进程（`get_all_skills` 等内部都要读 plugin 列表）。2s 内复用同一份输出，
 /// 把「一次点击 4 个子进程」收敛为 1 个；plugin 自身变更后主动失效。
-static PLUGINS_LIST_CACHE: Mutex<Option<(std::time::Instant, String)>> = Mutex::new(None);
+static PLUGINS_LIST_CACHE: Mutex<Option<(std::time::Instant, String, String)>> = Mutex::new(None);
 /// single-flight：并发刷新时只有一个线程真正 spawn CLI，其余等待后命中缓存
 static PLUGINS_LIST_FETCH_LOCK: Mutex<()> = Mutex::new(());
 /// 失效代次：防止"失效前开始、失效后才完成"的旧读取回填缓存
@@ -3036,25 +3035,42 @@ static PLUGINS_LIST_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::Atomi
 const PLUGINS_LIST_TTL: std::time::Duration = std::time::Duration::from_secs(2);
 
 fn plugins_list_json() -> Result<String> {
+    plugins_list_json_in(None)
+}
+
+/// 带项目视角的 plugins list：CLI 对 project/local 条目的 `enabled` 字段
+/// **按执行时 cwd 计算**（项目内查=该项目启用态；项目外查恒 false——实测
+/// CLI 2.1.179）。GUI 进程不在项目目录，必须在当前项目 cwd 下执行才能拿到
+/// 真实启停态（否则徽标恒「已停用」、点启用报 already enabled）。
+/// 缓存键入 cwd（不同项目视角互不串数据）。
+fn plugins_list_json_in(project_cwd: Option<&str>) -> Result<String> {
     // 锁中毒时降级为不串行（仍可读缓存），不 panic
     let _flight = PLUGINS_LIST_FETCH_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let gen = PLUGINS_LIST_GEN.load(std::sync::atomic::Ordering::SeqCst);
+    let cwd_key = project_cwd.unwrap_or("").to_string();
 
     if let Ok(guard) = PLUGINS_LIST_CACHE.lock() {
-        if let Some((at, raw)) = guard.as_ref() {
-            if at.elapsed() < PLUGINS_LIST_TTL {
+        if let Some((at, key, raw)) = guard.as_ref() {
+            if at.elapsed() < PLUGINS_LIST_TTL && *key == cwd_key {
                 return Ok(raw.clone());
             }
         }
     }
-    let raw = run_claude_command("plugins list --json")?;
+    // 宽松语义与 run_claude_command 一致（失败也返回 stdout，旧 CLI 提示可读）
+    let mut cmd = claude_command();
+    cmd.args(["plugins", "list", "--json"]);
+    if let Some(dir) = project_cwd.filter(|s| !s.is_empty()) {
+        cmd.current_dir(dir);
+    }
+    let output = cmd.output().context("Failed to run claude command")?;
+    let raw = String::from_utf8_lossy(&output.stdout).to_string();
     // 代次校验与回填必须在同一把 CACHE 锁内完成：否则 invalidate 可能恰好
     // 卡在两者之间（清空后旧 raw 又带着新时间戳写回，最多 2s 读到旧状态）
     if let Ok(mut guard) = PLUGINS_LIST_CACHE.lock() {
         if PLUGINS_LIST_GEN.load(std::sync::atomic::Ordering::SeqCst) == gen {
-            *guard = Some((std::time::Instant::now(), raw.clone()));
+            *guard = Some((std::time::Instant::now(), cwd_key, raw.clone()));
         }
     }
     Ok(raw)
@@ -3246,26 +3262,21 @@ struct CliPluginInfo {
 
 /// 获取所有 Plugins（使用 CLI 命令），包含内部 skills/agents
 pub fn get_all_plugins(project_path: &str) -> Result<Vec<PluginInfo>> {
-    // 使用 CLI 命令获取 plugin 信息（短 TTL 缓存，见 plugins_list_json）
-    let output = plugins_list_json()?;
+    // 使用 CLI 命令获取 plugin 信息（短 TTL 缓存，见 plugins_list_json_in）；
+    // 在项目 cwd 下执行——project/local 条目的 enabled 按执行目录计算
+    let output = plugins_list_json_in(Some(project_path))?;
     let cli_plugins: Vec<CliPluginInfo> =
         serde_json::from_str(&output).context("Failed to parse plugins list JSON")?;
 
     let mut plugins = Vec::new();
 
     for cli_plugin in cli_plugins {
-        // 过滤当前项目相关的 plugins
-        let is_relevant = if cli_plugin.scope == "user" {
-            true
-        } else if cli_plugin.scope == "project" {
-            cli_plugin
-                .project_path
-                .as_ref()
-                .map(|p| p == project_path)
-                .unwrap_or(false)
-        } else {
-            false
-        };
+        // 过滤当前项目相关的 plugins（与插件市场的 installed 判定共用同一函数）
+        let is_relevant = plugin_matches_project_view(
+            &cli_plugin.scope,
+            cli_plugin.project_path.as_deref(),
+            project_path,
+        );
 
         if !is_relevant {
             continue;
@@ -3326,6 +3337,30 @@ pub fn get_all_plugins(project_path: &str) -> Result<Vec<PluginInfo>> {
     }
 
     Ok(plugins)
+}
+
+/// 项目视角的插件相关性（Plugins 面板与插件市场**共用同一逻辑**，勿在两处
+/// 各写一份）：user 作用域与项目无关恒相关；project/local 作用域都绑定
+/// projectPath（local = 仅该目录生效，与 project 同为项目级）——须等于当前
+/// 项目才相关；其余（未知）不相关。current_project 为空（首页/未打开项目）
+/// 时仅 user 相关。
+pub(crate) fn plugin_matches_project_view(
+    scope: &str,
+    project_path: Option<&str>,
+    current_project: &str,
+) -> bool {
+    if scope == "user" {
+        return true;
+    }
+    if scope != "project" && scope != "local" {
+        return false;
+    }
+    // 路径等价比较（canonicalize + 大小写/分隔符/尾斜杠归一）——CLI 回报的
+    // projectPath 与当前项目路径的形态可能不一致，裸 == 会静默匹配失败
+    !current_project.is_empty()
+        && project_path
+            .map(|p| !p.is_empty() && crate::remote_state::paths_equivalent(p, current_project))
+            .unwrap_or(false)
 }
 
 /// 查找有效的 plugin 安装路径
@@ -4049,6 +4084,50 @@ pub fn set_plugin_enabled(plugin_id: &str, enabled: bool) -> Result<()> {
     Ok(())
 }
 
+/// 切换 plugin 启用状态（带作用域）：project/local 安装绑定项目目录——CLI 的
+/// enable/disable 必须在该项目 cwd 下执行且显式 `-s`，auto-detect 会找不到
+/// 或改错份；user/未指定走原 auto-detect 路径（向后兼容）
+pub fn set_plugin_enabled_scoped(
+    plugin_id: &str,
+    enabled: bool,
+    scope: Option<&str>,
+    project_path: Option<&str>,
+) -> Result<()> {
+    let Some(scope) = scope else {
+        return set_plugin_enabled(plugin_id, enabled);
+    };
+    validate_simple_name(plugin_id).context("Invalid plugin id")?;
+    if plugin_id.contains('/') || plugin_id.contains('\\') || plugin_id.contains("..") {
+        bail!("Invalid plugin id: {:?}", plugin_id);
+    }
+    let action = if enabled { "enable" } else { "disable" };
+    // project/local 需要项目 cwd；user 不需要
+    let cwd = install_scope_cwd(scope, project_path)?;
+    let result = run_claude_command_argv(
+        &["plugin", action, plugin_id, "-s", scope],
+        cwd.as_deref(),
+    );
+    // CLI 把幂等操作当失败（实测 2.1.179：状态已是目标态时报
+    // "already enabled/disabled" 且非零退出）——目标态即成功，不视为错误
+    let result = result.or_else(|e| {
+        let msg = format!("{:?}", e);
+        let already = if enabled {
+            msg.contains("already enabled")
+        } else {
+            msg.contains("already disabled")
+        };
+        if already {
+            Ok(String::new())
+        } else {
+            Err(e)
+        }
+    });
+    invalidate_plugins_list_cache();
+    invalidate_plugin_market_cache();
+    result.with_context(|| format!("Failed to {} plugin '{}'", action, plugin_id))?;
+    Ok(())
+}
+
 // ---------- Plugin 市场（浏览 + 安装管理，全部包装 claude plugin CLI）----------
 //
 // 市场注册事实源是 Claude 自己的 known_marketplaces.json，CC-Box 只读；
@@ -4062,12 +4141,15 @@ const CLI_MARKET_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1
 /// 成功 → stdout；失败（非零退出/超时/spawn 失败）→ Err（优先 stderr）。
 /// 管道读取放独立线程：避免子进程写满管道阻塞而我们仍在轮询的死锁；
 /// 超时分支不 join 读线程（kill 后孙进程可能持有管道），直接 bail。
+/// **单点应用平台配置**（Windows CREATE_NO_WINDOW）：所有经此的 claude/git
+/// 等控制台子进程一律不弹 cmd 黑窗，调用方无需各自记得加 flag。
 pub(crate) fn run_command_with_timeout(
     cmd: &mut std::process::Command,
     timeout: std::time::Duration,
 ) -> Result<String> {
     use std::process::Stdio;
 
+    crate::platform::configure_command(cmd);
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = cmd.spawn().context("Failed to spawn command")?;
 
@@ -4121,14 +4203,14 @@ fn kill_process_tree(pid: u32) {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        let _ = std::process::Command::new("taskkill")
+        let mut kill = crate::platform::new_command("taskkill");
+        let _ = kill
             .args(["/F", "/T", "/PID", &pid.to_string()])
-            .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
             .output();
     }
     #[cfg(not(windows))]
     {
-        let _ = std::process::Command::new("kill")
+        let _ = crate::platform::new_command("kill")
             .args(["-9", &pid.to_string()])
             .output();
     }
@@ -4171,6 +4253,74 @@ pub struct MarketplacePluginEntry {
     pub installed: bool,
     /// 已安装时的启用状态
     pub enabled: Option<bool>,
+    /// 已安装版本（plugins list --json 的 version；未安装/CLI 未回报为 None）
+    #[serde(default)]
+    pub installed_version: Option<String>,
+    /// 市场清单版本是否比已装版本新（None = 任一侧缺版本，无法判定）。
+    /// 判定只做版本串比较——真正的更新以 CLI `plugin update` 拉取结果为准
+    #[serde(default)]
+    pub update_available: Option<bool>,
+    /// 各 scope 的安装明细（同插件可同时装在 user 与某项目）
+    #[serde(default)]
+    pub installations: Vec<PluginInstallationEntry>,
+    /// 面板同视角匹配的安装位置（卸载/更新命令对准它，防按 UI 作用域误发；
+    /// 未安装为 None）
+    #[serde(default)]
+    pub matched_scope: Option<String>,
+    #[serde(default)]
+    pub matched_project_path: Option<String>,
+}
+
+/// 单个安装位置（scope + 启用态 + 项目路径）
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginInstallationEntry {
+    pub scope: String,
+    pub enabled: bool,
+    /// project/local scope 的项目路径
+    pub project_path: Option<String>,
+}
+
+/// plugins list --json 的已安装轻量信息（市场条目徽标数据源）
+#[derive(Debug, Clone)]
+pub(crate) struct InstalledLite {
+    pub(crate) enabled: bool,
+    pub(crate) version: Option<String>,
+    pub(crate) scope: String,
+    pub(crate) project_path: Option<String>,
+}
+
+/// 宽松版本比较：市场版本是否比已装版本新。
+/// 按 `.`/`-` 分段：数字段按数值比较（"10" > "9"），非数字段按字符串比较；
+/// 首个不同段决定结果，全相同（含相等）为不新。
+/// **已知偏差**：非数字段排在所有数字段之后，故 "1.0.0-beta" > "1.0.0"
+/// （semver 语义应为更旧）——预发布版本会误亮「有更新」徽标；仅影响展示，
+/// 真实更新以 CLI plugin update 拉取结果为准。
+pub(crate) fn market_version_newer(market: &str, installed: &str) -> bool {
+    let split = |s: &str| -> Vec<(u64, String)> {
+        s.trim()
+            .trim_start_matches(['v', 'V'])
+            .split(['.', '-'])
+            .filter(|seg| !seg.is_empty())
+            .map(|seg| match seg.parse::<u64>() {
+                Ok(n) => (n, String::new()),
+                // 非数字段排在所有数字段之后（(u64::MAX, 小写字符串)）
+                Err(_) => (u64::MAX, seg.to_lowercase()),
+            })
+            .collect()
+    };
+    let a = split(market);
+    let b = split(installed);
+    let len = a.len().max(b.len());
+    for i in 0..len {
+        // 缺失段视为最小值 (0, "")
+        let sa = a.get(i).cloned().unwrap_or((0, String::new()));
+        let sb = b.get(i).cloned().unwrap_or((0, String::new()));
+        if sa != sb {
+            return sa > sb;
+        }
+    }
+    false
 }
 
 /// 插件组件清单（marketplace.json 的 commands/agents/hooks/mcpServers/skills，
@@ -4728,7 +4878,7 @@ pub struct MarketplaceInfo {
 
 /// 市场列表内存缓存（组件目录扫描 + plugins list 的代价随插件数量增长）；
 /// 元组第二项为代际（见 MARKET_CACHE_GEN），防止慢加载把失效后的旧数据写回缓存
-static MARKET_LIST_CACHE: Mutex<Option<(std::time::Instant, u64, Vec<MarketplaceInfo>)>> =
+static MARKET_LIST_CACHE: Mutex<Option<(std::time::Instant, u64, String, Vec<MarketplaceInfo>)>> =
     Mutex::new(None);
 const MARKET_LIST_TTL: std::time::Duration = std::time::Duration::from_secs(60);
 /// 缓存代际：每次失效 +1；加载完成时若代际已变（期间有人失效，如后台刷新完成），
@@ -4743,38 +4893,51 @@ pub(crate) fn invalidate_plugin_market_cache() {
     }
 }
 
-/// 读取 Claude 已注册市场与各市场插件条目（含 installed/enabled 徽标）。
+/// 读取 Claude 已注册市场与各市场插件条目（含 installed/enabled 徽标，
+/// 按 project_view 项目视角判定——与 Plugins 面板同一口径）。
 /// 未注册任何市场（文件不存在）时返回空列表而非报错（首次使用场景）。
 /// 结果按 60s 内存缓存：打开市场浏览器与刷新后立即重读都不再重复扫描插件目录。
-pub fn get_plugin_marketplaces() -> Result<Vec<MarketplaceInfo>> {
+pub fn get_plugin_marketplaces(project_view: &str) -> Result<Vec<MarketplaceInfo>> {
     if let Ok(guard) = MARKET_LIST_CACHE.lock() {
-        if let Some((at, _gen, data)) = guard.as_ref() {
-            if at.elapsed() < MARKET_LIST_TTL {
+        if let Some((at, _gen, view, data)) = guard.as_ref() {
+            if at.elapsed() < MARKET_LIST_TTL && view == project_view {
                 return Ok(data.clone());
             }
         }
     }
     let gen = MARKET_CACHE_GEN.load(std::sync::atomic::Ordering::SeqCst);
-    let data = load_plugin_marketplaces()?;
+    let data = load_plugin_marketplaces(project_view)?;
     // 拿锁后在锁内复核代际（失效方先 gen+1 再拿同一把锁）：锁外复核存在
     // 「复核后、拿锁前」被失效插入的窗口，旧数据会带新时间戳多活一个 TTL
     if let Ok(mut guard) = MARKET_LIST_CACHE.lock() {
         if MARKET_CACHE_GEN.load(std::sync::atomic::Ordering::SeqCst) == gen {
-            *guard = Some((std::time::Instant::now(), gen, data.clone()));
+            *guard = Some((
+                std::time::Instant::now(),
+                gen,
+                project_view.to_string(),
+                data.clone(),
+            ));
         }
     }
     Ok(data)
 }
 
-fn load_plugin_marketplaces() -> Result<Vec<MarketplaceInfo>> {
-    // installed 徽标数据来自 plugins list --json（短 TTL 缓存）
-    let mut installed: std::collections::HashMap<String, bool> = Default::default();
-    if let Ok(raw) = plugins_list_json() {
+fn load_plugin_marketplaces(project_view: &str) -> Result<Vec<MarketplaceInfo>> {
+    // installed 徽标与已装版本来自 plugins list --json（短 TTL 缓存，在项目
+    // 视角 cwd 下执行——project/local 条目的 enabled 按执行目录计算）；
+    // 同一插件可装在多个 scope（user + 项目），按 id 聚合为列表
+    let mut installed: std::collections::HashMap<String, Vec<InstalledLite>> = Default::default();
+    if let Ok(raw) = plugins_list_json_in(Some(project_view)) {
         if let Ok(list) =
             serde_json::from_str::<Vec<CliPluginLite>>(&raw)
         {
             for p in list {
-                installed.insert(p.id, p.enabled);
+                installed.entry(p.id).or_default().push(InstalledLite {
+                    enabled: p.enabled,
+                    version: p.version,
+                    scope: p.scope,
+                    project_path: p.project_path,
+                });
             }
         }
     }
@@ -4783,7 +4946,8 @@ fn load_plugin_marketplaces() -> Result<Vec<MarketplaceInfo>> {
     let presets = get_market_presets().unwrap_or_default();
     // ccbox-market 内置为默认个人市场（全新环境也能直接浏览官方精选，不依赖用户手动添加）
     let custom = with_builtin_market(&custom, &presets);
-    let mut list = get_plugin_marketplaces_in(&claude_config_dir()?, &installed, &custom, &presets)?;
+    let mut list =
+        get_plugin_marketplaces_in(&claude_config_dir()?, &installed, &custom, &presets, project_view)?;
     // 内置条目沿用推荐清单的描述/图标（走 custom 路径本身不带这些展示字段）
     if let (Some(p), Some(m)) = (
         presets
@@ -5154,21 +5318,25 @@ fn http_get_market_json(url: &str) -> Result<String> {
     }
 }
 
-/// git clone --depth 1（120s 超时树杀，与 plugin CLI 同一超时策略）
+/// git clone --depth 1（120s 超时树杀，与 plugin CLI 同一超时策略）。
+/// 构造统一走 platform::new_command（Windows CREATE_NO_WINDOW——裸 Command
+/// spawn 控制台程序会弹 cmd 黑窗）
 fn clone_market_repo(url: &str, dir: &Path) -> Result<()> {
-    let mut cmd = std::process::Command::new("git");
+    let mut cmd = crate::platform::new_command("git");
     cmd.arg("clone").arg("--depth").arg("1").arg(url).arg(dir);
     run_command_with_timeout(&mut cmd, std::time::Duration::from_secs(120))
         .with_context(|| format!("git clone 失败: {}（GitHub 源可能需要代理）", url))?;
     Ok(())
 }
 
-/// get_plugin_marketplaces 的可注入版本（测试：base_dir + installed 表 + 自定义市场 + 推荐清单）
+/// get_plugin_marketplaces 的可注入版本（测试：base_dir + installed 表 + 自定义市场 + 推荐清单）。
+/// project_view：当前项目路径（installed 徽标按 Plugins 面板同视角判定）
 pub(crate) fn get_plugin_marketplaces_in(
     base_dir: &Path,
-    installed: &std::collections::HashMap<String, bool>,
+    installed: &std::collections::HashMap<String, Vec<InstalledLite>>,
     custom_markets: &[CustomMarket],
     presets: &[MarketPreset],
+    project_view: &str,
 ) -> Result<Vec<MarketplaceInfo>> {
     // 热度：Claude 自己维护的插件目录缓存（unique_installs，键为 name@marketplace）
     let installs = load_plugin_installs(base_dir);
@@ -5218,6 +5386,7 @@ pub(crate) fn get_plugin_marketplaces_in(
                             base_dir,
                             installed,
                             &installs,
+                            project_view,
                         );
                     }
                     Err(e) => {
@@ -5279,6 +5448,7 @@ pub(crate) fn get_plugin_marketplaces_in(
                             base_dir,
                             installed,
                             &installs,
+                            project_view,
                         );
                     }
                     Err(e) => info.load_error = Some(e.to_string()),
@@ -5324,15 +5494,18 @@ pub(crate) fn get_plugin_marketplaces_in(
     Ok(result)
 }
 
-/// 解析市场插件条目列表（注册市场与浏览缓存共用）
+/// 解析市场插件条目列表（注册市场与浏览缓存共用）。
+/// project_view：当前项目路径——installed/enabled 徽标与 Plugins 面板共用
+/// plugin_matches_project_view 判定（同一视角，来源一致）
 #[allow(clippy::too_many_arguments)]
 fn parse_marketplace_plugins(
     mp: &serde_json::Value,
     market_name: &str,
     market_dir: Option<&Path>,
     base_dir: &Path,
-    installed: &std::collections::HashMap<String, bool>,
+    installed: &std::collections::HashMap<String, Vec<InstalledLite>>,
     installs: &HashMap<String, u64>,
+    project_view: &str,
 ) -> Vec<MarketplacePluginEntry> {
     let mut plugins = Vec::new();
     if let Some(list) = mp.get("plugins").and_then(|v| v.as_array()) {
@@ -5341,14 +5514,86 @@ fn parse_marketplace_plugins(
                 continue;
             };
             let full_id = format!("{}@{}", pname, market_name);
-            let enabled = installed.get(&full_id).copied();
+            let installed_list = installed.get(&full_id);
+            let installations: Vec<PluginInstallationEntry> = installed_list
+                .map(|list| {
+                    list.iter()
+                        .map(|i| PluginInstallationEntry {
+                            scope: i.scope.clone(),
+                            enabled: i.enabled,
+                            project_path: i.project_path.clone(),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            // 与 Plugins 面板同一视角的匹配安装（徽标/版本/更新判定/卸载命令依据）。
+            // 多份同时命中时显式优先项目份（project > local > user）——CLI 输出
+            // 顺序不受控，不能依赖 find 顺序；项目份对准「当前项目视角」最精确
+            let matched = installed_list.and_then(|list| {
+                list.iter()
+                    .find(|i| {
+                        i.scope == "project"
+                            && plugin_matches_project_view(
+                                i.scope.as_str(),
+                                i.project_path.as_deref(),
+                                project_view,
+                            )
+                    })
+                    .or_else(|| {
+                        list.iter().find(|i| {
+                            i.scope == "local"
+                                && plugin_matches_project_view(
+                                    i.scope.as_str(),
+                                    i.project_path.as_deref(),
+                                    project_view,
+                                )
+                        })
+                    })
+                    .or_else(|| {
+                        list.iter().find(|i| {
+                            plugin_matches_project_view(
+                                i.scope.as_str(),
+                                i.project_path.as_deref(),
+                                project_view,
+                            )
+                        })
+                    })
+            });
+            let enabled = matched.map(|i| i.enabled);
+            let matched_scope = matched.map(|i| i.scope.clone());
+            let matched_project_path = matched.and_then(|i| i.project_path.clone());
+            // 市场版本：清单条目优先，缺失时从插件源码目录的 plugin.json 读
+            // （官方精选等清单不逐条写 version，但浏览副本/缓存里有完整源码）
+            let plugin_dir =
+                resolve_plugin_dir(market_dir, market_name, p, pname, base_dir);
+            let market_version = p
+                .get("version")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .or_else(|| {
+                    plugin_dir
+                        .as_deref()
+                        .and_then(read_plugin_json)
+                        .and_then(|j| {
+                            j.get("version").and_then(|v| v.as_str()).map(str::to_string)
+                        })
+                })
+                .filter(|s| !s.is_empty());
+            let installed_version = matched.and_then(|i| i.version.clone());
+            // 更新判定：两侧版本都已知才比较（缺失任一侧 = 无法判定，不下结论）
+            let update_available = match (market_version.as_deref(), installed_version.as_deref()) {
+                (Some(m), Some(i)) if !m.is_empty() && !i.is_empty() => {
+                    Some(market_version_newer(m, i))
+                }
+                _ => None,
+            };
             plugins.push(MarketplacePluginEntry {
                 name: pname.to_string(),
                 description: p
                     .get("description")
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string()),
-                version: p.get("version").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                version: market_version,
                 // 分类：官方字段 category 优先，缺失时用精选扩展 ccbox.category
                 category: p
                     .get("category")
@@ -5370,10 +5615,7 @@ fn parse_marketplace_plugins(
                             .collect()
                     })
                     .unwrap_or_default(),
-                components: parse_components(
-                    p,
-                    resolve_plugin_dir(market_dir, market_name, p, pname, base_dir).as_deref(),
-                ),
+                components: parse_components(p, plugin_dir.as_deref()),
                 installs: installs.get(&full_id).copied(),
                 pinned: p
                     .get("ccbox")
@@ -5392,6 +5634,11 @@ fn parse_marketplace_plugins(
                     .filter(|s| !s.is_empty()),
                 installed: enabled.is_some(),
                 enabled,
+                installed_version,
+                update_available,
+                matched_scope,
+                matched_project_path,
+                installations,
             });
         }
     }
@@ -5426,12 +5673,18 @@ fn read_marketplace_json(install_location: &Path) -> Result<serde_json::Value> {
         .with_context(|| format!("Failed to parse {}", path.display()))
 }
 
-/// plugins list --json 的轻量解析（只要 id/enabled，容忍字段缺失）
+/// plugins list --json 的轻量解析（id/enabled/version/scope，容忍字段缺失）
 #[derive(serde::Deserialize)]
 struct CliPluginLite {
     id: String,
     #[serde(default)]
     enabled: bool,
+    #[serde(default)]
+    version: Option<String>,
+    #[serde(default)]
+    scope: String,
+    #[serde(rename = "projectPath", default)]
+    project_path: Option<String>,
 }
 
 // ---------- 推荐市场（OSS data/plugin-markets.json，与客户端版本解耦、可热更新） ----------
@@ -5593,12 +5846,14 @@ pub(crate) fn validate_install_scope(scope: &str) -> Result<()> {
     Ok(())
 }
 
-/// project 作用域必须提供项目路径作为 CLI cwd；其他作用域不需要
+/// project/local 作用域必须提供项目路径作为 CLI cwd：CLI 的 local 安装
+/// 记录 projectPath = 执行时 CWD，不传 cwd 会挂到 GUI 进程目录（装完在
+/// 面板/市场都找不到——项目视角匹配不上）；user 作用域不需要
 pub(crate) fn install_scope_cwd(scope: &str, project_path: Option<&str>) -> Result<Option<PathBuf>> {
-    if scope == "project" {
+    if matches!(scope, "project" | "local") {
         let p = project_path
             .filter(|s| !s.trim().is_empty())
-            .context("project scope requires project_path")?;
+            .context("project/local scope requires project_path")?;
         Ok(Some(PathBuf::from(p)))
     } else {
         Ok(None)
@@ -5822,6 +6077,32 @@ fn install_plugin_lifecycle(
         log::warn!("[PluginMarket] {} {} failed: {:?}", action, plugin_ref, e);
     }
     res.with_context(|| format!("Failed to {} '{}'", action, plugin_ref))?;
+    // 安装后自动启用：CLI 对 project/local 安装默认停用（enabled=false，实测
+    // 「装完显示已停用」），安装意图显然是启用——追加 enable，失败仅告警
+    // （已启用时幂等；旧 CLI 不支持时安装本身不受影响）
+    if action == "install" {
+        let enable_res = run_claude_command_argv(
+            &["plugin", "enable", plugin_ref, "-s", scope],
+            cwd.as_deref(),
+        );
+        // CLI 已启用时报 already enabled（幂等当失败）——目标态即成功
+        let enable_res = enable_res.or_else(|e| {
+            if format!("{:?}", e).contains("already enabled") {
+                Ok(String::new())
+            } else {
+                Err(e)
+            }
+        });
+        invalidate_plugins_list_cache();
+        invalidate_plugin_market_cache();
+        if let Err(e) = &enable_res {
+            log::warn!(
+                "[PluginMarket] auto-enable {} after install failed: {:?}",
+                plugin_ref,
+                e
+            );
+        }
+    }
     Ok(())
 }
 

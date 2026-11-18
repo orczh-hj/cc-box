@@ -77,6 +77,14 @@ fn sync_status() {
 /// `broker_client`）。任何显式启动（手动终端、登录自启、安装器更新后重拉）
 /// 都应当直接运行——单实例由 `broker.lock` 保证，不靠标记。
 pub async fn run_headless() {
+    run_headless_with(None).await
+}
+
+/// 带 on_ready 回调的 Broker 主入口：拿到单实例锁且 IPC 入口就绪后调用一次。
+/// 托盘由回调安装（Windows/macOS）——**不能**在进程启动时无条件装：竞态拉起
+/// 的第二个 broker 进程会先装图标再因锁失败退出，Windows 上退出路径不保证
+/// Drop 清理托盘，每次竞态沉淀一个僵尸图标。
+pub async fn run_headless_with(on_ready: Option<Box<dyn FnOnce() + Send>>) {
     crate::logger::init();
     let _guard = match ownership::BrokerInstanceGuard::acquire() {
         Ok(g) => g,
@@ -123,6 +131,11 @@ pub async fn run_headless() {
         // 退出释放锁，让 GUI 的重试循环重新拉起干净的 Broker。
         log::error!("[broker] IPC server failed; exiting: {}", e);
         return;
+    }
+
+    // 本进程已确认是唯一 Broker（锁 + IPC 入口都就绪）——托盘此刻安装才安全
+    if let Some(cb) = on_ready {
+        cb();
     }
 
     if remote_enabled() {

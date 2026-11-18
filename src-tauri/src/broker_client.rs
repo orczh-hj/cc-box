@@ -473,7 +473,8 @@ fn ensure_running() {
     let Some(exe) = broker_executable() else {
         return;
     };
-    let mut cmd = std::process::Command::new(exe);
+    // 统一封装：Windows 自动 CREATE_NO_WINDOW（再叠加进程组隔离）
+    let mut cmd = crate::platform::new_command(&exe.to_string_lossy());
     cmd.arg("--broker")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())

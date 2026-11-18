@@ -125,6 +125,8 @@
   <RemoteModal :visible="remotePanelVisible" @close="remotePanelVisible = false" />
   <!-- 浏览器模式：多设备切换弹窗 -->
   <DeviceSwitcherDialog />
+  <!-- 浏览器模式：断开连接的页面级分层提示（恢复自动关闭，零用户操作） -->
+  <ConnHealthOverlay v-if="!isTauriEnv" />
   <!-- 全局通知宿主（useToast 的唯一渲染点） -->
   <ToastHost />
 </div>
@@ -176,6 +178,7 @@ import {
 import { useAppShortcuts } from '@/composables/useAppShortcuts'
 import TokenGate from '@/components/TokenGate.vue'
 import DownloadTicketPage from '@/components/remote/DownloadTicketPage.vue'
+import ConnHealthOverlay from '@/components/ConnHealthOverlay.vue'
 import { remoteTransport } from '@/api/remote-transport'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import DirectoryPicker from '@/components/DirectoryPicker.vue'

@@ -210,11 +210,11 @@ registry! {
     "set_skill_enabled" => write(Skills) => |name: String, enabled: bool, source_type: Option<String>, project_path: Option<String>| crate::commands::set_skill_enabled,
     "set_agent_enabled" => write(Agents) => |name: String, enabled: bool, source_type: Option<String>, project_path: Option<String>| crate::commands::set_agent_enabled,
     "set_mcp_server_enabled" => write(Mcp) => |name: String, enabled: bool, scope: Option<String>, project_path: Option<String>| crate::commands::set_mcp_server_enabled,
-    "set_plugin_enabled" => write(Plugins) => |plugin_id: String, enabled: bool| crate::commands::set_plugin_enabled,
+    "set_plugin_enabled" => write(Plugins) => |plugin_id: String, enabled: bool, scope: Option<String>, project_path: Option<String>| crate::commands::set_plugin_enabled,
     // Plugin 市场：注册事实源是 Claude 的 known_marketplaces.json，这里只做
     // CLI 包装（添加/移除/刷新市场与插件安装管理）；安装类耗时长，远程调用
     // 需放宽 timeoutMs
-    "get_plugin_marketplaces" => read() => | | crate::commands::get_plugin_marketplaces,
+    "get_plugin_marketplaces" => read() => |project_path: Option<String>| crate::commands::get_plugin_marketplaces,
     "get_market_presets" => read() => | | crate::commands::get_market_presets,
     "add_plugin_marketplace" => write(Plugins) => |source: String| crate::commands::add_plugin_marketplace,
     "remove_plugin_marketplace" => write(Plugins) => |name: String, also_unregister: Option<bool>| crate::commands::remove_plugin_marketplace,

@@ -125,7 +125,7 @@ fn spawn_process(exe: &Path) -> Result<(), String> {
 #[cfg(target_os = "macos")]
 fn spawn_process(exe: &Path) -> Result<(), String> {
     if let Some(bundle) = find_app_bundle(exe) {
-        let status = Command::new("open")
+        let status = crate::platform::new_command("open")
             .arg("-n")
             .arg(&bundle)
             .args(["--args", NEW_WINDOW_ARG])
@@ -153,7 +153,7 @@ fn spawn_process(exe: &Path) -> Result<(), String> {
 
 #[cfg(unix)]
 fn spawn_unix(exe: &Path) -> Result<(), String> {
-    let mut child = Command::new(exe)
+    let mut child = crate::platform::new_command(&exe.to_string_lossy())
         .arg(NEW_WINDOW_ARG)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())

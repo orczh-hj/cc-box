@@ -6,6 +6,15 @@
       <span v-if="sessionName" class="header-title">{{ sessionName }}</span>
     </div>
     <div class="header-right">
+      <!-- 浏览器远程：连接断开指示（transport 检测到断开即现，恢复自动消失；
+           页面级提示由 App.vue 的 ConnHealthOverlay 承担，这里只是轻量角标） -->
+      <div
+        v-if="!isTauriEnv && connLevel !== 'ok'"
+        class="conn-indicator"
+        :title="t('connHeaderReconnecting')"
+      >
+        <span class="mini-spinner" aria-hidden="true"></span>
+      </div>
       <!-- 窗口管理按钮（置顶/半屏停靠）：仅桌面 Tauri，浏览器模式（任意宽度）无窗口操作 -->
       <template v-if="isTauriEnv">
         <button class="header-btn window-btn" :class="{ active: appStore.alwaysOnTop }" @click="appStore.toggleAlwaysOnTop()" :title="t('toggleAlwaysOnTop', { key: cmd + '+Shift+T' })">
@@ -34,6 +43,7 @@ import { useSessionStore } from '@/stores/session'
 import { useAppStore } from '@/stores/app'
 import { ctrl, cmd } from '@/utils/platform'
 import { isTauriEnv } from '@/api/platform'
+import { useConnHealth } from '@/composables/useConnHealth'
 
 const { t } = useI18n()
 
@@ -44,6 +54,8 @@ defineEmits<{
 
 const sessionStore = useSessionStore()
 const appStore = useAppStore()
+
+const { level: connLevel } = useConnHealth()
 
 const sessionName = computed(() => sessionStore.activeTab?.name || '')
 </script>
@@ -85,6 +97,27 @@ const sessionName = computed(() => sessionStore.activeTab?.name || '')
   align-items: center;
   gap: 2px;
   flex-shrink: 0;
+}
+
+.conn-indicator {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+}
+
+.mini-spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--border-color);
+  border-top-color: var(--accent-color);
+  border-radius: 50%;
+  animation: conn-spin 0.9s linear infinite;
+}
+
+@keyframes conn-spin {
+  to { transform: rotate(360deg); }
 }
 
 .header-btn {

@@ -351,7 +351,13 @@ export const useSidebarStore = defineStore('sidebar', () => {
     }
   }
 
-  async function togglePluginEnabled(pluginId: string, enabled: boolean) {
+  async function togglePluginEnabled(
+    pluginId: string,
+    enabled: boolean,
+    /** 作用域（面板各级别插件都可启停；project/local 必须带项目路径） */
+    scope?: string,
+    projectPath?: string,
+  ) {
     const idx = plugins.value.findIndex(p => p.id === pluginId)
     const old = idx >= 0 ? { ...plugins.value[idx] } : null
     if (idx >= 0) plugins.value[idx] = { ...plugins.value[idx], enabled }
@@ -359,7 +365,7 @@ export const useSidebarStore = defineStore('sidebar', () => {
     // 仍由状态中心照常刷新（插件子项需要出现/消失）
     markSelfWrite('plugins')
     try {
-      await setPluginEnabled(pluginId, enabled)
+      await setPluginEnabled(pluginId, enabled, scope, projectPath)
     } catch (err) {
       cancelSelfWrite('plugins')
       // 刷新可能替换过数组：按 id（唯一）重新定位，不用过期索引

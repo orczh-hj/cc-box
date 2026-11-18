@@ -63,7 +63,7 @@ import { safeDispose } from '@/utils/dispose'
 import { relativizePath } from '@/utils/path'
 import { mapTerminalGlyphs } from '@/utils/terminal-glyphs'
 import { buildTapMouseInit } from '@/utils/tap-mouse'
-import { shouldInterceptImeInput } from '@/utils/ime-paste'
+import { shouldInterceptImeInput, imeAppendDelta, imeBackspaceDelta } from '@/utils/ime-paste'
 import { loadOsc52Clipboard } from '@/utils/osc52-clipboard'
 import { lightTheme, darkTheme } from '@/utils/terminal-theme'
 import type { SnapshotData } from '@/utils/terminal-reflow'
@@ -184,7 +184,7 @@ function setTerminalEl(tabId: string, el: HTMLElement | null) {
     const instance = terminalInstances.get(tabId)
     if (instance && !instance.term.element) {
       instance.term.open(el)
-      loadRendererAddons(instance.term)
+      loadRendererAddons(instance.term, tabId)
       // 只为当前显示的 Tab 争取焦点；后台实例不得抢占控制权
       if (tabId === currentDisplayTabId.value) ensureBrowserFocus(tabId)
       if (tabId === currentDisplayTabId.value) {
@@ -231,7 +231,7 @@ function effectiveFontSize(size: number | undefined): number {
 // 放在「Tab 切入」时机执行,切换动画遮盖 reload 的几十毫秒重建,用户无感。
 //
 // 详见 docs/webgl-corruption-fix.md
-function loadRendererAddons(term: Terminal) {
+function loadRendererAddons(term: Terminal, tabId: string) {
   try {
     const unicode11 = new Unicode11Addon()
     term.loadAddon(unicode11)
@@ -240,23 +240,153 @@ function loadRendererAddons(term: Terminal) {
     console.warn('[XTerm] Unicode 11 addon unavailable, fallback to default:', err)
   }
 
-  attachNativePasteIntercept(term)
+  attachNativePasteIntercept(term, tabId)
   attachWebgl(term)
 }
 
-/** 原生键盘粘贴修复（软键盘剪贴板/长按粘贴走 textarea input 事件）：
- *  xterm 只处理 insertText 且 data 原样发 PTY——insertFromPaste 被整体忽略
- *  （粘贴无反应）、带换行的整段粘贴 \n 不归一且无括号包裹（换行丢失）。
- *  capture 阶段拦截改走 term.paste（换行归一 + 括号粘贴，与桌面 Ctrl+V 同路径） */
-function attachNativePasteIntercept(term: Terminal) {
+/**
+ * 手机软键盘输入接管（差分模型正本与方案论证见 utils/ime-paste.ts）
+ *
+ * 发送职责矩阵（手机模式；对 textarea.value 只读不写——程序性改写 value 会
+ * 与输入法内核的影子状态失同步，第 3 轮「无法删除」事故的红线）：
+ * - keydown 229 → 拦断（阻断 xterm 定时差分，其 replace 算法会把全量 value
+ *   当增量重发）；自己起 setTimeout(0) 差分兜底「无 input 事件」的内核形态
+ * - keydown 非 229 可打印/退格 → 放行 xterm 发送（该路径可靠），记 pendingKey
+ *   待差分剥离防双发（preventDefault 生效时无 input，下拍过期）
+ * - keydown Enter → 放行（xterm 发 \r 并清空 value），下拍同步基线
+ * - input 非组合 → 拦断，LCP/LCS 差分：纯插入发插入段（剥 pendingKey）；
+ *   后缀删除发退格串（剥 pendingKey）；其余吞掉
+ * - input 组合中 → 拦断，仅推进基线（组合文本由 xterm finalize 唯一发送）
+ * - compositionend → 不发送、不碰 value，下拍同步基线（与 xterm finalize
+ *   定时器读同一 value 快照，观察一致）
+ * - blur → 下拍同步基线（xterm 清空 value 后归零）
+ * 桌面模式不接管（保留显式粘贴形态拦截），行为零改动。
+ */
+function attachNativePasteIntercept(term: Terminal, tabId: string) {
   const el = term.element
   if (!el) return
+
+  /** 已确认发送的 value 状态（差分基线；只随 value 变化推进，绝不写 value） */
+  let baseline = ''
+  let composing = false
+  /** xterm keydown 已发送、待差分剥离的量（可打印字符 / '\x7f'） */
+  let pendingKey = ''
+  let pendingKeyTimer = 0
+
+  const readValue = (): string => term.textarea?.value ?? ''
+
+  /** 下拍基线同步（xterm blur/Enter 程序性清空 value 发生在事件之后） */
+  const syncBaselineNextTick = () => {
+    window.setTimeout(() => { baseline = readValue() }, 0)
+  }
+
+  /** 发送差分量：多行文本走 paste 归一（与桌面粘贴同路径）；纯换行直发 \r
+   *  （括号包裹会让 CLI 进入粘贴态）；其余直发 PTY */
+  const sendDelta = (delta: string) => {
+    if (delta.includes('\n')) {
+      if (delta === '\n') {
+        const instance = terminalInstances.get(tabId)
+        if (instance?.ptyId) ptyInput(instance.ptyId, '\r')
+        return
+      }
+      term.paste(delta)
+      // term.paste 内部程序性清空 value——同步基线
+      baseline = readValue()
+      return
+    }
+    const instance = terminalInstances.get(tabId)
+    if (instance?.ptyId) ptyInput(instance.ptyId, delta)
+  }
+
+  /** 差分求值：返回应发送量（null=无需发送）。消费 pendingKey 防双发 */
+  const diffDelta = (): string | null => {
+    const value = readValue()
+    let send: string | null
+    const insert = imeAppendDelta(baseline, value)
+    if (insert !== null) {
+      send = pendingKey && insert.startsWith(pendingKey)
+        ? insert.slice(pendingKey.length)
+        : insert
+    } else {
+      // 后缀删除换算退格；xterm keydown(8) 已发过 \x7f 时剥离一个
+      let bs = imeBackspaceDelta(baseline, value)
+      if (bs !== null && pendingKey.startsWith('\x7f')) {
+        bs = pendingKey.length > 1 ? bs.slice(0, -1) : ''
+      }
+      send = bs
+    }
+    baseline = value
+    return send
+  }
+
+  el.addEventListener('keydown', (e: Event) => {
+    if (!isMobile.value) return
+    const ke = e as KeyboardEvent
+    if (ke.keyCode === 229) {
+      e.stopImmediatePropagation()
+      // 兜底：无 input 事件的内核形态（删除只发 keydown229）——下拍差分
+      window.setTimeout(() => {
+        const send = diffDelta()
+        if (send) sendDelta(send)
+      }, 0)
+      return
+    }
+    let pending = ''
+    if (ke.key === 'Enter') {
+      // xterm 发 \r 并清空 value——下拍同步基线
+      syncBaselineNextTick()
+    } else if (ke.key === 'Backspace') {
+      pending = '\x7f'
+    } else if (ke.key.length === 1 && !ke.ctrlKey && !ke.altKey && !ke.metaKey) {
+      // 可打印键：xterm keydown 发送该字符（含 shift 大写走 keypress 的形态）
+      pending = ke.key
+    }
+    if (pending) {
+      pendingKey += pending
+      window.clearTimeout(pendingKeyTimer)
+      pendingKeyTimer = window.setTimeout(() => { pendingKey = '' }, 0)
+    }
+  }, true)
+
+  el.addEventListener('compositionstart', () => {
+    composing = true
+  }, true)
+
+  el.addEventListener('compositionend', () => {
+    composing = false
+    pendingKey = ''
+    // 组合文本由 xterm finalize（内部 setTimeout(0)）唯一发送；我们与其定时器
+    // 读同一 value 快照，下拍同步基线即可（iOS 等无组合期 input 的内核也在
+    // 此兜底对齐）
+    syncBaselineNextTick()
+  }, true)
+
+  el.addEventListener('blur', () => {
+    pendingKey = ''
+    syncBaselineNextTick()
+  }, true)
+
   el.addEventListener('input', (e: Event) => {
     const ev = e as InputEvent
-    if (!shouldInterceptImeInput(ev)) return
-    e.preventDefault()
+    if (!isMobile.value) {
+      // 桌面：保留显式粘贴形态拦截（insertFromPaste 被 xterm 忽略/换行不归一）
+      if (ev.isComposing) return
+      if (!shouldInterceptImeInput(ev)) return
+      e.preventDefault()
+      e.stopImmediatePropagation()
+      term.paste(ev.data ?? '')
+      return
+    }
+
+    // 手机：一律接管。组合中仅推进基线（不发送——组合文本归 xterm finalize）
     e.stopImmediatePropagation()
-    term.paste(ev.data ?? '')
+    if (ev.isComposing || composing) {
+      baseline = readValue()
+      return
+    }
+    const send = diffDelta()
+    pendingKey = ''
+    if (send) sendDelta(send)
   }, true)
 }
 
@@ -756,7 +886,7 @@ async function createTerminalForTab(tabId: string, ptyId: string) {
     if (!isActive) el.style.display = 'block'
 
     term.open(el)
-    loadRendererAddons(term)
+    loadRendererAddons(term, tabId)
     // 浏览器端 attach 输出流（刷新恢复/重新显示 Tab 场景；已 attach 时幂等跳过）
     ensureBrowserFocus(tabId)
 
@@ -851,7 +981,7 @@ async function startTab(tabId: string) {
       const el = await waitForElement(tabId)
       if (el) {
         term.open(el)
-        loadRendererAddons(term)
+        loadRendererAddons(term, tabId)
         requestAnimationFrame(() => fitAddon.fit())
       }
 
@@ -936,7 +1066,7 @@ async function restartTab(tabId: string) {
       const el = await waitForElement(tabId)
       if (el) {
         term.open(el)
-        loadRendererAddons(term)
+        loadRendererAddons(term, tabId)
         requestAnimationFrame(() => fitAddon.fit())
       }
 
@@ -977,7 +1107,7 @@ async function showSpawnError(tabId: string, term: Terminal, fitAddon: FitAddon,
   const el = await waitForElement(tabId)
   if (el && !term.element) {
     term.open(el)
-    loadRendererAddons(term)
+    loadRendererAddons(term, tabId)
     requestAnimationFrame(() => fitAddon.fit())
   }
   term.write(`\r\n\x1b[31m[CC-Box] 启动 Claude CLI 失败: ${String(err)}\x1b[0m\r\n\r\n`)

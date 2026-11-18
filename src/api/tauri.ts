@@ -352,10 +352,16 @@ export const setMcpServerEnabled = (
     projectPath: projectPath ?? null,
   });
 
-export const setPluginEnabled = (pluginId: string, enabled: boolean): Promise<void> =>
+export const setPluginEnabled = (
+  pluginId: string,
+  enabled: boolean,
+  /** 作用域（user/project/local）：project/local 必须带 projectPath（CLI 需在项目 cwd 执行） */
+  scope?: string,
+  projectPath?: string,
+): Promise<void> =>
   // 后端同步执行 `claude plugin enable/disable` 子进程，可能超过远程 rpc 默认 15s；
   // 桌面实现忽略 timeoutMs（本地 IPC 无超时）。超时会让远程先报错回滚、桌面最终成功。
-  invoke<void>('set_plugin_enabled', { pluginId, enabled }, { timeoutMs: 60000 });
+  invoke<void>('set_plugin_enabled', { pluginId, enabled, scope, projectPath }, { timeoutMs: 60000 });
 
 // ---------- Plugin 市场（浏览 + 安装管理）----------
 
@@ -385,6 +391,22 @@ export interface MarketplacePluginEntry {
   icon?: string;
   installed: boolean;
   enabled?: boolean;
+  /** 已安装版本（plugins list 的 version；未安装为空） */
+  installedVersion?: string;
+  /** 市场清单版本是否比已装新（undefined/null = 任一侧缺版本，无法判定） */
+  updateAvailable?: boolean | null;
+  /** 各 scope 的安装明细（同插件可装在 user + 项目） */
+  installations?: PluginInstallation[];
+  /** 面板同视角匹配的安装位置（卸载/更新命令对准它；未安装为空） */
+  matchedScope?: string | null;
+  matchedProjectPath?: string | null;
+}
+
+/** 单个安装位置：scope（user/project/local）+ 启用态 + 项目路径 */
+export interface PluginInstallation {
+  scope: string;
+  enabled: boolean;
+  projectPath?: string | null;
 }
 
 export interface MarketplaceInfo {
@@ -408,8 +430,9 @@ export interface MarketplaceInfo {
   icon?: string;
 }
 
-export const getPluginMarketplaces = (): Promise<MarketplaceInfo[]> =>
-  invoke<MarketplaceInfo[]>('get_plugin_marketplaces');
+/** projectPath：当前项目路径——installed 徽标按 Plugins 面板同一项目视角判定 */
+export const getPluginMarketplaces = (projectPath?: string): Promise<MarketplaceInfo[]> =>
+  invoke<MarketplaceInfo[]>('get_plugin_marketplaces', { projectPath });
 
 /** 推荐市场（OSS data/plugin-markets.json 热更新；离线回退本地缓存） */
 export interface MarketPreset {

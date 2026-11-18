@@ -60,7 +60,7 @@
                 </button>
               </div>
 
-              <!-- 我的市场（用户添加：可浏览；已注册/未注册徽标） -->
+              <!-- 我的市场（用户添加且未注册：分组即注册状态，不再用徽标占宽） -->
               <div class="rail-block">
                 <div class="rail-label">{{ t('marketMySection') }}</div>
                 <button
@@ -68,7 +68,7 @@
                   :key="m.name"
                   class="rail-item"
                   :class="{ active: selected?.name === m.name, broken: !!m.loadError }"
-                  :title="m.loadError || m.description || m.source"
+                  :title="`${m.name}\n${m.loadError || m.description || m.source || ''}`"
                   @click="selectMarket(m)"
                 >
                   <span v-if="m.icon" class="p-icon small">
@@ -76,9 +76,6 @@
                     <span v-else class="p-emoji">{{ m.icon }}</span>
                   </span>
                   <span class="rail-name">{{ m.name }}</span>
-                  <span class="rail-badge" :class="{ reg: m.registered }">
-                    {{ t(m.registered ? 'marketBadgeRegistered' : 'marketBadgeUnregistered') }}
-                  </span>
                   <span v-if="busyKey === 'market:refresh'" class="rail-count">…</span>
                   <span v-else class="rail-count">{{ m.plugins.length }}</span>
                 </button>
@@ -116,7 +113,7 @@
                   :key="m.name"
                   class="rail-item"
                   :class="{ active: selected?.name === m.name, broken: !!m.loadError }"
-                  :title="m.loadError || m.installLocation"
+                  :title="`${m.name}\n${m.loadError || m.installLocation || ''}`"
                   @click="selectMarket(m)"
                 >
                   <span class="rail-mark" />
@@ -231,7 +228,14 @@
                     </span>
                     <span v-if="p.pinned" class="pin-star" :title="t('marketFeatured')">★</span>
                     <span class="row-name">{{ p.name }}</span>
-                    <span v-if="p.installed" class="chip chip-ok">{{ t('marketInstalled') }}</span>
+                    <span
+                      v-if="p.installed"
+                      class="chip"
+                      :class="p.enabled === false ? 'chip-off' : 'chip-ok'"
+                    >
+                      {{ p.enabled === false ? t('marketDisabledState') : t('marketInstalled') }}
+                    </span>
+                    <span v-if="p.installed && p.updateAvailable" class="chip chip-update">{{ t('marketUpdateBadge') }}</span>
                   </span>
                   <span v-if="p.description" class="row-desc">{{ p.description }}</span>
                   <span class="row-foot">
@@ -264,13 +268,17 @@
                   <div class="detail-title-wrap">
                     <h3 class="detail-title">{{ detail.name }}</h3>
                     <div class="detail-chips">
-                      <span v-if="detail.version" class="chip">v{{ detail.version }}</span>
+                      <span v-if="detail.version" class="chip" :class="{ 'chip-latest': detail.installed && detail.updateAvailable }">
+                        {{ detail.installed && detail.updateAvailable ? t('marketLatestVer', { v: detail.version }) : `v${detail.version}` }}
+                      </span>
+                      <span v-if="detail.installed && detail.installedVersion" class="chip muted">{{ t('marketInstalledVer', { v: detail.installedVersion }) }}</span>
+                      <span v-if="detail.installed && detail.updateAvailable" class="chip chip-update">{{ t('marketUpdateBadge') }}</span>
                       <span v-if="detail.category" class="chip">{{ detail.category }}</span>
                       <span v-if="detail.installs" class="chip muted">
                         {{ t('marketInstallsShort', { n: formatInstalls(detail.installs) }) }}
                       </span>
                       <span v-for="tag in detail.tags" :key="tag" class="chip muted">#{{ tag }}</span>
-                      <span v-if="detail.installed" class="chip" :class="detail.enabled ? 'chip-ok' : 'chip-off'">
+                      <span v-if="detail.installed" class="chip" :class="detail.installed && detail.enabled ? 'chip-ok' : 'chip-off'">
                         {{ detail.enabled ? t('marketEnabled') : t('marketDisabledState') }}
                       </span>
                     </div>
@@ -324,6 +332,9 @@
                       </button>
                     </template>
                     <template v-else>
+                      <button class="btn" :disabled="anyBusy" @click="toggleEnabled(detail)">
+                        {{ busyOn(detail, 'toggle') ? t('marketUpdating') : (detail.enabled ? t('disable') : t('enable')) }}
+                      </button>
                       <button class="btn" :disabled="anyBusy" @click="updateEntry(detail)">
                         {{ busyOn(detail, 'update') ? t('marketUpdating') : t('marketUpdate') }}
                       </button>
@@ -374,6 +385,7 @@ import {
   refreshPluginMarketplace,
   removePluginMarketplace,
   registerPluginMarketplace,
+  setPluginEnabled,
   uninstallPlugin,
   updatePlugin,
   type MarketplaceComponents,
@@ -418,9 +430,19 @@ const adding = ref(false)
 const newSource = ref('')
 
 const hasProject = computed(() => !!appStore.cwd)
-/** 三段市场分组：我的市场（用户添加）/ Claude 注册 / 精选推荐（未添加） */
-const myMarkets = computed(() => orderMarkets(marketplaces.value.filter(m => m.origin === 'user')))
-const claudeMarkets = computed(() => marketplaces.value.filter(m => m.origin === 'registered'))
+// 项目关闭后 project/local 选项消失——作用域残留旧值会让 select 显示空白、
+// 安装命令吃后端校验错误；回退到 user
+watch(hasProject, (has) => {
+  if (!has && scope.value !== 'user') scope.value = 'user'
+})
+/** 三段市场分组：我的市场（用户添加且未注册）/ Claude 注册（含已注册的
+ *  用户市场——注册即归 Claude 管理）/ 精选推荐（未添加） */
+const myMarkets = computed(() =>
+  orderMarkets(marketplaces.value.filter(m => m.origin === 'user' && !m.registered))
+)
+const claudeMarkets = computed(() =>
+  marketplaces.value.filter(m => m.origin === 'registered' || (m.origin === 'user' && m.registered))
+)
 const presetMarkets = computed(() => marketplaces.value.filter(m => m.origin === 'preset'))
 /** 默认选中：我的市场第一个（ccbox-market 置顶），否则 Claude 注册第一个 */
 const defaultMarket = computed(
@@ -570,8 +592,9 @@ async function fetchMarkets() {
   loadError.value = ''
   if (!marketplaces.value.length) loading.value = true
   try {
-    // 后端已合并三来源（我的/Claude 注册/精选推荐；推荐获取失败只影响 preset 分组）
-    const markets = await getPluginMarketplaces()
+    // 后端已合并三来源（我的/Claude 注册/精选推荐；推荐获取失败只影响 preset 分组）；
+    // installed 徽标传当前项目——后端按 Plugins 面板同一项目视角判定
+    const markets = await getPluginMarketplaces(appStore.cwd || undefined)
     marketplaces.value = markets
     if (selected.value) {
       selected.value = marketplaces.value.find(m => m.name === selected.value!.name) ?? null
@@ -598,9 +621,10 @@ function selectMarket(m: MarketplaceInfo) {
   railOpen.value = false
 }
 
+/** 点开详情；再次点击同一插件不收起（选中态常驻，取消选中无实际收益） */
 function toggleDetail(p: MarketplacePluginEntry) {
   actionError.value = ''
-  detail.value = detail.value?.name === p.name ? null : p
+  detail.value = p
 }
 
 function startAdding() {
@@ -611,6 +635,8 @@ function startAdding() {
 
 async function addPreset(preset: { name: string; source?: string }) {
   if (!preset.source) return
+  // 点击推荐即拉取浏览副本（git clone）——先确认，避免误触把市场加进列表
+  if (!(await uiConfirm(t('marketAddPresetConfirm', { name: preset.name }), { okText: t('marketAddConfirm') }))) return
   let added = ''
   const ok = await runAction('market', `market:add:${preset.name}`, async () => {
     added = await addPluginMarketplace(preset.source!)
@@ -692,7 +718,7 @@ async function uninstall(p: MarketplacePluginEntry) {
   if (!(await uiConfirm(t('marketUninstallConfirm', { name: p.name }), { danger: true, okText: t('marketUninstall') }))) return
   const ref = `${p.name}@${selected.value.name}`
   const ok = await runAction('plugin', pluginActionKey(p, 'uninstall'), () =>
-    uninstallPlugin(ref, scope.value, scopeArg())
+    uninstallPlugin(ref, p.matchedScope ?? scope.value, p.matchedScope === 'user' ? undefined : p.matchedProjectPath ?? scopeArg())
   )
   if (ok && appStore.cwd) sidebarStore.loadPlugins(appStore.cwd, { silent: true })
 }
@@ -700,9 +726,27 @@ async function uninstall(p: MarketplacePluginEntry) {
 async function updateEntry(p: MarketplacePluginEntry) {
   if (!selected.value) return
   const ref = `${p.name}@${selected.value.name}`
+  // 更新/卸载对准后端匹配的安装位置（面板同视角；local/project 装在特定项目，
+  // 按 UI 作用域发命令会报「未安装」）
   await runAction('plugin', pluginActionKey(p, 'update'), () =>
-    updatePlugin(ref, scope.value, scopeArg())
+    updatePlugin(ref, p.matchedScope ?? scope.value, p.matchedScope === 'user' ? undefined : p.matchedProjectPath ?? scopeArg())
   )
+}
+
+/** 启用/停用：对准 matched 安装位置（与更新/卸载同一对准逻辑） */
+async function toggleEnabled(p: MarketplacePluginEntry) {
+  if (!selected.value) return
+  const ref = `${p.name}@${selected.value.name}`
+  const next = !p.enabled
+  await runAction('plugin', pluginActionKey(p, 'toggle'), () =>
+    setPluginEnabled(
+      ref,
+      next,
+      p.matchedScope ?? scope.value,
+      p.matchedScope === 'user' ? undefined : p.matchedProjectPath ?? scopeArg(),
+    )
+  )
+  if (appStore.cwd) sidebarStore.loadPlugins(appStore.cwd, { silent: true })
 }
 
 /** 统一动作包装：单动作忙标记 + 错误归属 + 完成后重拉市场列表 */
@@ -936,22 +980,6 @@ async function runAction(
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-/* 我的市场：注册状态徽标（未注册=灰、已注册=金点绿） */
-.rail-badge {
-  font-size: 9.5px;
-  color: var(--text-tertiary);
-  border: 1px solid var(--border-color);
-  padding: 0 5px;
-  border-radius: 8px;
-  flex-shrink: 0;
-  line-height: 1.5;
-}
-
-.rail-badge.reg {
-  color: var(--accent-green, #3e9c5c);
-  border-color: var(--accent-green, #3e9c5c);
 }
 
 .rail-count {
@@ -1385,6 +1413,18 @@ async function runAction(
 .chip-ok {
   background: rgba(61, 140, 110, 0.12);
   color: var(--status-success);
+}
+
+/* 有更新徽标：列表行与详情页共用（accent 蓝，与「已安装」绿区分） */
+.chip-update {
+  background: rgba(74, 158, 255, 0.14);
+  color: var(--accent-color);
+}
+
+/* 详情页清单版本在有更新时高亮为「最新」语义 */
+.chip.chip-latest {
+  background: rgba(74, 158, 255, 0.14);
+  color: var(--accent-color);
 }
 
 .chip-off {

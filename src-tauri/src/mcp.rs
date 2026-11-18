@@ -618,14 +618,13 @@ impl McpStdioClient {
         #[cfg(target_os = "windows")]
         {
             let full_cmd = windows_cmd_line(&self.command, &self.args);
-            cmd = Command::new("cmd");
+            cmd = crate::platform::new_command("cmd");
             cmd.arg("/S").arg("/C");
             cmd.raw_arg(format!("\"{}\"", full_cmd));
-            crate::platform::configure_command(&mut cmd);
         }
         #[cfg(not(target_os = "windows"))]
         {
-            cmd = Command::new(&self.command);
+            cmd = crate::platform::new_command(&self.command);
             cmd.args(&self.args);
         }
         cmd.stdin(Stdio::piped())

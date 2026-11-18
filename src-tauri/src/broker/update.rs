@@ -291,6 +291,14 @@ async fn install_and_restart(
     ) {
         log::warn!("[broker-update] write lifecycle failed: {}", e);
     }
+    // Windows 的 install() 内部直接 exit，绕过事件循环（RunEvent::Exit 的托盘
+    // 清理不会执行）——安装前显式摘除托盘图标，防止更新重启留下僵尸图标
+    #[cfg(not(target_os = "linux"))]
+    {
+        if let Some(tray) = app.tray_by_id(crate::broker::tray::TRAY_ID) {
+            let _ = tray.set_visible(false);
+        }
+    }
     match update.install(bytes) {
         Ok(()) => {
             log::info!("[broker-update] installed v{}; restarting", version);

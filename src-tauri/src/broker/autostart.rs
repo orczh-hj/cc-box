@@ -231,7 +231,7 @@ fn platform_set_enabled(enabled: bool, exe: &Path) -> Result<(), String> {
         super::ownership::atomic_write_private(&path, content.as_bytes())
             .map_err(|e| e.to_string())?;
         // 已登录时立即加载；失败只记日志（下次登录仍会生效）
-        let status = Command::new("launchctl")
+        let status = crate::platform::new_command("launchctl")
             .args([
                 "bootstrap",
                 &format!("gui/{}", uid),
@@ -245,7 +245,7 @@ fn platform_set_enabled(enabled: bool, exe: &Path) -> Result<(), String> {
         }
         Ok(())
     } else {
-        let _ = Command::new("launchctl")
+        let _ = crate::platform::new_command("launchctl")
             .args(["bootout", &format!("gui/{}/com.cc-box.broker", uid)])
             .status();
         match std::fs::remove_file(&path) {

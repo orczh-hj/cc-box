@@ -1042,7 +1042,7 @@ fn run_version_command(program: &Path) -> Option<String> {
 
 #[cfg(not(target_os = "windows"))]
 fn run_version_command(program: &Path) -> Option<String> {
-    let output = Command::new(program)
+    let output = crate::platform::new_command(&program.to_string_lossy())
         .arg("--version")
         .output()
         .ok()?;

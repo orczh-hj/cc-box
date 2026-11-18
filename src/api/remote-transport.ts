@@ -30,6 +30,16 @@ import {
 
 const TOKEN_KEY = 'ccbox-remote-token'
 const PING_INTERVAL = 30_000
+/** pong 超过该时长未到 → 判定半开连接（浏览器未感知的死亡 WS），主动断开重连。
+ *  1.5×PING：留出弱网抖动余量。最坏发现延迟约 PONG_TIMEOUT + PING_INTERVAL（75s），
+ *  若连接先被反代空闲超时掐掉则走 onclose 既有重连，两条路都收敛 */
+const PONG_TIMEOUT = 45_000
+/** 回前台（visibilitychange/focus）校验 ping 的 pong 等待窗口 */
+const RESUME_PONG_WINDOW = 5_000
+/** 回前台时握手中间态（connecting/authenticating）停留超过该时长视为僵尸连接 */
+const HANDSHAKE_STALE_MS = 10_000
+/** visibilitychange 与 focus 连发的去重窗口 */
+const RESUME_DEDUCE_MS = 1_000
 const RETRY_MIN = 1_000
 const RETRY_MAX = 30_000
 
@@ -42,6 +52,11 @@ export type RemoteConnState =
   | 'closed'
 
 type EventHandler = (payload: unknown) => void
+
+/** 是否处于断开/未就绪态（回前台校验与 UI 分层共用的判定） */
+export function isDisconnectedState(s: RemoteConnState): boolean {
+  return s === 'connecting' || s === 'authenticating' || s === 'reconnecting'
+}
 
 /** 票据入口：`?dl=<device_id>.<ticket>`（query 更不易被微信复制链接截断） */
 function parseDownloadTicket(): string | null {
@@ -60,6 +75,16 @@ class RemoteTransportImpl implements Transport {
   private retryTimer: number | null = null
   private pingTimer: number | null = null
   private closedByUser = false
+
+  /** 最近一次收到 pong 的时间（半开连接检测依据；手机后台定时器冻结时判定
+   *  只由回前台校验承担，避免后台空转重连耗电） */
+  private lastPongAt = 0
+  /** 本次 open() 发起时间（回前台时识别僵尸握手中间态） */
+  private openedAt = 0
+  /** 回前台校验 ping 的超时定时器 */
+  private resumeTimer: number | null = null
+  /** visibilitychange/focus 去重时间戳 */
+  private lastResumeAt = 0
 
   private nextRpcId = 1
   private pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>()
@@ -286,6 +311,60 @@ class RemoteTransportImpl implements Transport {
     for (const cb of this.connStateListeners) cb(s)
   }
 
+  constructor() {
+    // 回前台校验：长离（锁屏/切后台）期间 WS 可能已被系统杀死但 onclose 未触发
+    // （半开），回前台瞬间不能信任任何现有连接。focus 是 iOS 微信内核锁屏恢复
+    // 偶发漏发 visibilitychange 的兜底；transport 是模块级单例，监听随实例常驻
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible') this.onResume()
+      })
+      window.addEventListener('focus', () => this.onResume())
+    }
+  }
+
+  /**
+   * 回前台校验（可见时才动作；后台不主动判定，防 Android 低频定时器下空转重连）：
+   * - connected：发校验 ping，短窗口等 pong，失败视为半开 → 干净重建连接
+   * - connecting/authenticating 停留过久：hello 帧丢失的僵尸握手 → 重建
+   * - reconnecting：清退避立即重试（后台排定的退避定时器由 open() 首行清掉）
+   * - denied/closedByUser（token 失效/用户主动关闭）不重试，维持既有语义
+   */
+  private onResume(): void {
+    if (Date.now() - this.lastResumeAt < RESUME_DEDUCE_MS) return
+    this.lastResumeAt = Date.now()
+    if (this.closedByUser || this._connState === 'denied' || this._connState === 'closed') return
+
+    if (this._connState === 'connected') {
+      const ws = this.ws
+      if (!ws) return
+      // 先发校验 ping，pong 分支收到即清除定时器；窗口内未回 → 连接已死
+      if (this.resumeTimer !== null) window.clearTimeout(this.resumeTimer)
+      this.resumeTimer = window.setTimeout(() => {
+        this.resumeTimer = null
+        if (this.ws !== ws || this._connState !== 'connected') return
+        this.closeSocket()
+        this.retry = 0
+        this.open()
+      }, RESUME_PONG_WINDOW)
+      this.sendClient({ type: 'ping' })
+      return
+    }
+    if (this._connState === 'connecting' || this._connState === 'authenticating') {
+      if (Date.now() - this.openedAt > HANDSHAKE_STALE_MS) {
+        this.closeSocket()
+        this.retry = 0
+        this.open()
+      }
+      return
+    }
+    if (this._connState === 'reconnecting') {
+      this.retry = 0
+      this.open()
+    }
+  }
+
+
   /** 主动关闭当前连接（切换设备）：清定时器 + 摘除回调，避免旧连接
    * 触发重连或在途帧投递 */
   private closeSocket(): void {
@@ -302,6 +381,7 @@ class RemoteTransportImpl implements Transport {
 
   private open(): void {
     this.cleanupTimers()
+    this.openedAt = Date.now()
     this.setConnState(this.retry === 0 ? 'connecting' : 'reconnecting')
 
     const proto = location.protocol === 'https:' ? 'wss' : 'ws'
@@ -349,6 +429,15 @@ class RemoteTransportImpl implements Transport {
       const msg = parseServerMessage(raw)
       if (!msg) return
 
+      if (msg.type === 'pong') {
+        // 活性证据：刷新半开检测基线，并终结回前台校验窗口
+        this.lastPongAt = Date.now()
+        if (this.resumeTimer !== null) {
+          window.clearTimeout(this.resumeTimer)
+          this.resumeTimer = null
+        }
+        return
+      }
       if (msg.type === 'hello.ok') {
         this.retry = 0
         this.setConnState('connected')
@@ -512,7 +601,18 @@ class RemoteTransportImpl implements Transport {
   }
 
   private startPing(): void {
+    this.lastPongAt = Date.now()
     this.pingTimer = window.setInterval(() => {
+      // 半开检测内联在 ping 周期里（零新增 timer）：页面可见且 pong 逾期 →
+      // 连接已死但浏览器未感知。走 ws.close()（非 closeSocket）——onclose
+      // 既有退避重连自然接管。后台不判定（定时器低频/冻结，回前台校验兜底）
+      if (
+        document.visibilityState === 'visible' &&
+        Date.now() - this.lastPongAt > PONG_TIMEOUT
+      ) {
+        this.ws?.close()
+        return
+      }
       this.sendClient({ type: 'ping' })
     }, PING_INTERVAL)
   }
@@ -525,6 +625,10 @@ class RemoteTransportImpl implements Transport {
     if (this.retryTimer !== null) {
       clearTimeout(this.retryTimer)
       this.retryTimer = null
+    }
+    if (this.resumeTimer !== null) {
+      clearTimeout(this.resumeTimer)
+      this.resumeTimer = null
     }
   }
 

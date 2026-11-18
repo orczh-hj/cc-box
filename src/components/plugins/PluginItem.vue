@@ -10,7 +10,6 @@
       />
       <span class="plugin-name">{{ plugin.name }}</span>
       <ToggleSwitch
-        v-if="plugin.scope === 'user'"
         :modelValue="!isDisabled"
         :title="isDisabled ? t('enable') : t('disable')"
         @update:modelValue="onToggle"
@@ -240,21 +239,27 @@ function useAgent(invokeFormat: string) {
 onUnmounted(() => clearTimeout(actionErrorTimer))
 
 async function onToggle(newValue: boolean) {
+  // 各级别都可启停：project/local 需带项目路径（CLI 在该项目 cwd 执行）
   try {
-    await sidebarStore.togglePluginEnabled(props.plugin.id, newValue)
+    await sidebarStore.togglePluginEnabled(
+      props.plugin.id,
+      newValue,
+      props.plugin.scope,
+      props.plugin.scope === 'user' ? undefined : (props.plugin.projectPath ?? appStore.cwd ?? undefined),
+    )
   } catch (err) {
     console.error('[PluginItem] toggle failed:', err)
   }
 }
 
-/** project 作用域 CLI 需要 cwd；user 传空（与市场浏览器同一命令） */
+/** project/local 作用域 CLI 需要 cwd；user 传空（与市场浏览器同一命令） */
 function lifecycleScope() {
   return {
     scope: props.plugin.scope,
     projectPath:
-      props.plugin.scope === 'project'
-        ? (props.plugin.projectPath ?? appStore.cwd ?? undefined)
-        : undefined,
+      props.plugin.scope === 'user'
+        ? undefined
+        : (props.plugin.projectPath ?? appStore.cwd ?? undefined),
   }
 }
 

@@ -58,9 +58,14 @@ fn ValidateInstallScope_白名单与项目路径要求() {
     let cwd = install_scope_cwd("project", Some("D:/proj")).unwrap().unwrap();
     assert_eq!(cwd, Path::new("D:/proj"));
 
-    // 非 project 作用域：cwd 为 None（即使误传了 project_path 也不影响）
+    // 非 project/local 作用域：cwd 为 None（即使误传了 project_path 也不影响）
     assert!(install_scope_cwd("user", Some("D:/proj")).unwrap().is_none());
-    assert!(install_scope_cwd("local", None).unwrap().is_none());
+    // local 与 project 同为项目级：必须有项目路径（CLI 记 projectPath=CWD）
+    assert!(install_scope_cwd("local", None).is_err());
+    assert_eq!(
+        install_scope_cwd("local", Some("D:/proj")).unwrap().unwrap(),
+        Path::new("D:/proj")
+    );
 }
 
 /// 安装生命周期在 spawn CLI 之前完成校验（非法输入不产生子进程）
@@ -131,10 +136,16 @@ fn GetPluginMarketplacesIn_多市场排序与徽标() {
     // 独立真值：x-plugin@market-a 已安装且启用；z-plugin@market-b 已安装但停用；
     // y-plugin 未安装
     let mut installed = HashMap::new();
-    installed.insert("x-plugin@market-a".to_string(), true);
-    installed.insert("z-plugin@market-b".to_string(), false);
+    installed.insert(
+        "x-plugin@market-a".to_string(),
+        vec![crate::store::InstalledLite { enabled: true, version: None, scope: "user".into(), project_path: None }],
+    );
+    installed.insert(
+        "z-plugin@market-b".to_string(),
+        vec![crate::store::InstalledLite { enabled: false, version: None, scope: "user".into(), project_path: None }],
+    );
 
-    let mut out = get_plugin_marketplaces_in(tmp.path(), &installed, &[], &[]).unwrap();
+    let mut out = get_plugin_marketplaces_in(tmp.path(), &installed, &[], &[], "").unwrap();
     assert_eq!(out.len(), 2);
     // 名称稳定排序：market-a 在前
     assert_eq!(out[0].name, "market-a");
@@ -204,13 +215,205 @@ fn GetPluginMarketplacesIn_按安装量排序_001() {
     )
     .unwrap();
 
-    let out = get_plugin_marketplaces_in(tmp.path(), &HashMap::new(), &[], &[]).unwrap();
+    let out = get_plugin_marketplaces_in(tmp.path(), &HashMap::new(), &[], &[], "").unwrap();
     let names: Vec<&str> = out[0].plugins.iter().map(|p| p.name.as_str()).collect();
     // 独立真值：3000 并列按名称 popular-a < popular-b，其次 42，最后无数据
     assert_eq!(names, vec!["popular-a", "popular-b", "mid-plugin", "cold-plugin"]);
     assert_eq!(out[0].plugins[0].installs, Some(3000));
     assert_eq!(out[0].plugins[2].installs, Some(42));
     assert_eq!(out[0].plugins[3].installs, None);
+}
+
+/// 已装版本透传与更新判定：清单版本 vs plugins list 的已装版本（手算真值）
+#[test]
+fn GetPluginMarketplacesIn_已装版本与更新判定_001() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mkt = make_marketplace(
+        tmp.path(),
+        "ver",
+        r#"{
+            "plugins": [
+                { "name": "behind", "version": "2.0.0" },
+                { "name": "current", "version": "1.5.0" },
+                { "name": "no-version" },
+                { "name": "not-installed", "version": "3.0.0" }
+            ]
+        }"#,
+    );
+    let plugins_dir = tmp.path().join("plugins");
+    std::fs::create_dir_all(&plugins_dir).unwrap();
+    std::fs::write(
+        plugins_dir.join("known_marketplaces.json"),
+        format!(r#"{{ "ver": {{ "installLocation": "{}" }} }}"#, mkt.to_string_lossy().replace('\\', "\\\\")),
+    )
+    .unwrap();
+
+    // 已装：behind v1.4.0（清单 2.0.0 → 有更新）；current v1.5.0（相等 → 无更新）；
+    // no-version 已装 v0.1.0（清单缺版本 → 无法判定）
+    let mut installed = HashMap::new();
+    for (id, ver) in [
+        ("behind@ver", Some("1.4.0")),
+        ("current@ver", Some("1.5.0")),
+        ("no-version@ver", Some("0.1.0")),
+    ] {
+        installed.insert(
+            id.to_string(),
+            vec![crate::store::InstalledLite { enabled: true, version: ver.map(str::to_string), scope: "user".into(), project_path: None }],
+        );
+    }
+
+    let out = get_plugin_marketplaces_in(tmp.path(), &installed, &[], &[], "").unwrap();
+    let find = |name: &str| {
+        out[0].plugins.iter().find(|p| p.name == name).unwrap().clone()
+    };
+    let behind = find("behind");
+    assert_eq!(behind.installed_version.as_deref(), Some("1.4.0"));
+    assert_eq!(behind.update_available, Some(true));
+    let current = find("current");
+    assert_eq!(current.update_available, Some(false));
+    // 清单缺版本：不下结论
+    assert_eq!(find("no-version").update_available, None);
+    // 未安装：无已装版本、不判定
+    let not_installed = find("not-installed");
+    assert!(!not_installed.installed);
+    assert_eq!(not_installed.installed_version, None);
+    assert_eq!(not_installed.update_available, None);
+}
+
+/// installed 徽标按项目视角判定（与 Plugins 面板共用 plugin_matches_project_view）：
+/// user 恒匹配；project 仅路径相等匹配；local 不匹配（面板同口径）
+#[test]
+fn GetPluginMarketplacesIn_项目视角匹配_001() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mkt = make_marketplace(
+        tmp.path(),
+        "pv",
+        r#"{ "plugins": [
+            { "name": "u-plug" },
+            { "name": "p-plug" },
+            { "name": "l-plug" },
+            { "name": "n-plug" }
+        ] }"#,
+    );
+    let plugins_dir = tmp.path().join("plugins");
+    std::fs::create_dir_all(&plugins_dir).unwrap();
+    std::fs::write(
+        plugins_dir.join("known_marketplaces.json"),
+        format!(r#"{{ "pv": {{ "installLocation": "{}" }} }}"#, mkt.to_string_lossy().replace('\\', "\\\\")),
+    )
+    .unwrap();
+
+    let mut installed: HashMap<String, Vec<crate::store::InstalledLite>> = HashMap::new();
+    installed.insert(
+        "u-plug@pv".to_string(),
+        vec![crate::store::InstalledLite { enabled: true, version: None, scope: "user".into(), project_path: None }],
+    );
+    // 同插件两份安装：user（停用）在前 + project（proj-a，启用）在后——
+    // 命中顺序必须显式优先项目份（CLI 输出顺序不受控，不能依赖 find 顺序）
+    installed.insert(
+        "p-plug@pv".to_string(),
+        vec![
+            crate::store::InstalledLite { enabled: false, version: None, scope: "user".into(), project_path: None },
+            crate::store::InstalledLite { enabled: true, version: None, scope: "project".into(), project_path: Some("D:/proj-a".into()) },
+        ],
+    );
+    installed.insert(
+        "l-plug@pv".to_string(),
+        vec![crate::store::InstalledLite { enabled: true, version: None, scope: "local".into(), project_path: Some("D:/proj-a".into()) }],
+    );
+
+    let find = |out: &Vec<crate::store::MarketplaceInfo>, name: &str| {
+        out[0].plugins.iter().find(|p| p.name == name).unwrap().clone()
+    };
+    // 视角 = D:/proj-a：project 命中（enabled/matched_* 取该份）；local 不匹配
+    let out = get_plugin_marketplaces_in(tmp.path(), &installed, &[], &[], "D:/proj-a").unwrap();
+    assert!(find(&out, "u-plug").installed);
+    let p = find(&out, "p-plug");
+    assert!(p.installed);
+    assert_eq!(p.enabled, Some(true));
+    assert_eq!(p.matched_scope.as_deref(), Some("project"));
+    assert_eq!(p.matched_project_path.as_deref(), Some("D:/proj-a"));
+    // local 与 project 同口径：路径相等即相关（enabled/matched 对准该份）
+    let l = find(&out, "l-plug");
+    assert!(l.installed);
+    assert_eq!(l.matched_scope.as_deref(), Some("local"));
+    assert_eq!(l.matched_project_path.as_deref(), Some("D:/proj-a"));
+    assert!(!find(&out, "n-plug").installed);
+
+    // 视角 = 其他项目：project 份不命中，user 份兜底
+    let out2 = get_plugin_marketplaces_in(tmp.path(), &installed, &[], &[], "D:/proj-b").unwrap();
+    let p2 = find(&out2, "p-plug");
+    assert_eq!(p2.matched_scope.as_deref(), Some("user"));
+    assert_eq!(p2.enabled, Some(false));
+    // **项目隔离**：l-plug 只装在 proj-a（local），其他项目视角下必须未安装
+    // （市场显示「安装」而非「已安装」，面板同样不显示）
+    let l2 = find(&out2, "l-plug");
+    assert!(!l2.installed);
+    assert_eq!(l2.matched_scope, None);
+    assert_eq!(l2.matched_project_path, None);
+
+    // 空视角（首页/旧前端未传）：仅 user 匹配
+    let out3 = get_plugin_marketplaces_in(tmp.path(), &installed, &[], &[], "").unwrap();
+    let p3 = find(&out3, "p-plug");
+    assert_eq!(p3.matched_scope.as_deref(), Some("user"));
+}
+
+/// 清单条目无 version 时从插件源码目录的 plugin.json 读后备
+/// （官方精选清单不逐条写 version，真实 bug：我的市场插件全都不显示版本）
+#[test]
+fn GetPluginMarketplacesIn_清单无版本读插件json后备_001() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mkt = make_marketplace(
+        tmp.path(),
+        "cur",
+        r#"{ "plugins": [
+            { "name": "from-plugin-json", "source": "./plugins/from-plugin-json" },
+            { "name": "no-both", "source": "./plugins/no-both" }
+        ] }"#,
+    );
+    // 插件源码目录带 plugin.json（version 在其中，清单层缺失）
+    let pj_dir = mkt.join("plugins").join("from-plugin-json").join(".claude-plugin");
+    std::fs::create_dir_all(&pj_dir).unwrap();
+    std::fs::write(pj_dir.join("plugin.json"), r#"{ "name": "from-plugin-json", "version": "2.1.0" }"#).unwrap();
+
+    // 已装 2.0.0（清单层无版本但后备有）→ 版本显示 2.1.0 且有更新
+    let mut installed = HashMap::new();
+    installed.insert(
+        "from-plugin-json@cur".to_string(),
+        vec![crate::store::InstalledLite { enabled: true, version: Some("2.0.0".into()), scope: "user".into(), project_path: None }],
+    );
+
+    let plugins_dir = tmp.path().join("plugins");
+    std::fs::create_dir_all(&plugins_dir).unwrap();
+    std::fs::write(
+        plugins_dir.join("known_marketplaces.json"),
+        format!(r#"{{ "cur": {{ "installLocation": "{}" }} }}"#, mkt.to_string_lossy().replace('\\', "\\\\")),
+    )
+    .unwrap();
+
+    let out = get_plugin_marketplaces_in(tmp.path(), &installed, &[], &[], "").unwrap();
+    let hit = out[0].plugins.iter().find(|p| p.name == "from-plugin-json").unwrap();
+    // 独立真值：清单层无 version → 后备 plugin.json 的 2.1.0；> 已装 2.0.0 → 有更新
+    assert_eq!(hit.version.as_deref(), Some("2.1.0"));
+    assert_eq!(hit.installed_version.as_deref(), Some("2.0.0"));
+    assert_eq!(hit.update_available, Some(true));
+    // 两处都无版本：version 为 None，不判定更新
+    let miss = out[0].plugins.iter().find(|p| p.name == "no-both").unwrap();
+    assert_eq!(miss.version, None);
+    assert_eq!(miss.update_available, None);
+}
+
+/// 宽松版本比较（手算真值）：v 前缀、数值段、缺段补零、预发布段
+#[test]
+fn Store_MarketVersionNewer_宽松比较_001() {
+    use crate::store::market_version_newer;
+    assert!(market_version_newer("1.2.0", "1.1.9"));
+    assert!(market_version_newer("v1.10", "v1.9")); // v 前缀 + 数值比较（10 > 9）
+    assert!(market_version_newer("1.0.1", "1.0")); // 缺段视为 0
+    assert!(market_version_newer("1.0.0-beta.2", "1.0.0-beta.1"));
+    assert!(!market_version_newer("1.0.0", "1.0.0"));
+    assert!(!market_version_newer("0.9", "1.0"));
+    assert!(!market_version_newer("1.0", "1.0.1"));
 }
 
 /// 精选置顶/排序：pinned 全在前（按 order），随后按 order，再按安装量，最后名称
@@ -243,7 +446,7 @@ fn GetPluginMarketplacesIn_精选置顶与排序_001() {
     )
     .unwrap();
 
-    let out = get_plugin_marketplaces_in(tmp.path(), &HashMap::new(), &[], &[]).unwrap();
+    let out = get_plugin_marketplaces_in(tmp.path(), &HashMap::new(), &[], &[], "").unwrap();
     let names: Vec<&str> = out[0].plugins.iter().map(|p| p.name.as_str()).collect();
     // 独立真值：置顶 → featured-a(1), featured-b(2)；随后 ordered(1)；再按热度 normal-hot
     assert_eq!(names, vec!["featured-a", "featured-b", "ordered", "normal-hot"]);
@@ -317,7 +520,7 @@ fn GetPluginMarketplacesIn_组件清单解析() {
     )
     .unwrap();
 
-    let out = get_plugin_marketplaces_in(tmp.path(), &HashMap::new(), &[], &[]).unwrap();
+    let out = get_plugin_marketplaces_in(tmp.path(), &HashMap::new(), &[], &[], "").unwrap();
     // 插件按名称稳定排序：bare / empty / full
     let by_name = |n: &str| out[0].plugins.iter().find(|p| p.name == n).unwrap();
 
@@ -365,7 +568,7 @@ fn GetPluginMarketplacesIn_纯名称声明与对象数组() {
     )
     .unwrap();
 
-    let out = get_plugin_marketplaces_in(tmp.path(), &HashMap::new(), &[], &[]).unwrap();
+    let out = get_plugin_marketplaces_in(tmp.path(), &HashMap::new(), &[], &[], "").unwrap();
     let comps = out[0].plugins[0].components.as_ref().expect("应有组件清单");
     // 无本地源码：路径声明退化为归一化名
     assert_eq!(comps.commands, vec!["cmd-a".to_string(), "cmd-b".to_string()]);
@@ -376,7 +579,7 @@ fn GetPluginMarketplacesIn_纯名称声明与对象数组() {
 #[test]
 fn GetPluginMarketplacesIn_无注册文件返回空列表() {
     let tmp = tempfile::tempdir().unwrap();
-    let out = get_plugin_marketplaces_in(tmp.path(), &HashMap::new(), &[], &[]).unwrap();
+    let out = get_plugin_marketplaces_in(tmp.path(), &HashMap::new(), &[], &[], "").unwrap();
     assert!(out.is_empty());
 }
 
@@ -396,7 +599,7 @@ fn GetPluginMarketplacesIn_单个市场损坏不影响整体() {
     std::fs::create_dir_all(&plugins_dir).unwrap();
     std::fs::write(plugins_dir.join("known_marketplaces.json"), known).unwrap();
 
-    let out = get_plugin_marketplaces_in(tmp.path(), &HashMap::new(), &[], &[]).unwrap();
+    let out = get_plugin_marketplaces_in(tmp.path(), &HashMap::new(), &[], &[], "").unwrap();
     assert_eq!(out.len(), 1);
     assert_eq!(out[0].name, "bad-mkt");
     assert!(out[0].load_error.is_some(), "expected load_error");
@@ -417,7 +620,7 @@ fn ReadMarketplaceJson_直接指向Json文件() {
     std::fs::create_dir_all(tmp.path().join("plugins")).unwrap();
     std::fs::write(tmp.path().join("plugins").join("known_marketplaces.json"), known).unwrap();
 
-    let out = get_plugin_marketplaces_in(tmp.path(), &HashMap::new(), &[], &[]).unwrap();
+    let out = get_plugin_marketplaces_in(tmp.path(), &HashMap::new(), &[], &[], "").unwrap();
     assert_eq!(out.len(), 1);
     assert!(out[0].load_error.is_none());
     assert_eq!(out[0].plugins.len(), 1);
@@ -719,7 +922,7 @@ fn GetPluginMarketplacesIn_三来源合并与排序() {
         },
     ];
 
-    let out = crate::store::get_plugin_marketplaces_in(base, &HashMap::new(), &custom, &presets).unwrap();
+    let out = crate::store::get_plugin_marketplaces_in(base, &HashMap::new(), &custom, &presets, "").unwrap();
     // 手算真值：ccbox-market（pinned）置顶，其次 alpha（合并 origin=user）
     assert_eq!(out.len(), 2);
     assert_eq!(out[0].name, "ccbox-market");
@@ -786,9 +989,12 @@ fn GetPluginMarketplacesIn_已安装置顶优先于精选与热度() {
     .unwrap();
 
     let mut installed = HashMap::new();
-    installed.insert("installed-plain@m".to_string(), true);
+    installed.insert(
+        "installed-plain@m".to_string(),
+        vec![crate::store::InstalledLite { enabled: true, version: None, scope: "user".into(), project_path: None }],
+    );
 
-    let out = get_plugin_marketplaces_in(tmp.path(), &installed, &[], &[]).unwrap();
+    let out = get_plugin_marketplaces_in(tmp.path(), &installed, &[], &[], "").unwrap();
     // 手算真值：installed-plain 已安装 → 第一；其余按精选排序
     assert_eq!(
         out[0].plugins.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),

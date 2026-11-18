@@ -14,7 +14,7 @@ use std::time::Duration;
 use crate::gateway::WindowInfo;
 use crate::gateway_proto::{BrokerOp, BrokerStatus};
 
-const TRAY_ID: &str = "cc-box-broker";
+pub(crate) const TRAY_ID: &str = "cc-box-broker";
 const TITLE: &str = "CC-Box";
 
 #[derive(Debug, Clone, PartialEq, Eq)]

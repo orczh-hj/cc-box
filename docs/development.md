@@ -23,6 +23,14 @@
   npm run build:win
   ```
 
+## 子进程统一封装（永不弹 cmd 黑窗）
+
+Windows GUI 进程直接 `Command::new` spawn 控制台程序（git/claude/cmd 等）会弹 cmd 黑窗（真实事故：市场 git clone 弹 git.exe 黑窗）。**所有子进程构造必须走统一封装**：
+
+- `platform::new_command(program)` —— 唯一构造入口（Windows 自动 `CREATE_NO_WINDOW`；非 Windows no-op）；需要叠加额外 creation_flags（如进程组隔离）在其基础上再 `creation_flags` 覆盖
+- `store::run_command_with_timeout` —— 长耗时 CLI（claude/git）执行入口，内部已应用平台配置，调用方无需另加
+- **守卫测试** `tests/process_spawn_guard.rs`：扫描 `src-tauri/src`（除 `platform.rs` 封装本体与 tests/）禁止裸 `Command::new`——新增裸调用会直接 fail 编译期测试，白名单变更须附理由
+
 ## 双仓库同步
 
 项目同步推送到 GitHub 和 Gitee 两个仓库，方便国内访问。
