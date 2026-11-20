@@ -1,4 +1,4 @@
-//! Plugin 市场模块测试：输入校验、市场清单读取（注入临时目录 + installed 表）、
+﻿//! Plugin 市场模块测试：输入校验、市场清单读取（注入临时目录 + installed 表）、
 //! 带超时命令执行、安装生命周期的前置校验。
 
 use std::collections::HashMap;
@@ -1166,4 +1166,30 @@ fn MarketBrowseCopy_Git源优先Raw直拉_5() {
         panic!("expected Dir")
     };
     assert_eq!(p2, p);
+}
+
+/// 更新检查读取的本地缓存与新缓存形态对齐：raw json 缓存（主形态）必须被
+/// 识别，否则 git 源市场的启动期更新检查永远静默失效（形态改造引入的回归）
+#[test]
+fn CheckMarketBrowseUpdate_识别Json缓存形态_6() {
+    // CONFIG_DIR 是全局 override，TestConfigDirGuard 用户必须串行
+    let _lock = crate::tests::CONFIG_DIR_TEST_LOCK.lock();
+    let _guard = crate::tests::TestConfigDirGuard::new("market-check");
+
+    let url = "https://gitee.com/orczh/ccbox-market.git";
+    let local = r#"{"name":"ccbox-market","plugins":[]}"#;
+    let cache = crate::store::market_browse_cache_dir().unwrap()
+        .join(format!("src-{}.json", crate::store::short_hash(url)));
+    std::fs::write(&cache, local).unwrap();
+
+    // 远端无变化 → false；有变化 → true（独立真值：两份清单语义不同）
+    let same = crate::store::check_market_browse_update_with(url, &|u| {
+        assert!(u.starts_with("https://gitee.com/orczh/ccbox-market/raw/"), "fetch 应收到推导后的 raw URL: {}", u);
+        Some(local.to_string())
+    });
+    assert!(!same);
+    let changed = crate::store::check_market_browse_update_with(url, &|_| {
+        Some(r#"{"name":"ccbox-market","plugins":[{"name":"new-plugin"}]}"#.to_string())
+    });
+    assert!(changed);
 }

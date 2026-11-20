@@ -5276,6 +5276,14 @@ pub(crate) fn market_manifest_changed(local: &str, remote: &str) -> bool {
 /// 检查某未注册市场的浏览副本是否过期：只拉 raw marketplace.json（KB 级），
 /// 与本地缓存语义比较；无缓存/来源不可推导/版本文件拉取失败均返回 false（退化）。
 fn check_market_browse_update(source: &str) -> bool {
+    check_market_browse_update_with(source, &|u| http_get_market_json(u).ok())
+}
+
+/// 可注入拉取函数的版本（测试传 fake，不依赖真网络）
+pub(crate) fn check_market_browse_update_with(
+    source: &str,
+    fetch: &dyn Fn(&str) -> Option<String>,
+) -> bool {
     let (candidates, cache_path) = match classify_market_source(source) {
         Ok(MarketSource::Dir(_)) => return false, // 本地目录实时读，无需检查
         Ok(MarketSource::JsonUrl(url)) => {
@@ -5285,9 +5293,18 @@ fn check_market_browse_update(source: &str) -> bool {
             (vec![url], cache)
         }
         Ok(MarketSource::Git(url)) => {
-            let cache = market_browse_cache_dir().ok().map(|d| {
-                d.join(format!("src-{}", short_hash(&url)))
-                    .join(MARKET_MANIFEST_REL_PATH)
+            // 本地缓存主形态是 raw 直拉的 json 文件；旧 clone 目录形态回退兼容
+            // （读错形态会让 is_file() 不命中、更新检查永远静默返回 false）
+            let cache = market_browse_cache_dir().ok().and_then(|d| {
+                let json = d.join(format!("src-{}.json", short_hash(&url)));
+                if json.is_file() {
+                    Some(json)
+                } else {
+                    let manifest = d
+                        .join(format!("src-{}", short_hash(&url)))
+                        .join(MARKET_MANIFEST_REL_PATH);
+                    manifest.is_file().then_some(manifest)
+                }
             });
             (marketplace_raw_urls(&url), cache)
         }
@@ -5301,7 +5318,7 @@ fn check_market_browse_update(source: &str) -> bool {
         return false;
     };
     for url in &candidates {
-        if let Ok(remote) = http_get_market_json(url) {
+        if let Some(remote) = fetch(url) {
             return market_manifest_changed(&local, &remote);
         }
     }
