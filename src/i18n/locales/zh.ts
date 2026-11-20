@@ -1,4 +1,4 @@
-export default {
+﻿export default {
   // Common
   close: '关闭',
   cancel: '取消',
@@ -502,6 +502,7 @@ export default {
   pluginUninstall: '卸载',
   pluginUninstallConfirm: '卸载插件 {name}？将同时移除其提供的 skills / agents / mcp / hooks。',
   pluginActionFailed: '操作失败',
+  pluginNoProjectPath: '该插件未记录安装项目路径，无法在当前上下文执行此操作',
 
   // Files panel（浏览器远程模式文件上传/下载）
   files: '文件',

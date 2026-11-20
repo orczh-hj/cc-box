@@ -452,9 +452,10 @@ export interface MarketPreset {
 export const getMarketPresets = (): Promise<MarketPreset[]> =>
   invoke<MarketPreset[]>('get_market_presets');
 
-// 市场与插件管理均为可能阻塞数十秒的 CLI 调用（clone/网络下载），
-// 远程 rpc 默认 15s 不够，统一放宽到 120s（后端超时上限同值）
-const MARKET_TIMEOUT = { timeoutMs: 120000 };
+// 市场与插件管理均为可能阻塞数十秒的 CLI 调用（clone/网络下载）。
+// 上限对齐后端最坏预算：raw 全候选（每 URL 直连 20s + 代理 20s × 2 候选）
+// + clone 120s ≈ 200s——前端先超时会让用户重试而后端仍在跑（叠加并发刷新）
+const MARKET_TIMEOUT = { timeoutMs: 240000 };
 
 /** 添加市场：只入 CC-Box 浏览列表（不注册 Claude）；返回清单里的市场名 */
 export const addPluginMarketplace = (source: string): Promise<string> =>

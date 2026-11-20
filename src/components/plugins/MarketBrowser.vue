@@ -697,6 +697,14 @@ function scopeArg(): string | undefined {
   return scope.value !== 'user' ? appStore.cwd : undefined
 }
 
+/** 已安装条目的操作对准（update/uninstall/toggle 共用单份）：后端按 Plugins
+ *  面板同视角算好 matchedScope/matchedProjectPath，对准它而非 UI 作用域——
+ *  local/project 装在特定项目，按 UI 作用域发命令会报「未安装」或改错份 */
+function matchedTarget(p: MarketplacePluginEntry): { scope: string; projectPath?: string } {
+  const s = p.matchedScope ?? scope.value
+  return { scope: s, projectPath: s === 'user' ? undefined : (p.matchedProjectPath ?? scopeArg()) }
+}
+
 async function install(p: MarketplacePluginEntry) {
   if (!selected.value) return
   const scopeLabel = t(
@@ -717,8 +725,9 @@ async function uninstall(p: MarketplacePluginEntry) {
   if (!selected.value) return
   if (!(await uiConfirm(t('marketUninstallConfirm', { name: p.name }), { danger: true, okText: t('marketUninstall') }))) return
   const ref = `${p.name}@${selected.value.name}`
+  const { scope: s, projectPath } = matchedTarget(p)
   const ok = await runAction('plugin', pluginActionKey(p, 'uninstall'), () =>
-    uninstallPlugin(ref, p.matchedScope ?? scope.value, p.matchedScope === 'user' ? undefined : p.matchedProjectPath ?? scopeArg())
+    uninstallPlugin(ref, s, projectPath)
   )
   if (ok && appStore.cwd) sidebarStore.loadPlugins(appStore.cwd, { silent: true })
 }
@@ -726,10 +735,9 @@ async function uninstall(p: MarketplacePluginEntry) {
 async function updateEntry(p: MarketplacePluginEntry) {
   if (!selected.value) return
   const ref = `${p.name}@${selected.value.name}`
-  // 更新/卸载对准后端匹配的安装位置（面板同视角；local/project 装在特定项目，
-  // 按 UI 作用域发命令会报「未安装」）
+  const { scope: s, projectPath } = matchedTarget(p)
   await runAction('plugin', pluginActionKey(p, 'update'), () =>
-    updatePlugin(ref, p.matchedScope ?? scope.value, p.matchedScope === 'user' ? undefined : p.matchedProjectPath ?? scopeArg())
+    updatePlugin(ref, s, projectPath)
   )
 }
 
@@ -738,13 +746,9 @@ async function toggleEnabled(p: MarketplacePluginEntry) {
   if (!selected.value) return
   const ref = `${p.name}@${selected.value.name}`
   const next = !p.enabled
+  const { scope: s, projectPath } = matchedTarget(p)
   await runAction('plugin', pluginActionKey(p, 'toggle'), () =>
-    setPluginEnabled(
-      ref,
-      next,
-      p.matchedScope ?? scope.value,
-      p.matchedScope === 'user' ? undefined : p.matchedProjectPath ?? scopeArg(),
-    )
+    setPluginEnabled(ref, next, s, projectPath)
   )
   if (appStore.cwd) sidebarStore.loadPlugins(appStore.cwd, { silent: true })
 }

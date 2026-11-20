@@ -3020,35 +3020,8 @@ fn claude_command() -> std::process::Command {
 }
 
 /// 执行 claude 命令并获取输出（设置 git-bash 环境）
-fn run_claude_command(args: &str) -> Result<String> {
-    let mut cmd = claude_command();
-    cmd.args(args.split_whitespace());
-    let output = cmd.output().context("Failed to run claude command")?;
+/// （已并入 argv 版执行器：字符串 split 无法携带含空格参数且无超时，已删）
 
-    // 即使失败也返回输出：调用方（如 plugins list）可能仍能从 stdout 取到信息
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
-}
-
-/// 严格版的 claude 命令执行：exit code != 0 时返回 Err（含 stderr）
-/// 用于 plugin enable/disable 等需要明确成败判断的场景
-fn run_claude_command_strict(args: &str) -> Result<String> {
-    let mut cmd = claude_command();
-    cmd.args(args.split_whitespace());
-
-    let output = cmd.output().context("Failed to run claude command")?;
-    if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).to_string())
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        bail!(
-            "claude {} failed (exit {:?}): {}",
-            args,
-            output.status.code(),
-            if stderr.is_empty() { stdout.trim() } else { stderr.trim() }
-        );
-    }
-}
 
 /// plugins list --json 短 TTL 缓存：一次 plugin 开关会级联刷新
 /// plugins/skills/agents/mcp 四个 section，每个 section 都会 spawn 一个 claude
@@ -3085,14 +3058,16 @@ fn plugins_list_json_in(project_cwd: Option<&str>) -> Result<String> {
             }
         }
     }
-    // 宽松语义与 run_claude_command 一致（失败也返回 stdout，旧 CLI 提示可读）
+    // 宽松语义（失败也返回 stdout，旧 CLI 提示可读）+ 带超时树杀
+    // （此前裸 cmd.output() 无超时，CLI 挂死会永久占住 blocking 线程）
     let mut cmd = claude_command();
     cmd.args(["plugins", "list", "--json"]);
     if let Some(dir) = project_cwd.filter(|s| !s.is_empty()) {
         cmd.current_dir(dir);
     }
-    let output = cmd.output().context("Failed to run claude command")?;
-    let raw = String::from_utf8_lossy(&output.stdout).to_string();
+    let (_, stdout, _) = run_command_parts_with_timeout(&mut cmd, CLI_MARKET_TIMEOUT)
+        .context("claude plugins list failed")?;
+    let raw = stdout;
     // 代次校验与回填必须在同一把 CACHE 锁内完成：否则 invalidate 可能恰好
     // 卡在两者之间（清空后旧 raw 又带着新时间戳写回，最多 2s 读到旧状态）
     if let Ok(mut guard) = PLUGINS_LIST_CACHE.lock() {
@@ -4073,15 +4048,6 @@ pub(crate) fn set_mcp_server_enabled_in(
     Ok(())
 }
 
-/// 原子写文本：先写 .tmp 再 rename（市场浏览缓存等非配置文件）
-pub(crate) fn write_text_atomic(path: &Path, content: &[u8]) -> Result<()> {
-    let tmp = path.with_extension("tmp");
-    fs::write(&tmp, content)
-        .with_context(|| format!("Failed to write {}", tmp.display()))?;
-    fs::rename(&tmp, path).with_context(|| "Failed to rename .tmp to target")?;
-    Ok(())
-}
-
 /// 原子写 JSON：先写 .tmp 再 rename
 pub(crate) fn write_json_atomic(path: &Path, value: &serde_json::Value) -> Result<()> {
     let tmp = path.with_extension("json.tmp");
@@ -4093,66 +4059,64 @@ pub(crate) fn write_json_atomic(path: &Path, value: &serde_json::Value) -> Resul
 
 // ---------- Plugin（CLI 调用）----------
 
-/// 切换 plugin 启用状态（调用 claude plugin enable/disable）
-pub fn set_plugin_enabled(plugin_id: &str, enabled: bool) -> Result<()> {
-    validate_simple_name(plugin_id).context("Invalid plugin id")?;
-    // plugin_id 可能含 @（如 paper-tool@orczh），允许这个字符
-    if plugin_id.contains('/') || plugin_id.contains('\\') || plugin_id.contains("..") {
-        bail!("Invalid plugin id: {:?}", plugin_id);
-    }
-    let action = if enabled { "enable" } else { "disable" };
-    let args = format!("plugin {} {}", action, plugin_id);
-    // 无论成败都失效缓存：CLI 可能已部分写入，且失败后下次读取必须反映真实状态
-    // （市场列表缓存含 installed/enabled 徽标，一并失效）
-    let result = run_claude_command_strict(&args);
-    invalidate_plugins_list_cache();
-    invalidate_plugin_market_cache();
-    result.with_context(|| format!("Failed to {} plugin '{}'", action, plugin_id))?;
-    Ok(())
-}
-
-/// 切换 plugin 启用状态（带作用域）：project/local 安装绑定项目目录——CLI 的
-/// enable/disable 必须在该项目 cwd 下执行且显式 `-s`，auto-detect 会找不到
-/// 或改错份；user/未指定走原 auto-detect 路径（向后兼容）
-pub fn set_plugin_enabled_scoped(
-    plugin_id: &str,
-    enabled: bool,
-    scope: Option<&str>,
-    project_path: Option<&str>,
-) -> Result<()> {
-    let Some(scope) = scope else {
-        return set_plugin_enabled(plugin_id, enabled);
-    };
-    validate_simple_name(plugin_id).context("Invalid plugin id")?;
-    if plugin_id.contains('/') || plugin_id.contains('\\') || plugin_id.contains("..") {
-        bail!("Invalid plugin id: {:?}", plugin_id);
-    }
-    let action = if enabled { "enable" } else { "disable" };
-    // project/local 需要项目 cwd；user 不需要
-    let cwd = install_scope_cwd(scope, project_path)?;
-    let result = run_claude_command_argv(
-        &["plugin", action, plugin_id, "-s", scope],
-        cwd.as_deref(),
-    );
-    // CLI 把幂等操作当失败（实测 2.1.179：状态已是目标态时报
-    // "already enabled/disabled" 且非零退出）——目标态即成功，不视为错误
-    let result = result.or_else(|e| {
+/// CLI 幂等宽容（plugin enable/disable 单份实现）：状态已是目标态时 CLI 报
+/// "already enabled/disabled" 且非零退出（实测 2.1.179）——目标态即成功
+fn tolerate_toggle_idempotent(result: Result<String>, enabled: bool) -> Result<String> {
+    result.or_else(|e| {
         let msg = format!("{:?}", e);
         let already = if enabled {
             msg.contains("already enabled")
         } else {
             msg.contains("already disabled")
         };
-        if already {
-            Ok(String::new())
-        } else {
-            Err(e)
-        }
-    });
+        if already { Ok(String::new()) } else { Err(e) }
+    })
+}
+
+/// plugin enable/disable 单一执行点（此前三处各写一份 argv 组装 + 幂等宽容 +
+/// 双缓存失效，改一处漏两处）：校验 → CLI 调用 → 幂等宽容 → 缓存失效。
+/// scope 恒显式传 `-s`（与安装路径同构；user 即 CLI 默认值，语义等价）
+fn run_plugin_toggle(
+    plugin_id: &str,
+    enabled: bool,
+    scope: &str,
+    project_path: Option<&str>,
+) -> Result<()> {
+    validate_simple_name(plugin_id).context("Invalid plugin id")?;
+    // plugin_id 可能含 @（如 paper-tool@orczh），允许这个字符
+    if plugin_id.contains('/') || plugin_id.contains('\\') || plugin_id.contains("..") {
+        bail!("Invalid plugin id: {:?}", plugin_id);
+    }
+    let action = if enabled { "enable" } else { "disable" };
+    // project/local 需要项目 cwd；user 不需要
+    let cwd = install_scope_cwd(scope, project_path)?;
+    let result = tolerate_toggle_idempotent(
+        run_claude_command_argv(&["plugin", action, plugin_id, "-s", scope], cwd.as_deref()),
+        enabled,
+    );
+    // 无论成败都失效缓存：CLI 可能已部分写入，且失败后下次读取必须反映真实状态
+    // （市场列表缓存含 installed/enabled 徽标，一并失效）
     invalidate_plugins_list_cache();
     invalidate_plugin_market_cache();
     result.with_context(|| format!("Failed to {} plugin '{}'", action, plugin_id))?;
     Ok(())
+}
+
+/// 切换 plugin 启用状态（调用 claude plugin enable/disable）
+pub fn set_plugin_enabled(plugin_id: &str, enabled: bool) -> Result<()> {
+    run_plugin_toggle(plugin_id, enabled, "user", None)
+}
+
+/// 切换 plugin 启用状态（带作用域）：project/local 安装绑定项目目录——CLI 的
+/// enable/disable 必须在该项目 cwd 下执行且显式 `-s`，auto-detect 会找不到
+/// 或改错份；user/未指定走 CLI 默认（同显式 user）
+pub fn set_plugin_enabled_scoped(
+    plugin_id: &str,
+    enabled: bool,
+    scope: Option<&str>,
+    project_path: Option<&str>,
+) -> Result<()> {
+    run_plugin_toggle(plugin_id, enabled, scope.unwrap_or("user"), project_path)
 }
 
 // ---------- Plugin 市场（浏览 + 安装管理，全部包装 claude plugin CLI）----------
@@ -4174,6 +4138,25 @@ pub(crate) fn run_command_with_timeout(
     cmd: &mut std::process::Command,
     timeout: std::time::Duration,
 ) -> Result<String> {
+    let (status, stdout, stderr) = run_command_parts_with_timeout(cmd, timeout)?;
+    if status.success() {
+        Ok(stdout)
+    } else {
+        bail!(
+            "command failed (exit {:?}): {}",
+            status.code(),
+            if stderr.trim().is_empty() { stdout.trim() } else { stderr.trim() }
+        );
+    }
+}
+
+/// 宽松形态：进程正常退出（无论 exit code）即返回 (status, stdout, stderr)，
+/// 仅 spawn 失败/超时返回 Err。plugins list 等「失败也要读 stdout」的调用用
+/// （旧 CLI 的错误提示常在 stdout，不能因非零退出丢弃）。
+pub(crate) fn run_command_parts_with_timeout(
+    cmd: &mut std::process::Command,
+    timeout: std::time::Duration,
+) -> Result<(std::process::ExitStatus, String, String)> {
     use std::process::Stdio;
 
     crate::platform::configure_command(cmd);
@@ -4212,16 +4195,7 @@ pub(crate) fn run_command_with_timeout(
 
     let stdout = stdout_join.join().unwrap_or_default();
     let stderr = stderr_join.join().unwrap_or_default();
-
-    if status.success() {
-        Ok(stdout)
-    } else {
-        bail!(
-            "command failed (exit {:?}): {}",
-            status.code(),
-            if stderr.trim().is_empty() { stdout.trim() } else { stderr.trim() }
-        );
-    }
+    Ok((status, stdout, stderr))
 }
 
 /// 终止进程树：Windows 上 cmd/npm 等 wrapper 会派生孙进程（claude → node），
@@ -4925,26 +4899,27 @@ pub(crate) fn invalidate_plugin_market_cache() {
 /// 未注册任何市场（文件不存在）时返回空列表而非报错（首次使用场景）。
 /// 结果按 60s 内存缓存：打开市场浏览器与刷新后立即重读都不再重复扫描插件目录。
 pub fn get_plugin_marketplaces(project_view: &str) -> Result<Vec<MarketplaceInfo>> {
-    if let Ok(guard) = MARKET_LIST_CACHE.lock() {
-        if let Some((at, _gen, view, data)) = guard.as_ref() {
-            if at.elapsed() < MARKET_LIST_TTL && view == project_view {
-                return Ok(data.clone());
-            }
+    // 锁中毒降级继续用（与 PLUGINS_LIST_CACHE 同策略）：持锁 panic 后若跳过缓存，
+    // 市场列表会静默退化为每次全量扫描（含 CLI 子进程）且无日志
+    let mut guard = MARKET_LIST_CACHE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some((at, _gen, view, data)) = guard.as_ref() {
+        if at.elapsed() < MARKET_LIST_TTL && view == project_view {
+            return Ok(data.clone());
         }
     }
     let gen = MARKET_CACHE_GEN.load(std::sync::atomic::Ordering::SeqCst);
     let data = load_plugin_marketplaces(project_view)?;
     // 拿锁后在锁内复核代际（失效方先 gen+1 再拿同一把锁）：锁外复核存在
     // 「复核后、拿锁前」被失效插入的窗口，旧数据会带新时间戳多活一个 TTL
-    if let Ok(mut guard) = MARKET_LIST_CACHE.lock() {
-        if MARKET_CACHE_GEN.load(std::sync::atomic::Ordering::SeqCst) == gen {
-            *guard = Some((
-                std::time::Instant::now(),
-                gen,
-                project_view.to_string(),
-                data.clone(),
-            ));
-        }
+    if MARKET_CACHE_GEN.load(std::sync::atomic::Ordering::SeqCst) == gen {
+        *guard = Some((
+            std::time::Instant::now(),
+            gen,
+            project_view.to_string(),
+            data.clone(),
+        ));
     }
     Ok(data)
 }
@@ -4983,9 +4958,8 @@ fn load_plugin_marketplaces(project_view: &str) -> Result<Vec<MarketplaceInfo>> 
         )
     });
     let custom_markets = custom_markets?;
-    let custom = with_builtin_market(&custom_markets, &presets);
     // ccbox-market 内置为默认个人市场（全新环境也能直接浏览官方精选，不依赖用户手动添加）
-    let custom = with_builtin_market(&custom, &presets);
+    let custom = with_builtin_market(&custom_markets, &presets);
     let mut list =
         get_plugin_marketplaces_in(&claude_config_dir()?, &installed, &custom, &presets, project_view)?;
     // 内置条目沿用推荐清单的描述/图标（走 custom 路径本身不带这些展示字段）
@@ -5053,6 +5027,69 @@ pub(crate) fn market_browse_cache_dir() -> Result<PathBuf> {
     Ok(dir)
 }
 
+/// 市场浏览缓存路径单点。双缓存形态（raw json 文件 = 主形态 / clone 目录 =
+/// 旧形态回退）加 tmp/old 中间态此前散落 ~12 处 `format!("src-{}…")` 拼接，
+/// 「json tmp 不带 pid」「clone 换入忘清 json」一类一致性遗漏的直接温床——
+/// 所有读写/清理/检查只经此处取名。
+struct MarketCachePaths {
+    /// raw 直拉的清单缓存（json 文件，主形态）
+    json: PathBuf,
+    /// 完整 clone 目录（旧形态/回退）
+    dir: PathBuf,
+}
+
+impl MarketCachePaths {
+    fn for_url(url: &str) -> Result<Self> {
+        let root = market_browse_cache_dir()?;
+        let h = short_hash(url);
+        Ok(Self {
+            json: root.join(format!("src-{}.json", h)),
+            dir: root.join(format!("src-{}", h)),
+        })
+    }
+
+    /// 进程间唯一的 tmp（clone 换入路径的 tmp 带 pid 是既有约定，json 同样需要：
+    /// 多实例并发写同一 tmp 在 Windows 下 rename 会因句柄占用失败或串内容）
+    fn tmp_json(&self) -> PathBuf {
+        self.json.with_extension(format!("{}.tmp", std::process::id()))
+    }
+
+    fn tmp_dir(&self) -> PathBuf {
+        self.dir.with_extension(format!("{}.tmp", std::process::id()))
+    }
+
+    fn old_dir(&self) -> PathBuf {
+        self.dir.with_extension(format!("{}.old", std::process::id()))
+    }
+
+    /// json 形态原子写（pid 唯一 tmp；失败顺手清理残留）。
+    /// 写入前校验是合法 JSON：直连被运营商劫持/captive portal 返回 200+HTML
+    /// 时若入缓存，市场会长期 loadError 且更新检查把同一份 HTML 反复判为
+    /// 「有更新」循环刷新
+    fn write_json(&self, text: &str) -> Result<()> {
+        serde_json::from_str::<serde_json::Value>(text)
+            .with_context(|| format!("清单不是合法 JSON（可能被劫持页污染）：{}", text.chars().take(80).collect::<String>()))?;
+        let tmp = self.tmp_json();
+        let res = (|| {
+            fs::write(&tmp, text).with_context(|| format!("Failed to write {}", tmp.display()))?;
+            fs::rename(&tmp, &self.json).with_context(|| "Failed to rename tmp to json cache")?;
+            Ok(())
+        })();
+        if res.is_err() {
+            let _ = fs::remove_file(&tmp);
+        }
+        res
+    }
+
+    /// 清理全部形态（含 tmp/old 残留）
+    fn clean_all(&self) {
+        for p in [&self.json, &self.tmp_json(), &self.dir, &self.tmp_dir(), &self.old_dir()] {
+            let _ = fs::remove_file(p);
+            let _ = fs::remove_dir_all(p);
+        }
+    }
+}
+
 /// git URL 的 raw marketplace.json 直拉：逐候选 URL 取第一个命中。
 /// None = 全部失败（调用方回退 clone）。浏览只需要清单（安装由 Claude CLI
 /// 克隆仓库），几百 ms 的 raw 直拉替代数秒的 `git clone --depth 1`
@@ -5075,38 +5112,51 @@ pub(crate) fn market_browse_local_copy_with(
     match classify_market_source(source)? {
         MarketSource::Dir(p) => Ok(MarketSource::Dir(p)),
         MarketSource::JsonUrl(url) => {
-            let cache = market_browse_cache_dir()?.join(format!("src-{}.json", short_hash(&url)));
-            if cache.is_file() {
-                return Ok(MarketSource::Dir(cache));
+            let paths = MarketCachePaths::for_url(&url)?;
+            if paths.json.is_file() {
+                return Ok(MarketSource::Dir(paths.json));
             }
             let text = http_get_market_json(&url)?;
-            write_text_atomic(&cache, text.as_bytes())?;
-            Ok(MarketSource::Dir(cache))
+            paths.write_json(&text)?;
+            Ok(MarketSource::Dir(paths.json))
         }
         MarketSource::Git(url) => {
-            // raw json 缓存（新形态）命中优先
-            let json_cache =
-                market_browse_cache_dir()?.join(format!("src-{}.json", short_hash(&url)));
-            if json_cache.is_file() {
-                return Ok(MarketSource::Dir(json_cache));
+            let paths = MarketCachePaths::for_url(&url)?;
+            // raw json 缓存（主形态）命中优先
+            if paths.json.is_file() {
+                return Ok(MarketSource::Dir(paths.json));
             }
             // 旧形态目录缓存（完整 clone）命中仍可用，自然过渡
-            let dir = market_browse_cache_dir()?.join(format!("src-{}", short_hash(&url)));
-            if dir.join(".claude-plugin").join("marketplace.json").is_file() {
-                return Ok(MarketSource::Dir(dir));
+            if paths.dir.join(".claude-plugin").join("marketplace.json").is_file() {
+                return Ok(MarketSource::Dir(paths.dir));
             }
             // raw 直拉清单（KB 级）：无缓存时的主路径
             if let Some(text) = raw_fetch(&url) {
-                write_text_atomic(&json_cache, text.as_bytes())?;
-                return Ok(MarketSource::Dir(json_cache));
+                paths.write_json(&text)?;
+                return Ok(MarketSource::Dir(paths.json));
             }
-            // raw 全失败（私有仓库/非标准主机）→ 回退 clone
+            // raw 全失败（私有仓库/非标准主机）→ 回退 clone。
+            // 跨进程锁：多窗口/后台预检查并发冷拉同一市场会互删半成品 clone
+            // （冷路径此前完全无锁）。拿不到锁时先复核缓存（对方可能刚写完），
+            // 仍无才降级直拉（与刷新锁超时的宽容语义一致）
+            let _xproc = acquire_market_refresh_lock(&url);
+            if _xproc.is_none() {
+                if paths.json.is_file()
+                    || paths.dir.join(".claude-plugin").join("marketplace.json").is_file()
+                {
+                    if paths.json.is_file() {
+                        return Ok(MarketSource::Dir(paths.json));
+                    }
+                    return Ok(MarketSource::Dir(paths.dir));
+                }
+                log::warn!("[PluginMarket] cold browse lock timeout, cloning anyway: {}", url);
+            }
             // 半途失败（网络中断等）会留下无 marketplace.json 的非空残留目录，
             // git 拒绝克隆到非空目录且每次重试都撞同一目录（添加市场被锁死）。
             // 到这里缓存必不完整，直接清掉重克隆
-            let _ = fs::remove_dir_all(&dir);
-            clone_market_repo(&url, &dir)?;
-            Ok(MarketSource::Dir(dir))
+            let _ = fs::remove_dir_all(&paths.dir);
+            clone_market_repo(&url, &paths.dir)?;
+            Ok(MarketSource::Dir(paths.dir))
         }
     }
 }
@@ -5133,58 +5183,60 @@ fn acquire_market_refresh_lock(url: &str) -> Option<crate::file_lock::FileLock> 
     None
 }
 
-/// 强制刷新浏览缓存。git 源在互斥下 clone 到唯一临时目录后换入
+/// 强制刷新浏览缓存。锁统一在入口持有（进程内 MARKET_REFRESH_LOCK + 跨进程
+/// 文件锁）：raw 写 json、clone 换入目录、JsonUrl 直拉写缓存都在互斥下进行，
+/// 多实例共享 ~/.cc-box 缓存时不互斥会争抢同一 tmp/目标（Windows 下 rename
+/// 因句柄占用失败或串内容）。git 源优先 raw 直拉（KB 级），失败再 clone 换入
 /// （避免 remove 与 clone 完成之间的窗口期读到半成品/缺失清单）。
 fn refresh_market_browse_copy(source: &str) -> Result<MarketSource> {
-    match classify_market_source(source)? {
-        MarketSource::Dir(p) => Ok(MarketSource::Dir(p)),
-        MarketSource::JsonUrl(url) => {
-            let cache = market_browse_cache_dir()?.join(format!("src-{}.json", short_hash(&url)));
+    let kind = classify_market_source(source)?;
+    if matches!(kind, MarketSource::Dir(_)) {
+        return Ok(kind);
+    }
+    let url = match &kind {
+        MarketSource::JsonUrl(u) | MarketSource::Git(u) => u.clone(),
+        MarketSource::Dir(_) => unreachable!(),
+    };
+    let _guard = MARKET_REFRESH_LOCK.lock();
+    // 跨进程互斥：另一实例正在刷新同一市场时等它完成（结果等价），
+    // 3s 仍拿不到锁才报错（锁文件不可用或对方刷新异常缓慢）
+    let _xproc = acquire_market_refresh_lock(&url)
+        .context("获取市场刷新锁失败（另一实例可能正在刷新，请稍后重试）")?;
+    let paths = MarketCachePaths::for_url(&url)?;
+    match kind {
+        MarketSource::Dir(_) => unreachable!(),
+        MarketSource::JsonUrl(_) => {
             let text = http_get_market_json(&url)?;
-            write_text_atomic(&cache, text.as_bytes())?;
-            Ok(MarketSource::Dir(cache))
+            paths.write_json(&text)?;
+            Ok(MarketSource::Dir(paths.json))
         }
-        MarketSource::Git(url) => {
-            // 优先 raw 直拉（KB 级）更新 json 缓存；失败再走 clone 换入。
-            // 进程内互斥先拿（raw 写缓存也不能并发）
-            let _guard = MARKET_REFRESH_LOCK.lock();
+        MarketSource::Git(_) => {
+            // 优先 raw 直拉（KB 级）更新 json 缓存
             if let Some(text) = fetch_raw_marketplace_json(&url) {
-                let cache = market_browse_cache_dir()?.join(format!("src-{}.json", short_hash(&url)));
-                write_text_atomic(&cache, text.as_bytes())?;
+                paths.write_json(&text)?;
                 // 清掉可能并存的旧目录缓存，浏览统一走 json 形态
-                let _ = fs::remove_dir_all(
-                    market_browse_cache_dir()?.join(format!("src-{}", short_hash(&url))),
-                );
-                return Ok(MarketSource::Dir(cache));
+                // （跨进程锁内执行，不会误删他实例正在换入的 clone）
+                let _ = fs::remove_dir_all(&paths.dir);
+                return Ok(MarketSource::Dir(paths.json));
             }
-            // 跨进程互斥：另一实例正在刷新同一市场时等它完成（结果等价），
-            // 3s 仍拿不到锁才报错（锁文件不可用或对方刷新异常缓慢）
-            let _xproc = acquire_market_refresh_lock(&url)
-                .context("获取市场刷新锁失败（另一实例可能正在刷新，请稍后重试）")?;
-            let dir = market_browse_cache_dir()?.join(format!("src-{}", short_hash(&url)));
-            // tmp 带 pid：进程间也唯一（进程内已由 MARKET_REFRESH_LOCK 串行化）
-            let tmp = market_browse_cache_dir()?
-                .join(format!("src-{}.{}.tmp", short_hash(&url), std::process::id()));
+            // raw 全失败 → clone 换入。旧 raw json 缓存一并清掉
+            // （local_copy 读它优先于目录，残留会让刷新结果不可见）
+            let _ = fs::remove_file(&paths.json);
+            let tmp = paths.tmp_dir();
+            let old = paths.old_dir();
             let _ = fs::remove_dir_all(&tmp);
-            // clone 换入路径：旧 raw json 缓存一并清掉（local_copy 读它优先于目录，
-            // 残留会让刷新结果不可见）
-            let _ = fs::remove_file(
-                market_browse_cache_dir()?.join(format!("src-{}.json", short_hash(&url))),
-            );
+            let _ = fs::remove_dir_all(&old);
             // 换入三步：旧目录 rename 到 .old（比直接 remove 可回滚）→
             // tmp rename 入位 → 删 .old；第二步失败则把 .old rename 回去，
             // 保证任意时刻磁盘上都有一份完整缓存（宁可中止也不毁旧缓存）
-            let old = market_browse_cache_dir()?
-                .join(format!("src-{}.{}.old", short_hash(&url), std::process::id()));
-            let _ = fs::remove_dir_all(&old);
             let refresh = (|| -> Result<()> {
                 clone_market_repo(&url, &tmp)
                     .with_context(|| format!("刷新市场缓存失败: {}", url))?;
                 let swap = (|| -> Result<()> {
-                    if dir.exists() {
-                        fs::rename(&dir, &old).context("旧缓存目录暂存失败")?;
+                    if paths.dir.exists() {
+                        fs::rename(&paths.dir, &old).context("旧缓存目录暂存失败")?;
                     }
-                    match fs::rename(&tmp, &dir) {
+                    match fs::rename(&tmp, &paths.dir) {
                         Ok(()) => {
                             let _ = fs::remove_dir_all(&old);
                             Ok(())
@@ -5192,7 +5244,7 @@ fn refresh_market_browse_copy(source: &str) -> Result<MarketSource> {
                         Err(e) => {
                             // 回滚：旧目录归位后再报错，缓存保持可用
                             if old.exists() {
-                                let _ = fs::rename(&old, &dir);
+                                let _ = fs::rename(&old, &paths.dir);
                             }
                             Err(anyhow::Error::new(e).context("市场缓存目录换入失败"))
                         }
@@ -5204,7 +5256,7 @@ fn refresh_market_browse_copy(source: &str) -> Result<MarketSource> {
                 swap
             })();
             refresh?;
-            Ok(MarketSource::Dir(dir))
+            Ok(MarketSource::Dir(paths.dir))
         }
     }
 }
@@ -5287,22 +5339,17 @@ pub(crate) fn check_market_browse_update_with(
     let (candidates, cache_path) = match classify_market_source(source) {
         Ok(MarketSource::Dir(_)) => return false, // 本地目录实时读，无需检查
         Ok(MarketSource::JsonUrl(url)) => {
-            let cache = market_browse_cache_dir()
-                .ok()
-                .map(|d| d.join(format!("src-{}.json", short_hash(&url))));
+            let cache = MarketCachePaths::for_url(&url).ok().map(|p| p.json);
             (vec![url], cache)
         }
         Ok(MarketSource::Git(url)) => {
             // 本地缓存主形态是 raw 直拉的 json 文件；旧 clone 目录形态回退兼容
             // （读错形态会让 is_file() 不命中、更新检查永远静默返回 false）
-            let cache = market_browse_cache_dir().ok().and_then(|d| {
-                let json = d.join(format!("src-{}.json", short_hash(&url)));
-                if json.is_file() {
-                    Some(json)
+            let cache = MarketCachePaths::for_url(&url).ok().and_then(|p| {
+                if p.json.is_file() {
+                    Some(p.json)
                 } else {
-                    let manifest = d
-                        .join(format!("src-{}", short_hash(&url)))
-                        .join(MARKET_MANIFEST_REL_PATH);
+                    let manifest = p.dir.join(MARKET_MANIFEST_REL_PATH);
                     manifest.is_file().then_some(manifest)
                 }
             });
@@ -5377,20 +5424,13 @@ pub fn startup_market_version_check() {
 /// 清理某来源的浏览缓存
 fn clean_market_browse_copy(source: &str) {
     let Ok(kind) = classify_market_source(source) else { return };
-    let names: Vec<String> = match kind {
+    let url = match kind {
         MarketSource::Dir(_) => return,
-        MarketSource::JsonUrl(url) => vec![format!("src-{}.json", short_hash(&url))],
-        // git 源有两种缓存形态：raw json 文件（新）与完整 clone 目录（旧/回退）
-        MarketSource::Git(url) => vec![
-            format!("src-{}", short_hash(&url)),
-            format!("src-{}.json", short_hash(&url)),
-        ],
+        MarketSource::JsonUrl(url) | MarketSource::Git(url) => url,
     };
-    if let Ok(root) = market_browse_cache_dir() {
-        for name in names {
-            let _ = fs::remove_dir_all(root.join(&name));
-            let _ = fs::remove_file(root.join(&name));
-        }
+    if let Ok(paths) = MarketCachePaths::for_url(&url) {
+        // JsonUrl 与 Git 的缓存名同构（按来源 URL hash），json+dir 全形态清理
+        paths.clean_all();
     }
 }
 
@@ -6102,7 +6142,8 @@ pub fn remove_plugin_marketplace(name: &str, also_unregister: bool) -> Result<()
         }
         let res =
             run_claude_command_argv(&["plugin", "marketplace", "remove", name], None).map(|_| ());
-        invalidate_plugin_market_cache();
+        // 注销影响 plugins list 视角（该市场插件随之不可用）——级联失效两份缓存
+        invalidate_plugins_list_cache();
         return res;
     }
     let mut list = get_app_config()?.custom_markets.unwrap_or_default();
@@ -6142,7 +6183,8 @@ pub fn register_plugin_marketplace(name: &str) -> Result<()> {
     // 注册成功后浏览切到 Claude 克隆，CC-Box 浏览缓存即刻清理
     // （失败保留缓存——下次浏览不用重新 clone）
     clean_market_browse_copy(&source);
-    invalidate_plugin_market_cache();
+    // 注册影响 plugins list 视角（Claude 侧新增可安装源）——级联失效两份缓存
+    invalidate_plugins_list_cache();
     Ok(())
 }
 
@@ -6213,18 +6255,14 @@ fn install_plugin_lifecycle(
     // 「装完显示已停用」），安装意图显然是启用——追加 enable，失败仅告警
     // （已启用时幂等；旧 CLI 不支持时安装本身不受影响）
     if action == "install" {
-        let enable_res = run_claude_command_argv(
-            &["plugin", "enable", plugin_ref, "-s", scope],
-            cwd.as_deref(),
+        // CLI 已启用时报 already enabled（幂等当失败）——目标态即成功（共用宽容函数）
+        let enable_res = tolerate_toggle_idempotent(
+            run_claude_command_argv(
+                &["plugin", "enable", plugin_ref, "-s", scope],
+                cwd.as_deref(),
+            ),
+            true,
         );
-        // CLI 已启用时报 already enabled（幂等当失败）——目标态即成功
-        let enable_res = enable_res.or_else(|e| {
-            if format!("{:?}", e).contains("already enabled") {
-                Ok(String::new())
-            } else {
-                Err(e)
-            }
-        });
         invalidate_plugins_list_cache();
         invalidate_plugin_market_cache();
         if let Err(e) = &enable_res {

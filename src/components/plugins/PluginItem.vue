@@ -240,27 +240,27 @@ onUnmounted(() => clearTimeout(actionErrorTimer))
 
 async function onToggle(newValue: boolean) {
   // 各级别都可启停：project/local 需带项目路径（CLI 在该项目 cwd 执行）
+  const projectPath = scopedProjectPath()
+  if (projectPath === null) return
   try {
-    await sidebarStore.togglePluginEnabled(
-      props.plugin.id,
-      newValue,
-      props.plugin.scope,
-      props.plugin.scope === 'user' ? undefined : (props.plugin.projectPath ?? appStore.cwd ?? undefined),
-    )
+    await sidebarStore.togglePluginEnabled(props.plugin.id, newValue, props.plugin.scope, projectPath)
   } catch (err) {
     console.error('[PluginItem] toggle failed:', err)
   }
 }
 
-/** project/local 作用域 CLI 需要 cwd；user 传空（与市场浏览器同一命令） */
-function lifecycleScope() {
-  return {
-    scope: props.plugin.scope,
-    projectPath:
-      props.plugin.scope === 'user'
-        ? undefined
-        : (props.plugin.projectPath ?? appStore.cwd ?? undefined),
+/** project/local 作用域 CLI 需要 cwd；user 传空。
+ *  projectPath 缺失时返回 null（拒绝操作）——兜底当前 cwd 会在**另一个项目**
+ *  下执行 enable/update/uninstall：CLI 报「未安装」或操作到错误份
+ *  （市场浏览器用后端算好的 matchedProjectPath 规避了这一点，这里同口径守卫） */
+function scopedProjectPath(): string | undefined | null {
+  if (props.plugin.scope === 'user') return undefined
+  const p = props.plugin.projectPath ?? appStore.cwd ?? undefined
+  if (!p) {
+    showActionError(t('pluginNoProjectPath'))
+    return null
   }
+  return p
 }
 
 function showActionError(msg: string) {

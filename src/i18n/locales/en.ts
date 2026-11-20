@@ -1,4 +1,4 @@
-export default {
+﻿export default {
   // Common
   close: 'Close',
   cancel: 'Cancel',
@@ -502,6 +502,7 @@ export default {
   pluginUninstall: 'Uninstall',
   pluginUninstallConfirm: 'Uninstall plugin {name}? Its skills / agents / mcp / hooks will be removed as well.',
   pluginActionFailed: 'Action failed',
+  pluginNoProjectPath: 'This plugin has no recorded project path; cannot run this action here',
 
   // Files panel (browser remote mode upload/download)
   files: 'Files',
