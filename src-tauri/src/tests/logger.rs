@@ -85,16 +85,16 @@ fn Logger_ErrorChain_SingleLayer_001() {
     assert_eq!(error_chain(&e), "only");
 }
 
-/// 深度上限：12 层深链被截到最多 8 段（防环上限的行为锚定，环是该上限的极端场景）
+/// 深度上限：12 层深链被截到恰好 8 段（防环上限的行为锚定——真正的环需
+/// 自引用 source 实现困难，深链是同一上限路径的代理验证）
 #[test]
-fn Logger_ErrorChain_CycleCapped_001() {
+fn Logger_ErrorChain_DepthCapped_001() {
     let mut e: Box<dyn std::error::Error> = Box::new(chained("layer-12", None));
     for i in (0..11).rev() {
         e = Box::new(chained(Box::leak(format!("layer-{}", i).into_boxed_str()), Some(e)));
     }
     let out = error_chain(e.as_ref());
-    let segs = out.split(" -> ").count();
-    assert!(segs <= 8, "depth not capped: {} segments", segs);
+    assert_eq!(out.split(" -> ").count(), 8, "depth not capped at 8: {}", out);
 }
 
 /// 跨零点滚动判断：日期前缀不同即滚动
@@ -103,6 +103,32 @@ fn Logger_ShouldRollover_001() {
     assert!(should_rollover("2026-11-19", "2026-11-20"));
     assert!(!should_rollover("2026-11-20", "2026-11-20"));
     assert!(should_rollover("", "2026-11-20"));
+}
+
+/// enabled() 落盘闸门跟随运行时级别（曾硬编码 <= Info，导致 CC_BOX_LOG=debug
+/// 放开的 Debug 日志被 enabled 丢弃、运行时开关失效）：抬高到 Debug 后
+/// Debug/Trace 记录必须放行，Info 及以上恒放行
+#[test]
+fn Logger_EnabledGate_FollowsRuntimeLevel_001() {
+    use log::Log;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let record_at = |level: log::Level| {
+        log::Record::builder()
+            .level(level)
+            .target("cc_box::tests")
+            .args(format_args!("gate"))
+            .build()
+    };
+    let saved = crate::logger::RUNTIME_MAX_LEVEL.load(Ordering::Relaxed);
+    // 抬到 Debug：Debug 放行、Trace 仍被拦（宏侧 max_level 不经过 enabled，这里是落盘真正闸门）
+    crate::logger::RUNTIME_MAX_LEVEL.store(log::LevelFilter::Debug as usize, Ordering::Relaxed);
+    assert!(crate::logger::LOGGER.enabled(&record_at(log::Level::Debug).metadata()));
+    assert!(!crate::logger::LOGGER.enabled(&record_at(log::Level::Trace).metadata()));
+    // 收回到 Error：Debug 被拦、Error 放行
+    crate::logger::RUNTIME_MAX_LEVEL.store(log::LevelFilter::Error as usize, Ordering::Relaxed);
+    assert!(!crate::logger::LOGGER.enabled(&record_at(log::Level::Debug).metadata()));
+    assert!(crate::logger::LOGGER.enabled(&record_at(log::Level::Error).metadata()));
+    crate::logger::RUNTIME_MAX_LEVEL.store(saved, Ordering::Relaxed);
 }
 
 /// 日志行格式锚定：[ts][LEVEL] [target] args

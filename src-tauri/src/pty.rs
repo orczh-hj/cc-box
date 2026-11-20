@@ -726,7 +726,7 @@ impl PtyManager {
 
     /// 写入输入到 PTY
     pub fn write(&self, id: &str, data: &str) -> Result<()> {
-        log::trace!("[{}] Writing {} bytes to PTY", id, data.len());
+        log::trace!("pty={} writing {} bytes to PTY", id, data.len());
 
         let mut writers = self.writers.lock();
         let writer = writers.get_mut(id).ok_or_else(|| {
@@ -743,7 +743,7 @@ impl PtyManager {
             .flush()
             .with_context(|| format!("Failed to flush PTY {}", id))?;
 
-        log::trace!("[{}] Write successful", id);
+        log::trace!("pty={} write successful", id);
         Ok(())
     }
 

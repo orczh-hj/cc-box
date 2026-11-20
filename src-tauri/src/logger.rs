@@ -134,21 +134,30 @@ fn cleanup_old_logs(keep_days: u64) {
     }
 }
 
-struct FileLogger {
+pub(crate) struct FileLogger {
     app_log: Mutex<Option<File>>,
     error_log: Mutex<Option<File>>,
     /// 当前打开文件对应的日期前缀，用于跨零点滚动
     current_date: Mutex<String>,
 }
 
-static LOGGER: FileLogger = FileLogger {
+pub(crate) static LOGGER: FileLogger = FileLogger {
     app_log: Mutex::new(None),
     error_log: Mutex::new(None),
     current_date: Mutex::new(String::new()),
 };
 
+/// 运行时落盘级别（init 时由 resolve_level 结果写入）。
+/// `log::Log::enabled` 必须以此为准——宏侧只查 max_level 不查 enabled，
+/// 硬编码 `<= Info` 会把 CC_BOX_LOG=debug 放开的 Debug/Trace 全部丢弃
+/// （log crate 中 Level 与 LevelFilter 的判别值对齐：Error=1..Trace=5，可直接比较）
+pub(crate) static RUNTIME_MAX_LEVEL: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(log::LevelFilter::Info as usize);
+
 impl FileLogger {
-    /// 跨零点滚动：在锁内重开两个文件；重开失败保留旧句柄（不丢日志），只警告一次/天
+    /// 跨零点滚动：在锁内重开两个文件；重开失败保留旧句柄（不丢日志），
+    /// 每条日志都会重试（目录持续不可写时 debug 构建下会在 stderr 刷屏——
+    /// 预期行为：不可写本身就该被看见）
     fn rollover_if_needed(&self, today: &str) {
         let mut date_guard = match self.current_date.lock() {
             Ok(g) => g,
@@ -176,7 +185,7 @@ impl FileLogger {
 
 impl log::Log for FileLogger {
     fn enabled(&self, metadata: &log::Metadata) -> bool {
-        metadata.level() <= log::Level::Info
+        (metadata.level() as usize) <= RUNTIME_MAX_LEVEL.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     fn log(&self, record: &log::Record) {
@@ -249,6 +258,8 @@ pub fn init() {
     // CC_BOX_LOG 环境变量覆盖编译默认（debug=Debug / release=Info）
     let level = resolve_level(std::env::var(LOG_LEVEL_ENV).ok().as_deref(), cfg!(debug_assertions));
     log::set_max_level(level);
+    // enabled() 与宏侧 max_level 必须同步（enabled 是落盘的真正闸门，见 RUNTIME_MAX_LEVEL）
+    RUNTIME_MAX_LEVEL.store(level as usize, std::sync::atomic::Ordering::Relaxed);
 
     // 设置全局日志器
     if log::set_logger(&LOGGER).is_err() {
