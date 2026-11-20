@@ -1110,27 +1110,27 @@ pub async fn get_mcp_server_detail(
     server_name: String,
     force_refresh: bool,
 ) -> Result<Option<crate::mcp::McpServerDetail>, String> {
-    log::info!(
-        "[MCP] get_mcp_server_detail called: name={}, force_refresh={}",
+    log::debug!(
+        "get_mcp_server_detail called: name={}, force_refresh={}",
         server_name,
         force_refresh
     );
 
     // 先从 store 获取 server 的 URL、command 和 headers
     let servers = crate::store::get_all_mcp_servers(&project_path).map_err(|e| {
-        log::error!("[MCP] get_all_mcp_servers failed: {}", e);
+        log::error!("get_all_mcp_servers failed: {}", e);
         e.to_string()
     })?;
     let server = servers.iter().find(|s| s.name == server_name);
 
     if server.is_none() {
-        log::warn!("[MCP] Server '{}' not found in config", server_name);
+        log::warn!("MCP server '{}' not found in config", server_name);
         return Ok(None);
     }
 
     let server = server.unwrap();
-    log::info!(
-        "[MCP] Server '{}' config: type={:?}, url={:?}, command={:?}, args={:?}",
+    log::debug!(
+        "MCP server '{}' config: type={:?}, url={:?}, command={:?}, args={:?}",
         server_name,
         server.server_type,
         server.url,
@@ -1151,14 +1151,14 @@ pub async fn get_mcp_server_detail(
 
     match &result {
         Ok(Some(detail)) => log::info!(
-            "[MCP] Detail fetched for '{}': tools={}, prompts={}, resources={}",
+            "MCP detail fetched for '{}': tools={}, prompts={}, resources={}",
             server_name,
             detail.tools.len(),
             detail.prompts.len(),
             detail.resources.len()
         ),
-        Ok(None) => log::warn!("[MCP] No detail returned for '{}'", server_name),
-        Err(e) => log::error!("[MCP] Detail fetch failed for '{}': {}", server_name, e),
+        Ok(None) => log::warn!("No MCP detail returned for '{}'", server_name),
+        Err(e) => log::error!("MCP detail fetch failed for '{}': {}", server_name, e),
     }
 
     result

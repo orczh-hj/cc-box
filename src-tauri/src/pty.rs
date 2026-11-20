@@ -137,7 +137,7 @@ pub struct PtyManager {
 impl PtyManager {
     /// 创建 PTY 管理器
     pub fn new(app_handle: AppHandle) -> Self {
-        log::info!("PTY Manager initialized");
+        log::debug!("PTY Manager initialized");
         Self {
             instances: Mutex::new(HashMap::new()),
             writers: Mutex::new(HashMap::new()),
@@ -224,10 +224,11 @@ impl PtyManager {
 
         // 验证工作目录
         if !Path::new(cwd).exists() {
-            let err_msg = format!("Working directory does not exist: {}", cwd);
-            log::error!("{}", err_msg);
-            self.emit_error(&id, &err_msg, "validation");
-            return Err(anyhow!("{}", err_msg));
+            return Err(self.spawn_fail(
+                &id,
+                "validation",
+                format!("Working directory does not exist: {}", cwd),
+            ));
         }
 
         // 创建 PTY
@@ -274,7 +275,7 @@ impl PtyManager {
             let git_bash = Self::detect_git_bash();
             let (program, shell_args) =
                 crate::platform::get_claude_shell(&claude_cmd, git_bash.as_deref());
-            log::info!("Using shell: {} with args: {:?}", program, shell_args);
+            log::debug!("Using shell: {} with args: {:?}", program, shell_args);
             let mut cmd = CommandBuilder::new(&program);
             for arg in &shell_args {
                 cmd.arg(arg);
@@ -298,10 +299,11 @@ impl PtyManager {
                             path
                         }
                         None => {
-                            let err_msg = "Claude CLI not found in PATH. Install it (npm install -g @anthropic-ai/claude-code) or set a custom path";
-                            log::error!("{}", err_msg);
-                            self.emit_error(&id, err_msg, "detection");
-                            return Err(anyhow!("{}", err_msg));
+                            return Err(self.spawn_fail(
+                                &id,
+                                "detection",
+                                "Claude CLI not found in PATH. Install it (npm install -g @anthropic-ai/claude-code) or set a custom path".to_string(),
+                            ));
                         }
                     }
                 }
@@ -316,7 +318,7 @@ impl PtyManager {
                 cmd.arg("--plugin-dir");
                 cmd.arg(dir);
             }
-            log::info!("Executing claude directly: {}", program);
+            log::debug!("Executing claude directly: {}", program);
             cmd
         };
 
@@ -369,31 +371,19 @@ impl PtyManager {
                     crate::platform::CliTarget::Explicit(_) => "",
                 };
                 let err_msg = format!("Failed to spawn claude '{}'{}: {}", claude_display, hint, e);
-                log::error!("{}", err_msg);
-                self.emit_error(&id, &err_msg, "spawn");
-                return Err(anyhow!("{}", err_msg));
+                return Err(self.spawn_fail(&id, "spawn", err_msg));
             }
         };
 
         // 获取 writer 和 reader
         let writer = match pair.master.take_writer() {
             Ok(w) => w,
-            Err(e) => {
-                let err_msg = format!("Failed to take PTY writer: {}", e);
-                log::error!("{}", err_msg);
-                self.emit_error(&id, &err_msg, "writer");
-                return Err(anyhow!("{}", err_msg));
-            }
+            Err(e) => return Err(self.spawn_fail(&id, "writer", format!("Failed to take PTY writer: {}", e))),
         };
 
         let reader = match pair.master.try_clone_reader() {
             Ok(r) => r,
-            Err(e) => {
-                let err_msg = format!("Failed to clone PTY reader: {}", e);
-                log::error!("{}", err_msg);
-                self.emit_error(&id, &err_msg, "reader");
-                return Err(anyhow!("{}", err_msg));
-            }
+            Err(e) => return Err(self.spawn_fail(&id, "reader", format!("Failed to clone PTY reader: {}", e))),
         };
 
         // 启动输出读取线程（startup_buf 旁路收集启动期输出，见 startup_check）
@@ -409,7 +399,7 @@ impl PtyManager {
         thread::Builder::new()
             .name(format!("pty-reader-{}", &pty_id[..8.min(pty_id.len())]))
             .spawn(move || {
-                log::debug!("[{}] Output reader thread started", pty_id);
+                log::debug!("pty={} output reader thread started", pty_id);
                 Self::read_output_loop(pty_id, reader, app_handle, &cwd_for_log, buf_for_thread);
             })
             .with_context(|| format!("Failed to spawn reader thread for PTY {}", id))?;
@@ -434,7 +424,7 @@ impl PtyManager {
 
         crate::remote_state::REMOTE_STATE.register_pty(&id, "claude", cwd);
 
-        log::info!("[{}] Claude CLI spawned successfully via shell", id);
+        log::info!("pty={} Claude CLI spawned successfully via shell", id);
 
         Ok(PtyInfo {
             id,
@@ -472,7 +462,7 @@ impl PtyManager {
                         );
                         crate::remote_state::REMOTE_STATE.push_output(&pty_id, &output);
                     }
-                    log::info!("[{}] PTY EOF reached, process exited normally", pty_id);
+                    log::info!("pty={} EOF reached, process exited normally", pty_id);
                     app_handle
                         .emit(
                             "pty-exit",
@@ -511,7 +501,7 @@ impl PtyManager {
 
                     consecutive_errors += 1;
                     log::warn!(
-                        "[{}] Read error ({}/{}): {}",
+                        "pty={} read error ({}/{}): {}",
                         pty_id,
                         consecutive_errors,
                         MAX_CONSECUTIVE_ERRORS,
@@ -520,7 +510,7 @@ impl PtyManager {
 
                     if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
                         log::error!(
-                            "[{}] Too many consecutive read errors, stopping reader",
+                            "pty={} too many consecutive read errors, stopping reader",
                             pty_id
                         );
                         app_handle
@@ -541,6 +531,14 @@ impl PtyManager {
                 }
             }
         }
+    }
+
+    /// spawn 失败单点：log 一条 ERROR + emit pty-error + 返回 Err（三步一处收敛）。
+    /// stage 是前端展示契约（validation/detection/spawn/writer/reader/startup），勿改。
+    fn spawn_fail(&self, id: &str, stage: &str, msg: String) -> anyhow::Error {
+        log::error!("pty={} stage={} {}", id, stage, msg);
+        self.emit_error(id, &msg, stage);
+        anyhow!("{}", msg)
     }
 
     /// 发送错误事件
@@ -588,14 +586,14 @@ impl PtyManager {
                     "\nTry running it in a system terminal first: \"{}\"",
                     cmd_hint
                 ));
-                log::error!("[{}] {}", id, err_msg);
+                log::error!("pty={} {}", id, err_msg);
                 self.emit_error(id, &err_msg, "startup");
                 Err(err_msg)
             }
             Ok(None) => Ok(()),
             Err(e) => {
                 // try_wait 自身失败不阻断启动（保守放行，保持旧行为）
-                log::warn!("[{}] try_wait during startup failed: {}", id, e);
+                log::warn!("pty={} try_wait during startup failed: {}", id, e);
                 Ok(())
             }
         }
@@ -614,10 +612,11 @@ impl PtyManager {
 
         // 验证工作目录
         if !Path::new(cwd).exists() {
-            let err_msg = format!("Working directory does not exist: {}", cwd);
-            log::error!("{}", err_msg);
-            self.emit_error(&id, &err_msg, "validation");
-            return Err(anyhow!("{}", err_msg));
+            return Err(self.spawn_fail(
+                &id,
+                "validation",
+                format!("Working directory does not exist: {}", cwd),
+            ));
         }
 
         // 创建 PTY
@@ -664,32 +663,19 @@ impl PtyManager {
         let mut child = match pair.slave.spawn_command(cmd) {
             Ok(c) => c,
             Err(e) => {
-                let err_msg = format!("Failed to spawn shell '{}': {}", program, e);
-                log::error!("{}", err_msg);
-                self.emit_error(&id, &err_msg, "spawn");
-                return Err(anyhow!("{}", err_msg));
+                return Err(self.spawn_fail(&id, "spawn", format!("Failed to spawn shell '{}': {}", program, e)));
             }
         };
 
         // 获取 writer 和 reader
         let writer = match pair.master.take_writer() {
             Ok(w) => w,
-            Err(e) => {
-                let err_msg = format!("Failed to take PTY writer: {}", e);
-                log::error!("{}", err_msg);
-                self.emit_error(&id, &err_msg, "writer");
-                return Err(anyhow!("{}", err_msg));
-            }
+            Err(e) => return Err(self.spawn_fail(&id, "writer", format!("Failed to take PTY writer: {}", e))),
         };
 
         let reader = match pair.master.try_clone_reader() {
             Ok(r) => r,
-            Err(e) => {
-                let err_msg = format!("Failed to clone PTY reader: {}", e);
-                log::error!("{}", err_msg);
-                self.emit_error(&id, &err_msg, "reader");
-                return Err(anyhow!("{}", err_msg));
-            }
+            Err(e) => return Err(self.spawn_fail(&id, "reader", format!("Failed to clone PTY reader: {}", e))),
         };
 
         // 启动输出读取线程（startup_buf 旁路收集启动期输出，见 startup_check）
@@ -705,7 +691,7 @@ impl PtyManager {
         thread::Builder::new()
             .name(format!("pty-reader-{}", &pty_id[..8.min(pty_id.len())]))
             .spawn(move || {
-                log::debug!("[{}] Shell output reader thread started", pty_id);
+                log::debug!("pty={} shell output reader thread started", pty_id);
                 Self::read_output_loop(pty_id, reader, app_handle, &cwd_for_log, buf_for_thread);
             })
             .with_context(|| format!("Failed to spawn reader thread for PTY {}", id))?;
@@ -729,7 +715,7 @@ impl PtyManager {
 
         crate::remote_state::REMOTE_STATE.register_pty(&id, "shell", cwd);
 
-        log::info!("[{}] Shell spawned successfully", id);
+        log::info!("pty={} Shell spawned successfully", id);
 
         Ok(PtyInfo {
             id,
@@ -763,7 +749,7 @@ impl PtyManager {
 
     /// 调整 PTY 大小
     pub fn resize(&self, id: &str, cols: u16, rows: u16) -> Result<()> {
-        log::debug!("[{}] Resizing PTY to {}x{}", id, cols, rows);
+        log::debug!("pty={} resizing to {}x{}", id, cols, rows);
 
         let instances = self.instances.lock();
         let instance = instances.get(id).ok_or_else(|| {
@@ -783,13 +769,13 @@ impl PtyManager {
             })
             .with_context(|| format!("Failed to resize PTY {} to {}x{}", id, cols, rows))?;
 
-        log::debug!("[{}] Resize successful", id);
+        log::debug!("pty={} resize successful", id);
         Ok(())
     }
 
     /// 杀掉 PTY 进程
     pub fn kill(&self, id: &str) -> Result<()> {
-        log::info!("[{}] Killing PTY", id);
+        log::info!("pty={} killing PTY", id);
 
         // 从 instances 中取出（而非只是移除引用）
         let instance = self.instances.lock().remove(id);
@@ -824,12 +810,12 @@ impl PtyManager {
 
             crate::remote_state::REMOTE_STATE.remove_pty(id);
 
-            log::info!("[{}] PTY killed successfully", id);
+            log::info!("pty={} PTY killed successfully", id);
         } else {
             // 幂等语义：kill 的目标状态就是"进程不存在"，重复 kill（双端
             // 关闭竞态：一端 kill 后另一端收到 closed 事件再 kill 同一 id）
             // 不是异常，目标已达成——debug 即可
-            log::debug!("[{}] PTY already gone when trying to kill (idempotent)", id);
+            log::debug!("pty={} PTY already gone when trying to kill (idempotent)", id);
         }
 
         Ok(())
@@ -849,7 +835,7 @@ impl PtyManager {
 
             // 强制终止
             if instance.child.kill().is_ok() {
-                log::info!("[{}] Child killed", id);
+                log::debug!("pty={} child killed", id);
             }
 
             // 等待退出
@@ -893,7 +879,7 @@ pub fn build_claude_args(
 pub fn init_pty_manager(app_handle: AppHandle) {
     let manager = Arc::new(PtyManager::new(app_handle));
     *PTY_MANAGER.lock() = Some(manager);
-    log::info!("PTY manager initialized");
+    log::debug!("PTY manager initialized");
 }
 
 /// 获取 PTY 管理器

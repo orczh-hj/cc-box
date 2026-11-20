@@ -377,7 +377,7 @@ pub fn current_device_id() -> Option<String> {
 /// token 前缀路由永久 miss（静默失效）
 fn ensure_device_identity() -> Result<(String, String), String> {
     let config = crate::store::get_app_config()
-        .map_err(|e| format!("failed to read config for device identity: {}", e))?;
+        .map_err(|e| format!("failed to read config for device identity: {:#}", e))?;
     let remote = config.remote.clone().unwrap_or_default();
     let device_id = remote
         .device_id

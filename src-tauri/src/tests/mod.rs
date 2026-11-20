@@ -38,6 +38,8 @@ mod plugin_market;
 mod process_spawn_guard;
 #[cfg(test)]
 mod store_edit;
+#[cfg(test)]
+mod logger;
 
 /// EVENT_HOOK 全局单例的测试互斥锁：整体 set/clear hook 的测试（remote_state
 /// 的 rename 半链、state_broadcast 的宏出口锚定）必须串行执行——并行时互相
