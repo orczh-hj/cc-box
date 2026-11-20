@@ -5008,6 +5008,10 @@ pub(crate) enum MarketSource {
 pub(crate) fn classify_market_source(source: &str) -> Result<MarketSource> {
     let s = source.trim();
     let lower = s.to_lowercase();
+    // file:// 交 git clone（本地仓库源，测试与内网场景用）
+    if lower.starts_with("file://") {
+        return Ok(MarketSource::Git(s.to_string()));
+    }
     if lower.starts_with("http://") || lower.starts_with("https://") {
         if lower.split('?').next().unwrap_or("").ends_with(".json") {
             return Ok(MarketSource::JsonUrl(s.to_string()));
@@ -5030,14 +5034,14 @@ pub(crate) fn classify_market_source(source: &str) -> Result<MarketSource> {
 }
 
 /// CC-Box 市场浏览缓存根目录（~/.cc-box/cache/markets/）
-fn market_browse_cache_dir() -> Result<PathBuf> {
+pub(crate) fn market_browse_cache_dir() -> Result<PathBuf> {
     let dir = get_gui_config_dir()?.join("cache").join("markets");
     fs::create_dir_all(&dir)?;
     Ok(dir)
 }
 
 /// 未注册市场的浏览本地副本路径（目录 = git 克隆；文件 = 下载的 marketplace.json）
-fn market_browse_local_copy(source: &str) -> Result<MarketSource> {
+pub(crate) fn market_browse_local_copy(source: &str) -> Result<MarketSource> {
     match classify_market_source(source)? {
         MarketSource::Dir(p) => Ok(MarketSource::Dir(p)),
         MarketSource::JsonUrl(url) => {
@@ -5054,6 +5058,10 @@ fn market_browse_local_copy(source: &str) -> Result<MarketSource> {
             if dir.join(".claude-plugin").join("marketplace.json").is_file() {
                 return Ok(MarketSource::Dir(dir));
             }
+            // 半途失败（网络中断等）会留下无 marketplace.json 的非空残留目录，
+            // git 拒绝克隆到非空目录且每次重试都撞同一目录（添加市场被锁死）。
+            // 到这里缓存必不完整，直接清掉重克隆
+            let _ = fs::remove_dir_all(&dir);
             clone_market_repo(&url, &dir)?;
             Ok(MarketSource::Dir(dir))
         }
@@ -5305,7 +5313,7 @@ fn clean_market_browse_copy(source: &str) {
 }
 
 /// 稳定短 hash（缓存目录名，非安全用途）
-fn short_hash(s: &str) -> String {
+pub(crate) fn short_hash(s: &str) -> String {
     // FNV-1a 64bit
     let mut h: u64 = 0xcbf29ce484222325;
     for b in s.as_bytes() {

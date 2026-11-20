@@ -1093,3 +1093,44 @@ fn ClaudeCommand_有扩展名直接使用_3() {
         std::path::Path::new(exe)
     );
 }
+
+// ---------- 市场浏览缓存残留 ----------
+
+/// 上次 clone 半途失败留下无 marketplace.json 的非空残留目录时，重新添加市场
+/// 不得被锁死（Mac 实测：报 destination path already exists and is not an
+/// empty directory，且每次重试都撞同一目录）。用本地 file:// 仓库复现。
+#[test]
+fn MarketBrowseCopy_残留目录不锁死重新添加_4() {
+    let _guard = crate::tests::TestConfigDirGuard::new("market-residue");
+
+    // 源仓库：含 .claude-plugin/marketplace.json 的本地 git repo
+    let src = tempfile::tempdir().unwrap();
+    let run_git = |args: &[&str]| {
+        let mut c = std::process::Command::new("git");
+        c.args(["-c", "user.name=t", "-c", "user.email=t@t"]).args(args).current_dir(src.path());
+        crate::store::run_command_with_timeout(&mut c, std::time::Duration::from_secs(30)).unwrap();
+    };
+    std::fs::create_dir_all(src.path().join(".claude-plugin")).unwrap();
+    std::fs::write(
+        src.path().join(".claude-plugin").join("marketplace.json"),
+        r#"{"name":"residue-test"}"#,
+    ).unwrap();
+    run_git(&["init", "-q"]);
+    run_git(&["add", "-A"]);
+    run_git(&["commit", "-qm", "init"]);
+
+    let url = format!("file://{}", src.path().to_string_lossy().replace('\\', "/"));
+
+    // 预置残留：缓存目录已存在、非空、但无 marketplace.json（半途失败的形态）
+    let cache_dir = crate::store::market_browse_cache_dir().unwrap();
+    let residue = cache_dir.join(format!("src-{}", crate::store::short_hash(&url)));
+    std::fs::create_dir_all(&residue).unwrap();
+    std::fs::write(residue.join("half-written.tmp"), b"garbage").unwrap();
+
+    let crate::store::MarketSource::Dir(p) = crate::store::market_browse_local_copy(&url)
+        .expect("残留目录不应锁死添加市场（clone 应清理残留后成功）")
+    else {
+        panic!("expected Dir copy")
+    };
+    assert!(p.join(".claude-plugin").join("marketplace.json").is_file());
+}
