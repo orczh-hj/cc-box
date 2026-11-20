@@ -855,7 +855,7 @@ export default {
   marketNoComponents: 'This marketplace does not declare the plugin contents. Install it or refresh the market to read the plugin directory.',
   marketDetailEmpty: 'Select a plugin to see what it includes',
   marketNoMatch: 'No matching plugins',
-  marketLoading: 'Loading markets…',
+  marketLoading: 'Fetching marketplace catalog…',
   marketBack: 'Back',
 
 }

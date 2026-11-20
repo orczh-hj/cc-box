@@ -4950,27 +4950,40 @@ pub fn get_plugin_marketplaces(project_view: &str) -> Result<Vec<MarketplaceInfo
 }
 
 fn load_plugin_marketplaces(project_view: &str) -> Result<Vec<MarketplaceInfo>> {
+    // 两路并行：plugins list 是 CLI 子进程（秒级）、presets 含网络（冷启动 5s 超时），
+    // 串行会让首次打开等待两者之和——并行后总耗时 ≈ 最慢一路。
     // installed 徽标与已装版本来自 plugins list --json（短 TTL 缓存，在项目
     // 视角 cwd 下执行——project/local 条目的 enabled 按执行目录计算）；
     // 同一插件可装在多个 scope（user + 项目），按 id 聚合为列表
-    let mut installed: std::collections::HashMap<String, Vec<InstalledLite>> = Default::default();
-    if let Ok(raw) = plugins_list_json_in(Some(project_view)) {
-        if let Ok(list) =
-            serde_json::from_str::<Vec<CliPluginLite>>(&raw)
-        {
-            for p in list {
-                installed.entry(p.id).or_default().push(InstalledLite {
-                    enabled: p.enabled,
-                    version: p.version,
-                    scope: p.scope,
-                    project_path: p.project_path,
-                });
+    let (installed, (custom_markets, presets)) = std::thread::scope(|s| {
+        let installed_handle = s.spawn(|| {
+            let mut installed: std::collections::HashMap<String, Vec<InstalledLite>> =
+                Default::default();
+            if let Ok(raw) = plugins_list_json_in(Some(project_view)) {
+                if let Ok(list) = serde_json::from_str::<Vec<CliPluginLite>>(&raw) {
+                    for p in list {
+                        installed.entry(p.id).or_default().push(InstalledLite {
+                            enabled: p.enabled,
+                            version: p.version,
+                            scope: p.scope,
+                            project_path: p.project_path,
+                        });
+                    }
+                }
             }
-        }
-    }
-    let custom = get_app_config()?.custom_markets.unwrap_or_default();
-    // 推荐清单获取失败不阻塞市场列表（只影响 preset 分组）
-    let presets = get_market_presets().unwrap_or_default();
+            installed
+        });
+        // 推荐清单获取失败不阻塞市场列表（只影响 preset 分组）
+        let presets = get_market_presets().unwrap_or_default();
+        // config 读取失败传出主线程 `?`（保持原错误语义）
+        let custom = get_app_config().map(|c| c.custom_markets.unwrap_or_default());
+        (
+            installed_handle.join().unwrap_or_default(),
+            (custom, presets),
+        )
+    });
+    let custom_markets = custom_markets?;
+    let custom = with_builtin_market(&custom_markets, &presets);
     // ccbox-market 内置为默认个人市场（全新环境也能直接浏览官方精选，不依赖用户手动添加）
     let custom = with_builtin_market(&custom, &presets);
     let mut list =
@@ -5040,8 +5053,25 @@ pub(crate) fn market_browse_cache_dir() -> Result<PathBuf> {
     Ok(dir)
 }
 
+/// git URL 的 raw marketplace.json 直拉：逐候选 URL 取第一个命中。
+/// None = 全部失败（调用方回退 clone）。浏览只需要清单（安装由 Claude CLI
+/// 克隆仓库），几百 ms 的 raw 直拉替代数秒的 `git clone --depth 1`
+fn fetch_raw_marketplace_json(url: &str) -> Option<String> {
+    marketplace_raw_urls(url)
+        .into_iter()
+        .find_map(|u| http_get_market_json(&u).ok())
+}
+
 /// 未注册市场的浏览本地副本路径（目录 = git 克隆；文件 = 下载的 marketplace.json）
 pub(crate) fn market_browse_local_copy(source: &str) -> Result<MarketSource> {
+    market_browse_local_copy_with(source, &fetch_raw_marketplace_json)
+}
+
+/// 可注入 raw 拉取函数的版本（测试传 fake，不依赖真网络）
+pub(crate) fn market_browse_local_copy_with(
+    source: &str,
+    raw_fetch: &dyn Fn(&str) -> Option<String>,
+) -> Result<MarketSource> {
     match classify_market_source(source)? {
         MarketSource::Dir(p) => Ok(MarketSource::Dir(p)),
         MarketSource::JsonUrl(url) => {
@@ -5054,10 +5084,23 @@ pub(crate) fn market_browse_local_copy(source: &str) -> Result<MarketSource> {
             Ok(MarketSource::Dir(cache))
         }
         MarketSource::Git(url) => {
+            // raw json 缓存（新形态）命中优先
+            let json_cache =
+                market_browse_cache_dir()?.join(format!("src-{}.json", short_hash(&url)));
+            if json_cache.is_file() {
+                return Ok(MarketSource::Dir(json_cache));
+            }
+            // 旧形态目录缓存（完整 clone）命中仍可用，自然过渡
             let dir = market_browse_cache_dir()?.join(format!("src-{}", short_hash(&url)));
             if dir.join(".claude-plugin").join("marketplace.json").is_file() {
                 return Ok(MarketSource::Dir(dir));
             }
+            // raw 直拉清单（KB 级）：无缓存时的主路径
+            if let Some(text) = raw_fetch(&url) {
+                write_text_atomic(&json_cache, text.as_bytes())?;
+                return Ok(MarketSource::Dir(json_cache));
+            }
+            // raw 全失败（私有仓库/非标准主机）→ 回退 clone
             // 半途失败（网络中断等）会留下无 marketplace.json 的非空残留目录，
             // git 拒绝克隆到非空目录且每次重试都撞同一目录（添加市场被锁死）。
             // 到这里缓存必不完整，直接清掉重克隆
@@ -5102,7 +5145,18 @@ fn refresh_market_browse_copy(source: &str) -> Result<MarketSource> {
             Ok(MarketSource::Dir(cache))
         }
         MarketSource::Git(url) => {
+            // 优先 raw 直拉（KB 级）更新 json 缓存；失败再走 clone 换入。
+            // 进程内互斥先拿（raw 写缓存也不能并发）
             let _guard = MARKET_REFRESH_LOCK.lock();
+            if let Some(text) = fetch_raw_marketplace_json(&url) {
+                let cache = market_browse_cache_dir()?.join(format!("src-{}.json", short_hash(&url)));
+                write_text_atomic(&cache, text.as_bytes())?;
+                // 清掉可能并存的旧目录缓存，浏览统一走 json 形态
+                let _ = fs::remove_dir_all(
+                    market_browse_cache_dir()?.join(format!("src-{}", short_hash(&url))),
+                );
+                return Ok(MarketSource::Dir(cache));
+            }
             // 跨进程互斥：另一实例正在刷新同一市场时等它完成（结果等价），
             // 3s 仍拿不到锁才报错（锁文件不可用或对方刷新异常缓慢）
             let _xproc = acquire_market_refresh_lock(&url)
@@ -5112,6 +5166,11 @@ fn refresh_market_browse_copy(source: &str) -> Result<MarketSource> {
             let tmp = market_browse_cache_dir()?
                 .join(format!("src-{}.{}.tmp", short_hash(&url), std::process::id()));
             let _ = fs::remove_dir_all(&tmp);
+            // clone 换入路径：旧 raw json 缓存一并清掉（local_copy 读它优先于目录，
+            // 残留会让刷新结果不可见）
+            let _ = fs::remove_file(
+                market_browse_cache_dir()?.join(format!("src-{}.json", short_hash(&url))),
+            );
             // 换入三步：旧目录 rename 到 .old（比直接 remove 可回滚）→
             // tmp rename 入位 → 删 .old；第二步失败则把 .old rename 回去，
             // 保证任意时刻磁盘上都有一份完整缓存（宁可中止也不毁旧缓存）
@@ -5301,14 +5360,20 @@ pub fn startup_market_version_check() {
 /// 清理某来源的浏览缓存
 fn clean_market_browse_copy(source: &str) {
     let Ok(kind) = classify_market_source(source) else { return };
-    let name = match kind {
+    let names: Vec<String> = match kind {
         MarketSource::Dir(_) => return,
-        MarketSource::JsonUrl(url) => format!("src-{}.json", short_hash(&url)),
-        MarketSource::Git(url) => format!("src-{}", short_hash(&url)),
+        MarketSource::JsonUrl(url) => vec![format!("src-{}.json", short_hash(&url))],
+        // git 源有两种缓存形态：raw json 文件（新）与完整 clone 目录（旧/回退）
+        MarketSource::Git(url) => vec![
+            format!("src-{}", short_hash(&url)),
+            format!("src-{}.json", short_hash(&url)),
+        ],
     };
     if let Ok(root) = market_browse_cache_dir() {
-        let _ = fs::remove_dir_all(root.join(&name));
-        let _ = fs::remove_file(root.join(&name));
+        for name in names {
+            let _ = fs::remove_dir_all(root.join(&name));
+            let _ = fs::remove_file(root.join(&name));
+        }
     }
 }
 

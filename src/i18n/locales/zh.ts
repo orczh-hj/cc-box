@@ -853,7 +853,7 @@ export default {
   marketNoComponents: '该市场未声明插件内容；安装插件或刷新市场后可读取插件目录中的清单。',
   marketDetailEmpty: '从中间列表选择一个插件，查看它包含的内容',
   marketNoMatch: '没有匹配的插件',
-  marketLoading: '正在加载市场…',
+  marketLoading: '正在拉取市场清单…',
   marketBack: '返回',
 
 }

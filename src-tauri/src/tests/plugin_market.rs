@@ -1101,6 +1101,8 @@ fn ClaudeCommand_有扩展名直接使用_3() {
 /// empty directory，且每次重试都撞同一目录）。用本地 file:// 仓库复现。
 #[test]
 fn MarketBrowseCopy_残留目录不锁死重新添加_4() {
+    // CONFIG_DIR 是全局 override，TestConfigDirGuard 用户必须串行（见 tests/mod.rs）
+    let _lock = crate::tests::CONFIG_DIR_TEST_LOCK.lock();
     let _guard = crate::tests::TestConfigDirGuard::new("market-residue");
 
     // 源仓库：含 .claude-plugin/marketplace.json 的本地 git repo
@@ -1133,4 +1135,35 @@ fn MarketBrowseCopy_残留目录不锁死重新添加_4() {
         panic!("expected Dir copy")
     };
     assert!(p.join(".claude-plugin").join("marketplace.json").is_file());
+}
+
+/// git 源浏览优先 raw JSON 直拉：浏览只需清单（KB 级），不再为看列表 clone 整个
+/// 仓库（首次打开 30s 的主因）；raw 命中即写 src-<hash>.json 缓存
+#[test]
+fn MarketBrowseCopy_Git源优先Raw直拉_5() {
+    // 同上：TestConfigDirGuard 用户串行
+    let _lock = crate::tests::CONFIG_DIR_TEST_LOCK.lock();
+    let _guard = crate::tests::TestConfigDirGuard::new("market-raw");
+    let url = "https://gitee.com/orczh/ccbox-market.git";
+    let manifest = r#"{"name":"ccbox-market","plugins":[]}"#;
+
+    let fake = move |_: &str| -> Option<String> { Some(manifest.to_string()) };
+    let crate::store::MarketSource::Dir(p) =
+        crate::store::market_browse_local_copy_with(url, &fake)
+            .expect("raw 直拉应成功，不应回退 clone")
+    else {
+        panic!("expected Dir")
+    };
+    // 缓存为 json 文件形态（非 clone 目录），内容即拉取结果
+    assert_eq!(p.extension().and_then(|e| e.to_str()), Some("json"));
+    assert_eq!(std::fs::read_to_string(&p).unwrap(), manifest);
+
+    // 第二次调用直接命中缓存（fake 计数为 0 也应成功）
+    let never = |_: &str| -> Option<String> { panic!("应命中缓存，不应再拉取") };
+    let crate::store::MarketSource::Dir(p2) =
+        crate::store::market_browse_local_copy_with(url, &never).unwrap()
+    else {
+        panic!("expected Dir")
+    };
+    assert_eq!(p2, p);
 }
