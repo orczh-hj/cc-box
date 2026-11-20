@@ -136,7 +136,7 @@ impl McpHttpClient {
 
     /// 获取服务器详情
     pub async fn get_server_detail(&mut self) -> Result<McpServerDetail, String> {
-        log::info!("[MCP] Fetching HTTP server detail: {}", self.url);
+        log::debug!("Fetching HTTP server detail: {}", self.url);
 
         // 直连优先（系统代理常把国内端点路由到远端节点导致握手被掐断），
         // 失败再走系统代理兜底（GitHub 等需要代理的端点）
@@ -146,7 +146,7 @@ impl McpHttpClient {
             .build()
             .map_err(|e| {
                 let msg = format!("Failed to build HTTP client: {}", e);
-                log::error!("[MCP] {}", msg);
+                log::error!("{}", msg);
                 msg
             })?;
 
@@ -154,7 +154,7 @@ impl McpHttpClient {
             Ok(detail) => Ok(detail),
             Err(direct_err) => {
                 log::warn!(
-                    "[MCP] HTTP direct fetch failed for {} ({}), retrying via system proxy",
+                    "HTTP direct fetch failed for {} ({}), retrying via system proxy",
                     self.url,
                     direct_err
                 );
@@ -164,7 +164,7 @@ impl McpHttpClient {
                     .map_err(|e| e.to_string())?;
                 self.request_id = 0;
                 self.fetch_detail_with(&via_proxy).await.map_err(|e| {
-                    log::error!("[MCP] HTTP fetch failed for {}: {} (direct: {})", self.url, e, direct_err);
+                    log::error!("HTTP fetch failed for {}: {} (direct: {})", self.url, e, direct_err);
                     e
                 })
             }
@@ -189,7 +189,7 @@ impl McpHttpClient {
             )
             .await
             .map_err(|e| {
-                log::error!("[MCP] HTTP initialize failed for {}: {}", self.url, e);
+                log::error!("HTTP initialize failed for {}: {}", self.url, e);
                 e
             })?;
 
@@ -197,8 +197,8 @@ impl McpHttpClient {
         let init_result = init_response.result.unwrap_or(serde_json::json!({}));
         let server_info = parse_server_info(&init_result);
         let capabilities = parse_capabilities(&init_result);
-        log::info!(
-            "[MCP] HTTP initialized: {:?}, caps: tools={}, prompts={}, resources={}",
+        log::debug!(
+            "HTTP initialized: {:?}, caps: tools={}, prompts={}, resources={}",
             server_info,
             capabilities.tools,
             capabilities.prompts,
@@ -209,14 +209,14 @@ impl McpHttpClient {
         self.send_notification(&client, "notifications/initialized")
             .await
             .map_err(|e| {
-                log::error!("[MCP] HTTP initialized notification failed for {}: {}", self.url, e);
+                log::error!("HTTP initialized notification failed for {}: {}", self.url, e);
                 e
             })?;
 
         // 3. 列出工具
         let tools = if capabilities.tools {
             let tools_response = self.send_request(&client, "tools/list", None).await.map_err(|e| {
-                log::error!("[MCP] HTTP tools/list failed for {}: {}", self.url, e);
+                log::error!("HTTP tools/list failed for {}: {}", self.url, e);
                 e
             })?;
             parse_tools(&tools_response)
@@ -227,7 +227,7 @@ impl McpHttpClient {
         // 4. 列出 prompts
         let prompts = if capabilities.prompts {
             let prompts_response = self.send_request(&client, "prompts/list", None).await.map_err(|e| {
-                log::error!("[MCP] HTTP prompts/list failed for {}: {}", self.url, e);
+                log::error!("HTTP prompts/list failed for {}: {}", self.url, e);
                 e
             })?;
             parse_prompts(&prompts_response)
@@ -238,7 +238,7 @@ impl McpHttpClient {
         // 5. 列出 resources
         let resources = if capabilities.resources {
             let resources_response = self.send_request(&client, "resources/list", None).await.map_err(|e| {
-                log::error!("[MCP] HTTP resources/list failed for {}: {}", self.url, e);
+                log::error!("HTTP resources/list failed for {}: {}", self.url, e);
                 e
             })?;
             parse_resources(&resources_response)
@@ -246,7 +246,7 @@ impl McpHttpClient {
             vec![]
         };
 
-        log::info!("[MCP] HTTP detail fetched successfully: {} (tools={}, prompts={}, resources={})", self.url, tools.len(), prompts.len(), resources.len());
+        log::info!("HTTP detail fetched successfully: {} (tools={}, prompts={}, resources={})", self.url, tools.len(), prompts.len(), resources.len());
 
         Ok(McpServerDetail {
             name: self.url.clone(),
@@ -611,7 +611,7 @@ impl McpStdioClient {
     /// 获取服务器详情（通过 stdin/stdout 通信）
     pub fn get_server_detail(&mut self) -> Result<McpServerDetail, String> {
         let cmd_line = format!("{} {}", self.command, self.args.join(" "));
-        log::info!("[MCP] Fetching stdio server detail: {}", cmd_line.trim());
+        log::debug!("Fetching stdio server detail: {}", cmd_line.trim());
 
         // Windows 上 npx 等脚本命令需要通过 cmd.exe /C 执行
         let mut cmd;
@@ -642,16 +642,16 @@ impl McpStdioClient {
             .spawn()
             .map_err(|e| {
                 let msg = format!("Failed to spawn process '{}': {}", self.command, e);
-                log::error!("[MCP] {}", msg);
+                log::error!("{}", msg);
                 msg
             })?;
 
         let stdin = child.stdin.take().ok_or_else(|| {
-            log::error!("[MCP] Failed to get stdin for '{}'", self.command);
+            log::error!("Failed to get stdin for '{}'", self.command);
             "Failed to get stdin".to_string()
         })?;
         let stdout = child.stdout.take().ok_or_else(|| {
-            log::error!("[MCP] Failed to get stdout for '{}'", self.command);
+            log::error!("Failed to get stdout for '{}'", self.command);
             "Failed to get stdout".to_string()
         })?;
         let stderr = child.stderr.take();
@@ -680,7 +680,7 @@ impl McpStdioClient {
                 })
                 .unwrap_or_default();
             log::error!(
-                "[MCP] stdio initialize failed for '{}': {} | stderr: {}",
+                "stdio initialize failed for '{}': {} | stderr: {}",
                 self.command,
                 e,
                 if stderr_output.is_empty() { "(empty)" } else { &stderr_output }
@@ -691,8 +691,8 @@ impl McpStdioClient {
         let init_result = init_response.result.unwrap_or(serde_json::json!({}));
         let server_info = parse_server_info(&init_result);
         let capabilities = parse_capabilities(&init_result);
-        log::info!(
-            "[MCP] stdio initialized: {:?}, caps: tools={}, prompts={}, resources={}",
+        log::debug!(
+            "stdio initialized: {:?}, caps: tools={}, prompts={}, resources={}",
             server_info,
             capabilities.tools,
             capabilities.prompts,
@@ -705,7 +705,7 @@ impl McpStdioClient {
         // 3. tools/list
         let tools = if capabilities.tools {
             let tools_response = self.send_request(&mut stdin, &mut reader, "tools/list", None).map_err(|e| {
-                log::error!("[MCP] stdio tools/list failed for '{}': {}", self.command, e);
+                log::error!("stdio tools/list failed for '{}': {}", self.command, e);
                 e
             })?;
             parse_tools(&tools_response)
@@ -717,7 +717,7 @@ impl McpStdioClient {
         let prompts = if capabilities.prompts {
             let prompts_response =
                 self.send_request(&mut stdin, &mut reader, "prompts/list", None).map_err(|e| {
-                    log::error!("[MCP] stdio prompts/list failed for '{}': {}", self.command, e);
+                    log::error!("stdio prompts/list failed for '{}': {}", self.command, e);
                     e
                 })?;
             parse_prompts(&prompts_response)
@@ -729,7 +729,7 @@ impl McpStdioClient {
         let resources = if capabilities.resources {
             let resources_response =
                 self.send_request(&mut stdin, &mut reader, "resources/list", None).map_err(|e| {
-                    log::error!("[MCP] stdio resources/list failed for '{}': {}", self.command, e);
+                    log::error!("stdio resources/list failed for '{}': {}", self.command, e);
                     e
                 })?;
             parse_resources(&resources_response)
@@ -740,7 +740,7 @@ impl McpStdioClient {
         // 关闭进程
         child.kill().ok();
 
-        log::info!("[MCP] stdio detail fetched successfully: {} (tools={}, prompts={}, resources={})", self.command, tools.len(), prompts.len(), resources.len());
+        log::info!("stdio detail fetched successfully: {} (tools={}, prompts={}, resources={})", self.command, tools.len(), prompts.len(), resources.len());
 
         Ok(McpServerDetail {
             name: self.command.clone(),
@@ -769,7 +769,7 @@ impl McpStdioClient {
         };
 
         let json_str = serde_json::to_string(&request).map_err(|e| e.to_string())?;
-        log::debug!("[MCP] stdio >> {}", json_str);
+        log::debug!("stdio >> {}", json_str);
         stdin
             .write_all(json_str.as_bytes())
             .map_err(|e| e.to_string())?;
@@ -795,14 +795,14 @@ impl McpStdioClient {
                 continue;
             }
 
-            log::debug!("[MCP] stdio << {}", trimmed);
+            log::debug!("stdio << {}", trimmed);
 
             // 宽松解析
             let msg: LooseJsonRpcMessage = match serde_json::from_str(trimmed) {
                 Ok(m) => m,
                 Err(e) => {
                     log::warn!(
-                        "[MCP] stdio skipping non-JSON line for '{}' (id={}): {} (error: {})",
+                        "stdio skipping non-JSON line for '{}' (id={}): {} (error: {})",
                         method,
                         req_id,
                         trimmed,
@@ -827,7 +827,7 @@ impl McpStdioClient {
                 }
                 Some(id) => {
                     log::warn!(
-                        "[MCP] stdio skipping response with unexpected id={} (expected {})",
+                        "stdio skipping response with unexpected id={} (expected {})",
                         id,
                         req_id
                     );
@@ -836,7 +836,7 @@ impl McpStdioClient {
                 None => {
                     // 服务端主动推送的通知，跳过
                     log::debug!(
-                        "[MCP] stdio skipping server notification: method={:?}",
+                        "stdio skipping server notification: method={:?}",
                         msg.method
                     );
                     continue;
@@ -910,7 +910,7 @@ pub async fn get_mcp_server_detail_cached(
     // 检查缓存
     if !force_refresh {
         if let Some(detail) = cache.get(server_name).await {
-            log::info!("[MCP] Cache hit for '{}'", server_name);
+            log::debug!("Cache hit for '{}'", server_name);
             return Ok(Some(detail));
         }
     }
@@ -918,9 +918,9 @@ pub async fn get_mcp_server_detail_cached(
     // HTTP/SSE server
     if let Some(url) = url {
         if url.starts_with("http://") || url.starts_with("https://") {
-            log::info!("[MCP] Fetching via HTTP: url={}", url);
+            log::debug!("Fetching via HTTP: url={}", url);
             let detail = fetch_http_mcp_detail(url, headers).await.map_err(|e| {
-                log::error!("[MCP] HTTP fetch failed for '{}': {}", server_name, e);
+                log::error!("HTTP fetch failed for '{}': {}", server_name, e);
                 e
             })?;
             cache.set(server_name.to_string(), detail.clone()).await;
@@ -930,7 +930,7 @@ pub async fn get_mcp_server_detail_cached(
 
     // stdio server
     if let Some(command) = command {
-        log::info!("[MCP] Fetching via stdio: command={}, args={:?}", command, args);
+        log::debug!("Fetching via stdio: command={}, args={:?}", command, args);
         let command_str = command.to_string();
         let args_clone = args.cloned();
         let env_clone = env.map(|e| e.clone());
@@ -940,11 +940,11 @@ pub async fn get_mcp_server_detail_cached(
         })
             .await
             .map_err(|e| {
-                log::error!("[MCP] stdio spawn_blocking failed: {}", e);
+                log::error!("stdio spawn_blocking failed: {}", e);
                 e.to_string()
             })?
             .map_err(|e| {
-                log::error!("[MCP] stdio fetch failed for '{}': {}", server_name, e);
+                log::error!("stdio fetch failed for '{}': {}", server_name, e);
                 e
             })?;
 
@@ -953,7 +953,7 @@ pub async fn get_mcp_server_detail_cached(
     }
 
     log::warn!(
-        "[MCP] No URL or command for '{}', skipping detail fetch",
+        "No URL or command for '{}', skipping detail fetch",
         server_name
     );
     Ok(None)

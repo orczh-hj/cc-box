@@ -182,7 +182,7 @@ fn download_file(
     item: &str,
     cancel_flag: Option<&AtomicBool>,
 ) -> io::Result<()> {
-    log::info!("[Installer] Downloading {} from {}", item, url);
+    log::debug!("Downloading {} from {}", item, url);
 
     // 发送进度事件
     emit_progress(app, item, "downloading", 0, "开始下载...");
@@ -245,7 +245,7 @@ fn download_file(
 
     file.flush()?;
     emit_progress(app, item, "downloading", 100, "下载完成");
-    log::info!("[Installer] Downloaded {} bytes", downloaded);
+    log::debug!("Downloaded {} bytes", downloaded);
 
     Ok(())
 }
@@ -270,7 +270,7 @@ fn emit_progress(app: &AppHandle, item: &str, stage: &str, progress: u8, message
 /// 获取 Claude 最新版本信息
 fn fetch_claude_latest() -> io::Result<ClaudeLatestInfo> {
     let url = format!("{}/deps/claude/latest.json", OSS_BASE_URL);
-    log::info!("[Installer] Fetching Claude latest.json from {}", url);
+    log::debug!("Fetching Claude latest.json from {}", url);
 
     let client = oss_client(std::time::Duration::from_secs(15))
         .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
@@ -290,7 +290,7 @@ fn fetch_claude_latest() -> io::Result<ClaudeLatestInfo> {
         .json()
         .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
 
-    log::info!("[Installer] Claude latest version: {}", info.version);
+    log::debug!("Claude latest version: {}", info.version);
     Ok(info)
 }
 
@@ -302,13 +302,13 @@ fn get_current_platform() -> String {
 /// 下载并安装 Claude CLI
 #[tauri::command]
 pub async fn download_and_install_claude(app: AppHandle) -> Result<(), String> {
-    log::info!("[Installer] Starting Claude CLI installation");
+    log::info!("Starting Claude CLI installation");
 
     // 注册取消标志（in-flight 互斥：已有同 item 任务在跑时直接拒绝）
     let cancel_flag = match register_auto_install("claude") {
         Some(f) => f,
         None => {
-            log::warn!("[Installer] Claude install already in progress, rejecting");
+            log::warn!("Claude install already in progress, rejecting");
             return Err(INSTALL_IN_PROGRESS_MSG.to_string());
         }
     };
@@ -414,16 +414,16 @@ pub async fn download_and_install_claude(app: AppHandle) -> Result<(), String> {
     // 下载完成才落到最终路径（Windows rename 不覆盖已存在文件，先移除旧文件）
     if claude_path.exists() {
         if let Err(e) = fs::remove_file(&claude_path) {
-            let msg = format!("移除旧文件失败：{}", e);
-            log::error!("[Installer] {}", msg);
+            let msg = format!("移除旧文件失败：{}", crate::logger::error_chain(&e));
+            log::error!("{}", msg);
             emit_progress(&app, "claude", "error", 0, msg.as_str());
             cleanup();
             return Err(msg);
         }
     }
     if let Err(e) = fs::rename(&tmp_path, &claude_path) {
-        let msg = format!("放置 claude 可执行文件失败：{}", e);
-        log::error!("[Installer] {}", msg);
+        let msg = format!("放置 claude 可执行文件失败：{}", crate::logger::error_chain(&e));
+        log::error!("{}", msg);
         let _ = fs::remove_file(&tmp_path);
         emit_progress(&app, "claude", "error", 0, msg.as_str());
         cleanup();
@@ -453,7 +453,7 @@ pub async fn download_and_install_claude(app: AppHandle) -> Result<(), String> {
     emit_progress(&app, "claude", "done", 100, "安装完成");
     cleanup();
 
-    log::info!("[Installer] Claude CLI installed to {}", claude_path.display());
+    log::info!("Claude CLI installed to {}", claude_path.display());
     Ok(())
 }
 
@@ -463,10 +463,10 @@ pub async fn download_and_install_claude(app: AppHandle) -> Result<(), String> {
 #[tauri::command]
 pub async fn cancel_auto_install() -> Result<bool, String> {
     if cancel_all_auto_installs() {
-        log::info!("[Installer] Cancel requested for auto install");
+        log::info!("Cancel requested for auto install");
         Ok(true)
     } else {
-        log::info!("[Installer] Cancel requested but no active auto install");
+        log::info!("Cancel requested but no active auto install");
         Ok(false)
     }
 }
@@ -479,7 +479,7 @@ pub async fn cancel_auto_install() -> Result<bool, String> {
 /// 获取 Git 最新版本信息
 fn fetch_git_latest() -> io::Result<GitLatestInfo> {
     let url = format!("{}/deps/git/latest.json", OSS_BASE_URL);
-    log::info!("[Installer] Fetching Git latest.json from {}", url);
+    log::debug!("Fetching Git latest.json from {}", url);
 
     let client = oss_client(std::time::Duration::from_secs(15))
         .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
@@ -499,7 +499,7 @@ fn fetch_git_latest() -> io::Result<GitLatestInfo> {
         .json()
         .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
 
-    log::info!("[Installer] Git latest version: {}", info.version);
+    log::debug!("Git latest version: {}", info.version);
     Ok(info)
 }
 
@@ -531,7 +531,7 @@ fn wait_with_timeout(mut child: std::process::Child, timeout: std::time::Duratio
 #[cfg(target_os = "windows")]
 /// 解压 PortableGit.7z.exe
 fn extract_portable_git(archive_path: &Path, target_dir: &Path, app: &AppHandle, run_id: u64) -> io::Result<()> {
-    log::info!("[Installer] Extracting PortableGit (run {}) to {}", run_id, target_dir.display());
+    log::debug!("Extracting PortableGit (run {}) to {}", run_id, target_dir.display());
 
     emit_progress(app, "git", "extracting", 0, "开始解压...");
 
@@ -546,12 +546,12 @@ fn extract_portable_git(archive_path: &Path, target_dir: &Path, app: &AppHandle,
     let temp_extract_dir = PathBuf::from(&local_app_data).join(format!("PortableGit-temp-{}", run_id));
     if temp_extract_dir.exists() {
         if let Err(e) = fs::remove_dir_all(&temp_extract_dir) {
-            log::error!("[Installer] Failed to remove stale temp dir {}: {}", temp_extract_dir.display(), e);
+            log::error!("Failed to remove stale temp dir {}: {}", temp_extract_dir.display(), crate::logger::error_chain(&e));
             return Err(e);
         }
     }
     if let Err(e) = fs::create_dir_all(&temp_extract_dir) {
-        log::error!("[Installer] Failed to create temp dir {}: {}", temp_extract_dir.display(), e);
+        log::error!("Failed to create temp dir {}: {}", temp_extract_dir.display(), crate::logger::error_chain(&e));
         return Err(e);
     }
 
@@ -568,13 +568,13 @@ fn extract_portable_git(archive_path: &Path, target_dir: &Path, app: &AppHandle,
         Ok(child) => match wait_with_timeout(child, std::time::Duration::from_secs(GIT_EXTRACT_TIMEOUT_SECS)) {
             Ok(status) => status,
             Err(e) => {
-                log::error!("[Installer] Git SFX wait failed: {}", e);
+                log::error!("Git SFX wait failed: {}", crate::logger::error_chain(&e));
                 fs::remove_dir_all(&temp_extract_dir).ok();
                 return Err(e);
             }
         },
         Err(e) => {
-            log::error!("[Installer] Failed to spawn Git SFX {}: {}", archive_path.display(), e);
+            log::error!("Failed to spawn Git SFX {}: {}", archive_path.display(), crate::logger::error_chain(&e));
             fs::remove_dir_all(&temp_extract_dir).ok();
             return Err(e);
         }
@@ -582,7 +582,7 @@ fn extract_portable_git(archive_path: &Path, target_dir: &Path, app: &AppHandle,
 
     if !status.success() {
         let msg = format!("解压程序退出码异常: {}", status);
-        log::error!("[Installer] {}", msg);
+        log::error!("{}", msg);
         // 清理临时目录
         fs::remove_dir_all(&temp_extract_dir).ok();
         return Err(io::Error::new(io::ErrorKind::Other, msg));
@@ -592,9 +592,9 @@ fn extract_portable_git(archive_path: &Path, target_dir: &Path, app: &AppHandle,
 
     // 如果目标目录已存在，先删除
     if target_dir.exists() {
-        log::info!("[Installer] Removing existing PortableGit directory");
+        log::debug!("Removing existing PortableGit directory");
         if let Err(e) = fs::remove_dir_all(target_dir) {
-            log::error!("[Installer] Failed to remove existing PortableGit dir {}: {}", target_dir.display(), e);
+            log::error!("Failed to remove existing PortableGit dir {}: {}", target_dir.display(), crate::logger::error_chain(&e));
             fs::remove_dir_all(&temp_extract_dir).ok();
             return Err(e);
         }
@@ -612,7 +612,7 @@ fn extract_portable_git(archive_path: &Path, target_dir: &Path, app: &AppHandle,
             }
             Err(e) => {
                 log::warn!(
-                    "[Installer] Move attempt {}/5 failed ({} → {}): {}",
+                    "Move attempt {}/5 failed ({} → {}): {}",
                     attempt,
                     temp_extract_dir.display(),
                     target_dir.display(),
@@ -625,15 +625,15 @@ fn extract_portable_git(archive_path: &Path, target_dir: &Path, app: &AppHandle,
     }
     if let Some(e) = rename_err {
         log::error!(
-            "[Installer] Failed to move {} to {} after retries: {}",
+            "Failed to move {} to {} after retries: {}",
             temp_extract_dir.display(),
             target_dir.display(),
-            e
+            crate::logger::error_chain(&e)
         );
         fs::remove_dir_all(&temp_extract_dir).ok();
         return Err(e);
     }
-    log::info!("[Installer] PortableGit moved to {}", target_dir.display());
+    log::info!("PortableGit moved to {}", target_dir.display());
 
     // 顺手清理历史崩溃遗留的 PortableGit-temp-* 目录（尽力而为）
     if let Ok(entries) = fs::read_dir(&local_app_data) {
@@ -651,16 +651,16 @@ fn extract_portable_git(archive_path: &Path, target_dir: &Path, app: &AppHandle,
         // 某些版本 bash.exe 在 usr/bin
         let alt_bash_path = target_dir.join("usr").join("bin").join("bash.exe");
         if alt_bash_path.exists() {
-            log::info!("[Installer] bash.exe found in usr/bin");
+            log::debug!("bash.exe found in usr/bin");
         } else {
             let msg = "解压完成但未找到 bash.exe（归档可能损坏或被杀毒软件拦截）".to_string();
-            log::error!("[Installer] {}", msg);
+            log::error!("{}", msg);
             return Err(io::Error::new(io::ErrorKind::Other, msg));
         }
     }
 
     emit_progress(app, "git", "extracting", 100, "解压完成");
-    log::info!("[Installer] PortableGit extracted successfully");
+    log::info!("PortableGit extracted successfully");
     Ok(())
 }
 
@@ -668,13 +668,13 @@ fn extract_portable_git(archive_path: &Path, target_dir: &Path, app: &AppHandle,
 /// 下载并安装 Git 便携版
 #[tauri::command]
 pub async fn download_and_install_git(app: AppHandle) -> Result<(), String> {
-    log::info!("[Installer] Starting Git portable installation");
+    log::info!("Starting Git portable installation");
 
     // 注册取消标志（in-flight 互斥：已有同 item 任务在跑时直接拒绝）
     let cancel_flag = match register_auto_install("git") {
         Some(f) => f,
         None => {
-            log::warn!("[Installer] Git install already in progress, rejecting");
+            log::warn!("Git install already in progress, rejecting");
             return Err(INSTALL_IN_PROGRESS_MSG.to_string());
         }
     };
@@ -770,7 +770,7 @@ pub async fn download_and_install_git(app: AppHandle) -> Result<(), String> {
 
     if let Err(e) = extract_result {
         let msg = format!("解压 PortableGit 失败：{}", e);
-        log::error!("[Installer] {}", msg);
+        log::error!("{}", msg);
         emit_progress(&app, "git", "error", 0, msg.as_str());
         cleanup();
         return Err(msg);
@@ -792,7 +792,7 @@ pub async fn download_and_install_git(app: AppHandle) -> Result<(), String> {
     emit_progress(&app, "git", "done", 100, "安装完成");
     cleanup();
 
-    log::info!("[Installer] Git portable installed to {}", git_dir.display());
+    log::info!("Git portable installed to {}", git_dir.display());
     Ok(())
 }
 
@@ -810,8 +810,8 @@ fn save_install_path_to_config(key: &str, path: &Path) {
 
     // 调用 store 模块的更新函数
     match crate::store::update_app_config(serde_json::Value::Object(updates)) {
-        Ok(()) => log::info!("[Installer] Saved {} to config: {}", key, path.display()),
-        Err(e) => log::warn!("[Installer] Failed to save {} to config: {}", key, e),
+        Ok(()) => log::debug!("Saved {} to config: {}", key, path.display()),
+        Err(e) => log::warn!("Failed to save {} to config: {}", key, e),
     }
 }
 
@@ -864,7 +864,7 @@ fn add_to_path(dir: &Path) {
 
     let new_path = clean_and_prepend_path(&current_path, &dir_str, sep);
     std::env::set_var("PATH", &new_path);
-    log::info!("[Installer] Ensured {} at PATH beginning", dir_str);
+    log::debug!("Ensured {} at PATH beginning", dir_str);
 }
 
 /// 添加目录到用户环境变量 PATH（持久化）
@@ -883,7 +883,7 @@ fn add_to_user_path_permanent(dir: &Path) {
     let current_user_path = match output {
         Ok(o) => String::from_utf8_lossy(&o.stdout).trim().to_string(),
         Err(e) => {
-            log::warn!("[Installer] Failed to get user PATH: {}", e);
+            log::warn!("Failed to get user PATH: {}", e);
             return;
         }
     };
@@ -905,16 +905,16 @@ fn add_to_user_path_permanent(dir: &Path) {
     match set_result {
         Ok(o) => {
             if o.status.success() {
-                log::info!("[Installer] Permanently added {} to user PATH", dir_str);
+                log::debug!("Permanently added {} to user PATH", dir_str);
             } else {
                 log::warn!(
-                    "[Installer] Failed to set user PATH: {}",
+                    "Failed to set user PATH: {}",
                     String::from_utf8_lossy(&o.stderr)
                 );
             }
         }
         Err(e) => {
-            log::warn!("[Installer] Failed to set user PATH: {}", e);
+            log::warn!("Failed to set user PATH: {}", e);
         }
     }
 }
@@ -949,15 +949,15 @@ fn add_to_user_path_permanent(dir: &Path) {
     let new_content = clean_rc_content(&existing, &markers, &export_line);
 
     match fs::write(&rc_file, &new_content) {
-        Ok(()) => log::info!("[Installer] Ensured {} at PATH beginning in {}", rel_path, rc_file.display()),
-        Err(e) => log::warn!("[Installer] Failed to write to {}: {}", rc_file.display(), e),
+        Ok(()) => log::debug!("Ensured {} at PATH beginning in {}", rel_path, rc_file.display()),
+        Err(e) => log::warn!("Failed to write to {}: {}", rc_file.display(), e),
     }
 }
 
 /// 获取最新版本信息（用于前端显示）
 #[tauri::command]
 pub async fn get_latest_versions() -> Result<LatestVersions, String> {
-    log::info!("[Installer] Fetching latest versions info");
+    log::debug!("Fetching latest versions info");
 
     // 获取 Claude 信息
     let claude = tokio::task::spawn_blocking(|| fetch_claude_latest())
@@ -1182,7 +1182,7 @@ pub async fn kill_claude_processes() -> Result<(), String> {
         #[cfg(not(target_os = "windows"))]
         let name = "claude";
         crate::platform::kill_processes_by_name(name)?;
-        log::info!("[Installer] Killed claude processes");
+        log::info!("Killed claude processes");
         Ok(())
     })
     .await
@@ -1232,7 +1232,7 @@ pub async fn get_installed_claude_version() -> Result<Option<String>, String> {
 /// 拉取 OSS 上的 Claude versions.json（同步实现，由 spawn_blocking 调用）
 fn fetch_claude_versions() -> io::Result<ClaudeVersions> {
     let url = format!("{}/deps/claude/versions.json", OSS_BASE_URL);
-    log::info!("[Installer] Fetching Claude versions.json from {}", url);
+    log::debug!("Fetching Claude versions.json from {}", url);
 
     // 显式设置 15 秒超时，避免网络挂起导致前端 invoke 永久 pending
     let client = oss_client(std::time::Duration::from_secs(15))
@@ -1254,8 +1254,8 @@ fn fetch_claude_versions() -> io::Result<ClaudeVersions> {
         .json()
         .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
 
-    log::info!(
-        "[Installer] Got {} Claude versions, latest: {}",
+    log::debug!(
+        "Got {} Claude versions, latest: {}",
         versions.versions.len(),
         versions.latest
     );
@@ -1315,7 +1315,7 @@ pub async fn download_claude_version(
     app: AppHandle,
     version: String,
 ) -> Result<String, String> {
-    log::info!("[Installer] Downloading Claude CLI version {}", version);
+    log::debug!("Downloading Claude CLI version {}", version);
 
     emit_progress(&app, "claude-history", "fetching", 0, "获取版本信息...");
 
@@ -1395,8 +1395,8 @@ pub async fn download_claude_version(
     let cancelled = cancel_flag.load(Ordering::SeqCst);
     match decide_download_action(cache_exists, cache_size, expected_size, cancelled) {
         DownloadAction::ReuseCache => {
-            log::info!(
-                "[Installer] Reusing local cache: {} ({} bytes)",
+            log::debug!(
+                "Reusing local cache: {} ({} bytes)",
                 save_path.display(),
                 cache_size
             );
@@ -1420,8 +1420,8 @@ pub async fn download_claude_version(
         }
         DownloadAction::Download => {
             if cache_exists {
-                log::info!(
-                    "[Installer] Local file size mismatch ({} vs {}), removing",
+                log::debug!(
+                    "Local file size mismatch ({} vs {}), removing",
                     cache_size,
                     expected_size
                 );
@@ -1430,8 +1430,8 @@ pub async fn download_claude_version(
         }
     }
 
-    log::info!(
-        "[Installer] Downloading {} to {}",
+    log::debug!(
+        "Downloading {} to {}",
         download_url,
         save_path.display()
     );
@@ -1481,7 +1481,7 @@ pub async fn download_claude_version(
     let actual_size = fs::metadata(&save_path).map(|m| m.len()).unwrap_or(0);
     if actual_size != expected_size {
         log::warn!(
-            "[Installer] Downloaded size {} != expected {}",
+            "Downloaded size {} != expected {}",
             actual_size,
             expected_size
         );
@@ -1500,8 +1500,8 @@ pub async fn download_claude_version(
         format!("v{} 下载完成", version),
     );
 
-    log::info!(
-        "[Installer] Claude CLI v{} downloaded to {}",
+    log::debug!(
+        "Claude CLI v{} downloaded to {}",
         version,
         save_path.display()
     );
@@ -1519,11 +1519,11 @@ pub async fn cancel_claude_download(version: String) -> Result<bool, String> {
     };
     if let Some(f) = flag {
         f.store(true, Ordering::SeqCst);
-        log::info!("[Installer] Cancel requested for Claude CLI v{}", version);
+        log::info!("Cancel requested for Claude CLI v{}", version);
         Ok(true)
     } else {
         log::info!(
-            "[Installer] Cancel requested but no active download for v{}",
+            "Cancel requested but no active download for v{}",
             version
         );
         Ok(false)
@@ -1552,7 +1552,7 @@ pub async fn install_claude_version(
     version: String,
 ) -> Result<String, String> {
     log::info!(
-        "[Installer] Installing Claude CLI v{} from {}",
+        "Installing Claude CLI v{} from {}",
         version,
         source_path
     );
@@ -1577,7 +1577,7 @@ pub async fn install_claude_version(
     .map_err(|e| e.to_string())?;
 
     if claude_running {
-        log::warn!("[Installer] Claude is running, aborting install");
+        log::warn!("Claude is running, aborting install");
         return Err("claude-running".to_string());
     }
 
@@ -1632,7 +1632,7 @@ pub async fn install_claude_version(
     );
 
     log::info!(
-        "[Installer] Claude CLI v{} installed to {}",
+        "Claude CLI v{} installed to {}",
         version,
         target_path.display()
     );
