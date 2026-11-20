@@ -100,7 +100,7 @@ Tauri 无特殊绑定，xterm.js 原生处理：用户按 Ctrl+W → `term.onDat
 ```typescript
 // src/components/XTermTerminal.vue
 term.attachCustomKeyEventHandler((event: KeyboardEvent) => {
-  if (event.ctrlKey && event.key === 'v') {
+  if (event.ctrlKey && isKeyWithIme(event, 'KeyV', 'v')) {
     event.preventDefault()
     readText().then(text => { if (text) term.paste(text) })
     return false
@@ -108,6 +108,10 @@ term.attachCustomKeyEventHandler((event: KeyboardEvent) => {
   return true
 })
 ```
+
+### 中文输入法下快捷键判定的 'Process' 兜底（utils/ime-keys.ts）
+
+中文输入法开启时，WebView2/Chromium 对组合键的 keydown 可能报 `event.key === 'Process'`（IME 接管按键），`key === 'c'/'C'/'v'` 字面量判定全部失配——实测中文 IME 下 Ctrl+C 变成 SIGINT（终端出现 exit 提示）、Ctrl+Shift+C 复制与 Ctrl+V 粘贴静默失效，切英文输入法即恢复。Ctrl/⌘ 修饰键组合不是 IME 组合输入的目标键，`isKeyWithIme(event, code, ...keys)` 对 `key === 'Process'` 的情况用物理键 `event.code`（`KeyC`/`KeyV`）兜底；Ctrl+C 与 Ctrl+Shift+C 靠外层 `shiftKey` 互斥区分（code 同为 `KeyC`）。
 
 ### Undo 处理（Cmd+Z / Ctrl+Z）
 

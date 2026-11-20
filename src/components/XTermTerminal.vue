@@ -71,6 +71,7 @@ import { copyText as platformCopyText, readClipboardText as platformReadText } f
 import { transport } from '@/api/transport'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { isTauriEnv } from '@/api/platform'
+import { isKeyWithIme } from '@/utils/ime-keys'
 import { getCurrentWebview } from '@tauri-apps/api/webview'
 
 const props = defineProps<{
@@ -501,8 +502,9 @@ function createTerminal(tabId: string): Terminal {
       return true
     }
 
-    // Ctrl+C 复制（有选中）或 SIGINT（无选中）
-    if (event.ctrlKey && !event.metaKey && event.key === 'c' && !event.shiftKey) {
+    // Ctrl+C 复制（有选中）或 SIGINT（无选中）。
+    // 中文 IME 下 keydown 报 key='Process'，用 event.code 兜底（utils/ime-keys）
+    if (event.ctrlKey && !event.metaKey && isKeyWithIme(event, 'KeyC', 'c') && !event.shiftKey) {
       const selection = term.getSelection()
       if (selection) {
         event.preventDefault()
@@ -512,8 +514,8 @@ function createTerminal(tabId: string): Terminal {
       return true
     }
 
-    // Ctrl+Shift+C 强制复制
-    if (event.ctrlKey && event.shiftKey && event.key === 'C') {
+    // Ctrl+Shift+C 强制复制（IME 'Process' 形态由 shiftKey 与上一分支互斥区分）
+    if (event.ctrlKey && event.shiftKey && isKeyWithIme(event, 'KeyC', 'C')) {
       event.preventDefault()
       const selection = term.getSelection()
       if (selection) {
@@ -522,8 +524,8 @@ function createTerminal(tabId: string): Terminal {
       return false
     }
 
-    // Ctrl+V / Cmd+V 粘贴
-    if ((event.ctrlKey || event.metaKey) && event.key === 'v') {
+    // Ctrl+V / Cmd+V 粘贴（Ctrl 形态兼容 IME 'Process'；Cmd 形态 mac 输入法无此问题）
+    if ((event.ctrlKey || event.metaKey) && isKeyWithIme(event, 'KeyV', 'v')) {
       event.preventDefault()
       platformReadText().then(text => {
         if (text) term.paste(text)

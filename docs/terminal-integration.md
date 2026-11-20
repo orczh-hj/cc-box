@@ -73,6 +73,10 @@ CommandBuilder::new(resolved).arg("--resume").arg(id)...  // PathLookup（先 re
 
 npm 安装的 claude 是带 `#!/usr/bin/env node` shebang 的脚本，直接 exec 由内核 shebang 处理（要求 PATH 里有 node）；native 可执行文件直接运行。
 
+#### 非 PTY 子进程 spawn（store.rs `claude_command`，插件市场/Plugins 面板的 CLI 调用）
+
+与 PTY 路径的关键差异：PTY 经 Git Bash 执行，`is_runnable_cli` 对**无扩展名文件放行**（`None => true`，语义是「交给 shell 判定」）；但 `claude_command()` 是直接 CreateProcess——**无扩展名的 npm sh shim（`…\npm\claude`）无法作为 PE 执行**（BAD_EXE_FORMAT），所有 CLI 子进程调用静默失败（实测：插件市场安装/注册全部报错、`plugins list` 静默无徽标，而终端内同一 CLI 正常、cmd 手动跑也正常——两种安装形态的行为分叉）。修复：Windows 下 `spawnable_claude_command` 对无扩展名 Explicit 路径**优先取同目录 `.cmd`**（npm shim 必有，CreateProcess 经 cmd 可执行）；无 `.cmd` 维持原路径，失败经错误链上报。`blocking()`（commands.rs）用 anyhow `{:#}` 透出完整错误链——只打最外层 context 时 spawn 失败与 git 报错都会退化成「claude … failed」同一形态，无法定位。
+
 #### 立即退出检测（startup_check，spawn 契约：返回即存活）
 
 进程可能在启动等待期（50ms）内就退出——此时前端终端实例尚未建立，pty-exit 与输出事件全部丢失，表现为**纯白屏且 Rust 侧仍报 spawned successfully**（Mac native claude 12ms 秒退白屏的实测根因）。`spawn_claude`/`spawn_shell` 共用 `startup_check` 收尾：

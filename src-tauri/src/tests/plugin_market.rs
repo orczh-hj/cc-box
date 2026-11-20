@@ -1053,3 +1053,43 @@ fn WithBuiltinMarket_为空时合成且不重复() {
     assert_eq!(out.len(), 2);
     assert!(out.iter().any(|m| m.name == "ccbox-market"));
 }
+
+// ---------- claude 子进程 spawn 形态（Windows npm shim）----------
+
+/// 无扩展名 npm sh shim（`…\npm\claude`）必须解析到同目录 `.cmd`——
+/// CreateProcess 无法执行 sh 文本脚本（用户环境实测：插件市场所有 CLI 调用
+/// 报 spawn 失败，而 PTY 经 Git Bash 执行同一文件正常）
+#[test]
+#[cfg(target_os = "windows")]
+fn ClaudeCommand_NpmShim解析到同目录Cmd_1() {
+    let dir = tempfile::tempdir().unwrap();
+    let shim = dir.path().join("claude");
+    std::fs::write(&shim, b"#!/bin/sh").unwrap();
+    std::fs::write(dir.path().join("claude.cmd"), b"@echo off").unwrap();
+
+    let cmd = crate::store::spawnable_claude_command(shim.to_str().unwrap());
+    assert_eq!(cmd.get_program(), dir.path().join("claude.cmd"));
+}
+
+/// 无扩展名且同目录无 `.cmd`：维持原路径（不臆造目标，spawn 失败走错误链上报）
+#[test]
+#[cfg(target_os = "windows")]
+fn ClaudeCommand_无Cmd时保持原路径_2() {
+    let dir = tempfile::tempdir().unwrap();
+    let shim = dir.path().join("claude");
+    std::fs::write(&shim, b"#!/bin/sh").unwrap();
+
+    let cmd = crate::store::spawnable_claude_command(shim.to_str().unwrap());
+    assert_eq!(cmd.get_program(), shim);
+}
+
+/// 带可执行扩展名（.exe/.cmd）直接使用，不做改写
+#[test]
+#[cfg(target_os = "windows")]
+fn ClaudeCommand_有扩展名直接使用_3() {
+    let exe = r"C:\Users\u\.local\bin\claude.exe";
+    assert_eq!(
+        crate::store::spawnable_claude_command(exe).get_program(),
+        std::path::Path::new(exe)
+    );
+}

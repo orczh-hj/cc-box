@@ -2951,13 +2951,40 @@ fn capitalize_scope(scope: &str) -> String {
     }
 }
 
+/// Windows：把显式 CLI 路径转成 CreateProcess 可直接执行的形态。
+/// npm 安装的 `…\npm\claude` 是无扩展名 sh shim（文本脚本），CreateProcess
+/// 无法执行（BAD_EXE_FORMAT）——`is_runnable_cli` 对无扩展名放行的语义是
+/// 「交给 shell 判定」（PTY 经 Git Bash 执行成立），但本模块直接 spawn，
+/// 必须优先取同目录 `.cmd`（npm shim 必有，CreateProcess 经 cmd 可执行）；
+/// 无 `.cmd` 时维持原路径（spawn 失败经错误链上报）。
+#[cfg(target_os = "windows")]
+pub(crate) fn spawnable_claude_command(path: &str) -> std::process::Command {
+    if Path::new(path).extension().is_some() {
+        return crate::platform::new_command(path);
+    }
+    let cmd_path = format!("{}.cmd", path);
+    if Path::new(&cmd_path).is_file() {
+        return crate::platform::new_command(&cmd_path);
+    }
+    crate::platform::new_command(path)
+}
+
 /// 构造 claude 子进程：目标解析与 PTY 启动共用 `platform::cli_target`
 /// （CLAUDE.md 约定：CLI 启动目标只在单点决定，不能在别处直接写 `claude`——
 /// 用户配置了非 PATH 内的 CLI 时，子进程会找不到可执行文件）。
 fn claude_command() -> std::process::Command {
     let configured = get_app_config().ok().and_then(|c| c.claude_path);
     let mut cmd = match crate::platform::cli_target(configured.as_deref()) {
-        crate::platform::CliTarget::Explicit(path) => crate::platform::new_command(&path),
+        crate::platform::CliTarget::Explicit(path) => {
+            #[cfg(target_os = "windows")]
+            {
+                spawnable_claude_command(&path)
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                crate::platform::new_command(&path)
+            }
+        }
         crate::platform::CliTarget::PathLookup => {
             #[cfg(unix)]
             {
@@ -6015,8 +6042,13 @@ pub fn register_plugin_marketplace(name: &str) -> Result<()> {
     }
     let source = custom_market_source(name)
         .context(format!("市场 {} 不在列表中，无法获取来源", name))?;
-    run_claude_command_argv(&["plugin", "marketplace", "add", &source], None)
-        .with_context(|| format!("注册市场 {} 失败", name))?;
+    // 失败详情落日志：注册失败的根因（CLI spawn/git clone 报错原文）只返回前端
+    // toast，日志侧此前无痕迹
+    let add_res = run_claude_command_argv(&["plugin", "marketplace", "add", &source], None);
+    if let Err(e) = &add_res {
+        log::warn!("[PluginMarket] register marketplace {} failed: {:?}", source, e);
+    }
+    add_res.with_context(|| format!("注册市场 {} 失败", name))?;
     // 注册成功后浏览切到 Claude 克隆，CC-Box 浏览缓存即刻清理
     // （失败保留缓存——下次浏览不用重新 clone）
     clean_market_browse_copy(&source);
@@ -6061,7 +6093,17 @@ fn install_plugin_lifecycle(
                         "市场 {} 未注册且无来源可自动添加；请先将该市场加入列表",
                         market
                     ))?;
-                run_claude_command_argv(&["plugin", "marketplace", "add", &source], None)?;
+                // 失败详情落日志：此路径 `?` 早退不经过主命令的失败日志点
+                // （曾致用户环境 add 持续失败而日志无任何痕迹）
+                let add_res = run_claude_command_argv(&["plugin", "marketplace", "add", &source], None);
+                if let Err(e) = &add_res {
+                    log::warn!(
+                        "[PluginMarket] auto-register marketplace {} failed: {:?}",
+                        source,
+                        e
+                    );
+                }
+                add_res?;
             }
         }
     }

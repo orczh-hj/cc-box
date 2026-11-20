@@ -243,7 +243,7 @@ UI 已浏览器化（一套 UI 走桌面 Tauri / 宽屏浏览器 / 手机浏览�
 - **新事件** → `events.rs` 常量 + `emit_all`；远程会话类事件用 `remote_state::emit_event` / `emit_event_ex` / `emit_desktop_only`
 - **新协议消息** → `remote/protocol/` 四处同步：crate 定义 → protocol.ts → samples/ → remote/docs/protocol.md
 - **CLI 启动参数** → 只改 `pty::build_claude_args`，勿在前端另写一份
-- **CLI 进程启动** → 目标只由 `platform::cli_target()` 决定（配置可运行 → 完整路径；否则 PathLookup → Unix execvp 裸名 / Windows Git Bash `-c` 裸名）；Unix 不经 shell 中转；遵守 spawn「返回即存活」契约
+- **CLI 进程启动** → 目标只由 `platform::cli_target()` 决定（配置可运行 → 完整路径；否则 PathLookup → Unix execvp 裸名 / Windows Git Bash `-c` 裸名）；Unix 不经 shell 中转；遵守 spawn「返回即存活」契约。**非 PTY 子进程（`claude_command`）注意**：直接 CreateProcess，无扩展名 npm sh shim 不可执行——`spawnable_claude_command` 优先取同目录 `.cmd`（踩坑与错误链要求 → [docs/terminal-integration.md](docs/terminal-integration.md)「非 PTY 子进程 spawn」）
 - **前端 invoke/listen** → 一律经 `src/api/transport.ts`（组件禁止直接 import @tauri-apps/api）
 
 守卫测试、背景与踩坑说明 → [docs/development.md](docs/development.md)「新增功能检查清单（完整版）」

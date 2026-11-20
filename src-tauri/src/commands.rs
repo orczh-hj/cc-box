@@ -834,7 +834,10 @@ pub async fn set_plugin_enabled(
 //
 // 均为可能阻塞数十秒的 CLI 调用，统一放 spawn_blocking，避免卡死 tokio worker。
 
-/// 阻塞函数投递到 blocking 线程池并展平双层 Result
+/// 阻塞函数投递到 blocking 线程池并展平双层 Result。
+/// 错误用 `{:#}` 透出完整 anyhow 链——只打最外层 context 会把根因
+/// （如 CLI spawn 失败、git 报错原文）吞掉，前端 toast 只剩
+/// 「claude … failed」这类无信息量文案（两种不同故障显示同一形态的教训）
 async fn blocking<T, F>(f: F) -> Result<T, String>
 where
     T: Send + 'static,
@@ -843,7 +846,7 @@ where
     tokio::task::spawn_blocking(f)
         .await
         .map_err(|e| format!("task join error: {}", e))?
-        .map_err(|e| e.to_string())
+        .map_err(|e| format!("{:#}", e))
 }
 
 /// 读取 Claude 已注册市场与各市场插件条目（含 installed/enabled 徽标，
