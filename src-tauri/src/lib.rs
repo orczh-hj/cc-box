@@ -474,6 +474,7 @@ pub fn run(initial_dir: Option<String>, new_window: bool) {
             commands::take_pending_open_update,
             commands::resume_broker_connection,
             commands::spawn_new_instance,
+            commands::close_instance,
             commands::set_native_edit_menu,
             commands::log_message,
             installer::get_latest_versions,

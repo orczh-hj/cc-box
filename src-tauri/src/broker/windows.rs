@@ -232,7 +232,30 @@ pub(crate) async fn close_windows(except: Option<&str>, timeout: Duration) {
         .into_iter()
         .filter(|w| w.closable && except.map(|k| k != w.id).unwrap_or(true))
         .collect();
+    close_windows_inner(windows, timeout).await;
+}
 
+/// 关闭单个窗口（远程手机端「窗口管理」）。窗口不存在或为 v1 旧成员
+/// （不可控）时返回 Err——与 `show_window` 的良性语义不同，远程端需要
+/// 明确的错误反馈。
+pub(crate) async fn close_one_window(instance_id: &str, timeout: Duration) -> Result<(), String> {
+    let window = crate::gateway::window_roster()
+        .into_iter()
+        .find(|w| w.id == instance_id);
+    let Some(window) = window else {
+        return Err("window not found".to_string());
+    };
+    if !window.closable {
+        return Err(format!(
+            "window '{}' uses a legacy client and cannot be controlled",
+            window.title
+        ));
+    }
+    close_windows_inner(vec![window], timeout).await;
+    Ok(())
+}
+
+async fn close_windows_inner(windows: Vec<crate::gateway::WindowInfo>, timeout: Duration) {
     for w in &windows {
         if let Err(e) =
             crate::gateway::send_window_command(&w.id, WindowAction::Close).await

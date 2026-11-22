@@ -754,6 +754,10 @@ export const getAppPath = (): Promise<string> =>
 export const spawnNewInstance = (): Promise<void> =>
   invoke<void>('spawn_new_instance');
 
+/** 远程「窗口管理」：关闭指定窗口（经 Broker 执行） */
+export const closeInstance = (instanceId: string): Promise<void> =>
+  invoke<void>('close_instance', { instanceId });
+
 /** GUI 窗口标题变化上报 Broker（托盘窗口列表展示） */
 export const updateMemberWindowTitle = (title: string): Promise<void> =>
   invoke<void>('update_window_title', { title });

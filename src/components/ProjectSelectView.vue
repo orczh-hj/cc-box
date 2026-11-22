@@ -88,13 +88,13 @@
             >
               <span class="mini-spinner" aria-hidden="true"></span>
             </div>
-            <!-- 浏览器/手机：新建窗口（Broker 经 RPC 拉起空窗口；零窗口时文案为“启动窗口”） -->
+            <!-- 浏览器/手机：窗口管理（列出窗口 / 新建窗口 / 关闭窗口，Broker 经 RPC 执行） -->
             <button
               v-if="showNewWindowBtn"
               class="header-btn launch-window-btn"
               :disabled="launching"
-              :title="launching ? t('launchingWindow') : launchButtonText"
-              :aria-label="launching ? t('launchingWindow') : launchButtonText"
+              :title="t('windowManage')"
+              :aria-label="t('windowManage')"
               @click="handleLaunchWindow"
             >
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -214,27 +214,35 @@
       </footer>
     </div>
 
-    <!-- 新建窗口确认（远程端点击后先展示窗口列表，确认才创建） -->
-    <div v-if="newWindowConfirm" class="confirm-overlay" @click.self="newWindowConfirm = false">
+    <!-- 窗口管理（远程端：列出窗口 / 新建窗口 / 关闭窗口） -->
+    <div v-if="windowManageOpen" class="confirm-overlay" @click.self="windowManageOpen = false">
       <div class="confirm-dialog new-window-dialog">
-        <p class="confirm-text">{{ t('newWindowConfirmTitle') }}</p>
-        <p class="confirm-hint">{{ t('newWindowConfirmHint') }}</p>
+        <p class="confirm-text">{{ t('windowManageTitle') }}</p>
         <div class="window-list">
           <p class="window-list-title">{{ t('newWindowCurrentTitle') }}</p>
           <p v-if="sessionStore.knownInstances.length === 0" class="window-list-empty">
             {{ t('newWindowNoneHint') }}
           </p>
-          <p
+          <div
             v-for="inst in sessionStore.knownInstances"
             :key="inst.id"
-            class="window-list-item"
+            class="window-manage-item"
           >
-            {{ inst.name }}
-          </p>
+            <span class="window-manage-name">{{ inst.name }}</span>
+            <button
+              class="btn-danger window-close-btn"
+              :disabled="closingInstanceId === inst.id"
+              @click="handleCloseInstance(inst)"
+            >
+              {{ closingInstanceId === inst.id ? t('windowClosing') : t('closeWindow') }}
+            </button>
+          </div>
         </div>
         <div class="confirm-actions">
-          <button class="btn-cancel" @click="newWindowConfirm = false">{{ t('cancel') }}</button>
-          <button class="btn-primary" @click="confirmNewWindow">{{ t('newWindowConfirmBtn') }}</button>
+          <button class="btn-cancel" @click="windowManageOpen = false">{{ t('close') }}</button>
+          <button class="btn-primary" :disabled="launching" @click="confirmNewWindow">
+            {{ launching ? t('launchingWindow') : t('newWindow') }}
+          </button>
         </div>
       </div>
     </div>
@@ -264,8 +272,9 @@ import { useToast } from '@/composables/useToast'
 import { snapWindow } from '@/composables/useAppShortcuts'
 import { ctrl, cmd } from '@/utils/platform'
 import { isTauriEnv } from '@/api/platform'
-import { spawnNewInstance, type SessionInfo } from '@/api/tauri'
+import { spawnNewInstance, closeInstance, type SessionInfo } from '@/api/tauri'
 import { canLaunchNewWindow } from '@/utils/remoteWindows'
+import { uiConfirm } from '@/composables/useConfirm'
 import { useDeviceSwitcher } from '@/composables/useDeviceSwitcher'
 import { useConnHealth } from '@/composables/useConnHealth'
 
@@ -298,25 +307,22 @@ const localOptions = ref({
 const isSaving = ref(false)
 const saveSuccess = ref(false)
 
-/** 远程模式：首页常驻「新建/启动窗口」按钮（不限窗口数，Broker 侧兜底上限） */
+/** 远程模式：首页常驻「窗口管理」按钮（列出/新建/关闭窗口，Broker 侧兜底上限） */
 const showNewWindowBtn = computed(() =>
   canLaunchNewWindow(isTauriEnv, sessionStore.remoteInstancesKnown),
 )
-/** 零窗口用「启动窗口」（引导语义），有窗口用「新建窗口」 */
-const launchButtonText = computed(() =>
-  sessionStore.remoteInstances.length === 0 ? t('launchWindow') : t('newWindow'),
-)
 const launching = ref(false)
-/** 新建窗口确认弹窗（远程端点按钮先展示窗口列表，确认才创建） */
-const newWindowConfirm = ref(false)
+/** 窗口管理弹窗（远程端：列出窗口 / 新建 / 关闭） */
+const windowManageOpen = ref(false)
+/** 正在关闭的窗口 id（按钮 pending 态，防连点） */
+const closingInstanceId = ref<string | null>(null)
 
 function handleLaunchWindow() {
   if (launching.value) return
-  newWindowConfirm.value = true
+  windowManageOpen.value = true
 }
 
 async function confirmNewWindow() {
-  newWindowConfirm.value = false
   if (launching.value) return
   launching.value = true
   try {
@@ -327,6 +333,22 @@ async function confirmNewWindow() {
   } finally {
     // 窗口注册/events 到达前保持短暂 pending，防连点
     window.setTimeout(() => { launching.value = false }, 3000)
+  }
+}
+
+/** 关闭指定窗口：二次确认后经 Broker 执行（v1 旧窗口不可控时后端报错提示） */
+async function handleCloseInstance(inst: { id: string; name: string }) {
+  if (closingInstanceId.value) return
+  const ok = await uiConfirm(t('closeWindowConfirm', { name: inst.name }), { danger: true })
+  if (!ok) return
+  closingInstanceId.value = inst.id
+  try {
+    await closeInstance(inst.id)
+    toast.success(t('windowClosed', { name: inst.name }))
+  } catch (err) {
+    toast.error(t('closeWindowFailed', { error: String(err) }))
+  } finally {
+    closingInstanceId.value = null
   }
 }
 
@@ -1116,7 +1138,41 @@ async function handleSaveDefault() {
   color: var(--text-tertiary);
 }
 
-.confirm-actions .btn-danger {
+/* 窗口管理条目：窗口名 + 关闭按钮 */
+.window-manage-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 5px 0;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.window-manage-item:last-child {
+  border-bottom: none;
+}
+
+.window-manage-name {
+  font-size: 13px;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.window-manage-item .window-close-btn {
+  flex-shrink: 0;
+  padding: 3px 10px;
+  font-size: 12px;
+}
+
+.window-close-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.confirm-actions .btn-danger,
+.window-close-btn {
   padding: 7px 18px;
   background: var(--status-error);
   color: #fff;

@@ -1266,6 +1266,13 @@ pub async fn spawn_new_instance() -> Result<(), String> {
     crate::broker::windows::spawn_window()
 }
 
+/// 关闭指定 GUI 窗口（远程「窗口管理」用；经 Broker 执行）
+#[cc_command(write)]
+#[tauri::command]
+pub async fn close_instance(instance_id: String) -> Result<(), String> {
+    crate::broker::windows::close_one_window(&instance_id, std::time::Duration::from_secs(5)).await
+}
+
 // ==================== Provider Commands ====================
 
 /// 获取 Provider 配置

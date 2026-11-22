@@ -256,6 +256,8 @@ registry! {
     // 远程在零窗口时拉起新的 GUI 窗口（Broker 本地执行，无需成员在线）。
     // 服务端在 broker/windows.rs 做 12 窗口上限与 2s 冷却。
     "spawn_new_instance" => write(None) => | | spawn_new_instance_rpc,
+    // 远程「窗口管理」关闭指定窗口（Broker 本地执行；v1 旧成员不可控报错）
+    "close_instance" => write(None) => |instance_id: String| crate::commands::close_instance,
 
     // ==== 远程设置（浏览器端查看/管理远程开关） ====
     "get_remote_status" => read() => | | crate::commands::get_remote_status,
@@ -426,6 +428,15 @@ mod tests {
         assert!(!EXCLUDED.contains(&"spawn_new_instance"));
         assert!(is_remote_write("spawn_new_instance"));
         assert!(write_section("spawn_new_instance").is_none());
+    }
+
+    /// 远程「窗口管理」关闭指定窗口：必须在白名单、可写、无状态分区
+    #[test]
+    fn Rpc_CloseInstanceWhitelisted_001() {
+        assert!(RPC_WHITELIST.contains(&"close_instance"));
+        assert!(!EXCLUDED.contains(&"close_instance"));
+        assert!(is_remote_write("close_instance"));
+        assert!(write_section("close_instance").is_none());
     }
 
     /// 从 lib.rs 源码提取 invoke_handler 注册的命令名：截取 `generate_handler![`
