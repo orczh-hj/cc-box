@@ -403,8 +403,68 @@ fn GetPluginMarketplacesIn_清单无版本读插件json后备_001() {
     assert_eq!(miss.update_available, None);
 }
 
-/// 宽松版本比较（手算真值）：v 前缀、数值段、缺段补零、预发布段
+/// 清单 version 与插件源码 plugin.json version 双源取新：作者发版只改插件自身
+/// plugin.json、清单条目 version 漏同步时，市场列表会一直显示旧版
+/// （用户实测：paper-tool 已装 2.8.0，市场仍显示清单里的 2.7.0）
 #[test]
+fn GetPluginMarketplacesIn_清单版本与源码版本双源取新_001() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mkt = make_marketplace(
+        tmp.path(),
+        "dual",
+        r#"{ "plugins": [
+            { "name": "stale-listing", "version": "2.7.0", "source": "./plugins/stale-listing" },
+            { "name": "fresh-listing", "version": "3.0.0", "source": "./plugins/fresh-listing" },
+            { "name": "only-listing", "version": "1.0.0" },
+            { "name": "only-plugin-json", "source": "./plugins/only-plugin-json" }
+        ] }"#,
+    );
+    // 源码 plugin.json：stale-listing 已更到 2.8.0（清单漏改）；
+    // fresh-listing 2.8.0（清单 3.0.0 更新，清单赢）；only-plugin-json 0.5.0（清单无 version）
+    for (name, ver) in [
+        ("stale-listing", "2.8.0"),
+        ("fresh-listing", "2.8.0"),
+        ("only-plugin-json", "0.5.0"),
+    ] {
+        let d = mkt.join("plugins").join(name).join(".claude-plugin");
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(
+            d.join("plugin.json"),
+            format!(r#"{{ "name": "{}", "version": "{}" }}"#, name, ver),
+        )
+        .unwrap();
+    }
+
+    let plugins_dir = tmp.path().join("plugins");
+    std::fs::create_dir_all(&plugins_dir).unwrap();
+    std::fs::write(
+        plugins_dir.join("known_marketplaces.json"),
+        format!(
+            r#"{{ "dual": {{ "installLocation": "{}" }} }}"#,
+            mkt.to_string_lossy().replace('\\', "\\\\")
+        ),
+    )
+    .unwrap();
+
+    let out = get_plugin_marketplaces_in(tmp.path(), &HashMap::new(), &[], &[], "").unwrap();
+    let find = |name: &str| {
+        out[0]
+            .plugins
+            .iter()
+            .find(|p| p.name == name)
+            .unwrap()
+            .clone()
+    };
+    // 清单 2.7.0 < 源码 2.8.0 → 取源码（独立真值：两处 JSON 字面量不同）
+    assert_eq!(find("stale-listing").version.as_deref(), Some("2.8.0"));
+    // 清单 3.0.0 > 源码 2.8.0 → 清单赢（正规市场两侧一致/清单更新的形态不变）
+    assert_eq!(find("fresh-listing").version.as_deref(), Some("3.0.0"));
+    // 只有一侧 → 原样回落
+    assert_eq!(find("only-listing").version.as_deref(), Some("1.0.0"));
+    assert_eq!(find("only-plugin-json").version.as_deref(), Some("0.5.0"));
+}
+
+/// 宽松版本比较（手算真值）：v 前缀、数值段、缺段补零、预发布段#[test]
 fn Store_MarketVersionNewer_宽松比较_001() {
     use crate::store::market_version_newer;
     assert!(market_version_newer("1.2.0", "1.1.9"));

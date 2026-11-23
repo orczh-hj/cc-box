@@ -5719,23 +5719,28 @@ fn parse_marketplace_plugins(
             let enabled = matched.map(|i| i.enabled);
             let matched_scope = matched.map(|i| i.scope.clone());
             let matched_project_path = matched.and_then(|i| i.project_path.clone());
-            // 市场版本：清单条目优先，缺失时从插件源码目录的 plugin.json 读
-            // （官方精选等清单不逐条写 version，但浏览副本/缓存里有完整源码）
+            // 市场版本：清单条目与插件源码 plugin.json 双源取新——作者发版常只改
+            // 插件自身 plugin.json、清单 version 漏同步，市场会一直显示旧版
+            // （用户实测 paper-tool 已装 2.8.0 而市场显示 2.7.0）。正规市场两侧
+            // 一致不受影响；任一缺失回落另一侧
             let plugin_dir =
                 resolve_plugin_dir(market_dir, market_name, p, pname, base_dir);
-            let market_version = p
+            let entry_version = p
                 .get("version")
                 .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-                .or_else(|| {
-                    plugin_dir
-                        .as_deref()
-                        .and_then(read_plugin_json)
-                        .and_then(|j| {
-                            j.get("version").and_then(|v| v.as_str()).map(str::to_string)
-                        })
-                })
-                .filter(|s| !s.is_empty());
+                .map(|s| s.to_string());
+            let plugin_json_version = plugin_dir
+                .as_deref()
+                .and_then(read_plugin_json)
+                .and_then(|j| {
+                    j.get("version").and_then(|v| v.as_str()).map(str::to_string)
+                });
+            let market_version = match (entry_version, plugin_json_version) {
+                (Some(e), Some(pj)) if !e.is_empty() && !pj.is_empty() => {
+                    Some(if market_version_newer(&pj, &e) { pj } else { e })
+                }
+                (e, pj) => e.or(pj).filter(|s| !s.is_empty()),
+            };
             let installed_version = matched.and_then(|i| i.version.clone());
             // 更新判定：两侧版本都已知才比较（缺失任一侧 = 无法判定，不下结论）
             let update_available = match (market_version.as_deref(), installed_version.as_deref()) {
