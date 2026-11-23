@@ -269,6 +269,16 @@ function showActionError(msg: string) {
   actionErrorTimer = setTimeout(() => { actionError.value = '' }, 6000)
 }
 
+/** 更新/卸载的作用域参数：user 无需 cwd；project/local 带 projectPath（CLI 需在该项目
+ *  cwd 执行）。projectPath 缺失时抛错（catch 统一展示）——兜底当前 cwd 会在**另一个
+ *  项目**下执行：CLI 报「未安装」或操作到错误份（与 scopedProjectPath 同口径守卫） */
+function lifecycleScope(): { scope: string; projectPath?: string } {
+  if (props.plugin.scope === 'user') return { scope: 'user', projectPath: undefined }
+  const p = props.plugin.projectPath ?? appStore.cwd ?? undefined
+  if (!p) throw new Error(t('pluginNoProjectPath'))
+  return { scope: props.plugin.scope, projectPath: p }
+}
+
 async function onUpdate() {
   if (actionBusy.value) return
   actionBusy.value = 'update'

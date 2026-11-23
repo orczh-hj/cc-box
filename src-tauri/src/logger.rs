@@ -245,6 +245,10 @@ pub fn init() {
     let app_file = open_log_file(&format!("{}.log", prefix));
     let err_file = open_log_file(&format!("{}.error.log", prefix));
 
+    // 任一文件打开失败则不记日期前缀——current_date 与今日相同会让
+    // rollover_if_needed 直接跳过，当天后续日志不再尝试重开、整日静默丢弃
+    // （留空则首条日志触发与滚动失败路径相同的重试逻辑）
+    let opened_ok = app_file.is_some() && err_file.is_some();
     if let Ok(mut guard) = LOGGER.app_log.lock() {
         *guard = app_file;
     }
@@ -252,7 +256,9 @@ pub fn init() {
         *guard = err_file;
     }
     if let Ok(mut guard) = LOGGER.current_date.lock() {
-        *guard = prefix;
+        if opened_ok {
+            *guard = prefix;
+        }
     }
 
     // CC_BOX_LOG 环境变量覆盖编译默认（debug=Debug / release=Info）
