@@ -38,8 +38,10 @@ vi.mock('@/stores/sidebar', () => ({
   }),
 }))
 
+// cwd 可变：projectPath prop 与 cwd 兜底必须能区分（同值断言无信息量）
+let mockCwd: string | undefined = 'D:/other'
 vi.mock('@/stores/app', () => ({
-  useAppStore: () => ({ cwd: 'D:/proj' }),
+  useAppStore: () => ({ cwd: mockCwd }),
 }))
 
 import PluginItem from '@/components/plugins/PluginItem.vue'
@@ -81,7 +83,8 @@ describe('PluginItem 更新/卸载调用', () => {
     expect(mockUninstall).toHaveBeenCalledWith('paper-tool@ccbox-market', 'user', undefined)
   })
 
-  // project 作用域必须带上 projectPath（CLI 需在该项目 cwd 执行），缺失时拒绝操作
+  // project 作用域必须带上 projectPath（CLI 需在该项目 cwd 执行）；prop 优先于
+  // cwd 兜底（cwd='D:/other' ≠ 'D:/proj'，断言值只能来自 prop）
   it('PluginItem_UpdateProjectScopeRequiresPath_3', async () => {
     const w = mount(PluginItem, {
       props: { plugin: { ...plugin, scope: 'project', projectPath: 'D:/proj' } as PluginInfo },
@@ -89,5 +92,17 @@ describe('PluginItem 更新/卸载调用', () => {
     await w.find('.pa-btn').trigger('click')
     await flushPromises()
     expect(mockUpdate).toHaveBeenCalledWith('paper-tool@ccbox-market', 'project', 'D:/proj')
+  })
+
+  // project 作用域且 prop 与 cwd 均无路径 → 拒绝调用（防兜底 cwd 误操作另一个项目）
+  it('PluginItem_UpdateProjectScopeRejectsWithoutPath_4', async () => {
+    mockCwd = undefined
+    const w = mount(PluginItem, {
+      props: { plugin: { ...plugin, scope: 'project' } as PluginInfo },
+    })
+    await w.find('.pa-btn').trigger('click')
+    await flushPromises()
+    expect(mockUpdate).not.toHaveBeenCalled()
+    expect(w.find('.plugin-action-error').exists()).toBe(true)
   })
 })

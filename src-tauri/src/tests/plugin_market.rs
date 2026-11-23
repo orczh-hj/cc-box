@@ -464,7 +464,8 @@ fn GetPluginMarketplacesIn_清单版本与源码版本双源取新_001() {
     assert_eq!(find("only-plugin-json").version.as_deref(), Some("0.5.0"));
 }
 
-/// 宽松版本比较（手算真值）：v 前缀、数值段、缺段补零、预发布段#[test]
+/// 宽松版本比较（手算真值）：v 前缀、数值段、缺段补零、预发布段
+#[test]
 fn Store_MarketVersionNewer_宽松比较_001() {
     use crate::store::market_version_newer;
     assert!(market_version_newer("1.2.0", "1.1.9"));
