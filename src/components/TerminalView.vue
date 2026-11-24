@@ -65,6 +65,7 @@
           v-if="isMobile"
           :keyboard-open="kbMode"
           @select="handleSelectCopy"
+          @input="showInputBox = true"
           @toggle-keyboard="toggleKeyboardPanel"
           @send="handleQuickKey"
         />
@@ -85,6 +86,14 @@
           :raw="copyReaderData.raw"
           :truncated="copyReaderData.truncated"
           @close="copyReaderData = null"
+        />
+        <!-- 输入中转框（手机补充输入）：系统原生粘贴/复制 + 上屏进终端行 -->
+        <TerminalInputBox
+          v-if="showInputBox"
+          :visible="true"
+          v-model:draft="inputBoxDraft"
+          @commit="handleInputCommit"
+          @close="showInputBox = false"
         />
       </div>
     </div>
@@ -114,6 +123,7 @@ import IconBar from './IconBar.vue'
 import QuickKeyBar from './QuickKeyBar.vue'
 import KeyboardPanel, { type KeyboardTab } from './KeyboardPanel.vue'
 import TerminalCopyReader from './TerminalCopyReader.vue'
+import TerminalInputBox from './TerminalInputBox.vue'
 import { reflowSnapshot } from '@/utils/terminal-reflow'
 import SidebarPanel from './sidebar/SidebarPanel.vue'
 import { useIsMobile } from '@/composables/useMediaQuery'
@@ -227,6 +237,17 @@ function handleSelectCopy() {
   const snap = terminalRef.value?.captureSnapshot?.()
   if (!snap || snap.lines.length === 0) return
   copyReaderData.value = reflowSnapshot(snap)
+}
+
+// 输入中转框（草稿由父组件持有：弹层 v-if 卸载不丢内容）
+const showInputBox = ref(false)
+const inputBoxDraft = ref('')
+
+/** 中转框「上屏」：term.paste 写入终端输入行（括号粘贴归一），清草稿并关闭 */
+function handleInputCommit(text: string) {
+  terminalRef.value?.pasteText?.(text)
+  inputBoxDraft.value = ''
+  showInputBox.value = false
 }
 
 const { t } = useI18n()

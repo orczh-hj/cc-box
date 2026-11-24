@@ -67,3 +67,6 @@ remote/relay/target-dev/
 *-setup-local.exe
 
 .ossutil_checkpoint/
+
+# CC-Box 会话文件（截图/上传缓存，本地运行产物）
+.cc-box-files/

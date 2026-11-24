@@ -24,24 +24,27 @@ describe('QuickKeyBar（手机快捷键工具条）', () => {
     mockT.mockClear()
   })
 
-  // 工具条 = 键盘面板入口（图标）+ 选择复制 + 六个高频键（粘贴走原生键盘输入法路径）
+  // 工具条 = 键盘面板入口（图标）+ 选择复制 + 输入 + 六个高频键（粘贴走原生键盘输入法路径）
   it('QuickKeyBar_RendersEntries_001', () => {
     const wrapper = mount(QuickKeyBar)
     const buttons = wrapper.findAll('button')
-    expect(buttons).toHaveLength(2 + Object.keys(HOT_KEYS).length)
+    expect(buttons).toHaveLength(3 + Object.keys(HOT_KEYS).length)
     expect(buttons[0].find('svg').exists()).toBe(true)
     expect(buttons[0].attributes('aria-label')).toBe('keyboard')
     expect(buttons[1].text()).toBe('quickKeySelectCopy')
+    expect(buttons[2].text()).toBe('quickKeyInputBox')
   })
 
-  // 键盘按钮 / 选择复制：各自 emit 动作事件，不发字节
+  // 键盘按钮 / 选择复制 / 输入：各自 emit 动作事件，不发字节
   it('QuickKeyBar_ActionEmits_002', async () => {
     const wrapper = mount(QuickKeyBar)
     const buttons = wrapper.findAll('button')
     await buttons[0].trigger('click')
     await buttons[1].trigger('click')
+    await buttons[2].trigger('click')
     expect(wrapper.emitted('toggleKeyboard')).toHaveLength(1)
     expect(wrapper.emitted('select')).toHaveLength(1)
+    expect(wrapper.emitted('input')).toHaveLength(1)
     expect(wrapper.emitted('send')).toBeUndefined()
   })
 

@@ -105,6 +105,10 @@
 
   // Quick key bar (mobile breakpoint)
   quickKeySelectCopy: 'Select & Copy',
+  quickKeyInputBox: 'Input',
+  inputBoxPlaceholder: 'Type or long-press to paste, commit writes to terminal',
+  inputBoxCommit: 'Commit',
+  inputBoxClear: 'Clear',
   quickKeyNewlineShort: 'Line break',
   quickKeyKeyboardHint: 'Show/hide soft keyboard',
   vkbCloseHint: 'Close keyboard panel',

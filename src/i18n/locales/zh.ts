@@ -105,6 +105,10 @@
 
   // 快捷键工具条（手机断点）
   quickKeySelectCopy: '选择复制',
+  quickKeyInputBox: '输入',
+  inputBoxPlaceholder: '输入或长按粘贴，上屏写入终端',
+  inputBoxCommit: '上屏',
+  inputBoxClear: '清空',
   quickKeyNewlineShort: '换行',
   quickKeyKeyboardHint: '显示/收起软键盘',
   vkbCloseHint: '收起键盘面板',

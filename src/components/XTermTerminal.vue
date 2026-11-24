@@ -1194,6 +1194,15 @@ function sendText(text: string, focusAfter = true) {
   }
 }
 
+/** 输入中转框上屏：走 term.paste（括号粘贴 + 换行归一，多行不逐行执行），
+ *  不触碰 helper textarea（与手机差分模型无冲突）；onData → ptyInput 双端自动路由 */
+function pasteText(text: string) {
+  const tabId = currentDisplayTabId.value
+  if (!tabId) return
+  const instance = terminalInstances.get(tabId)
+  if (instance?.ptyId) instance.term.paste(text)
+}
+
 // 浏览器远程模式：释放当前焦点会话的控制权，但保留输出订阅。
 // detach 让服务端把 active 归还桌面（桌面清遮罩），立即 subscribe 保持后台
 // Tab 继续收输出、重新接管时无需回放 tail。切 Tab 与离开终端页共用。
@@ -1455,6 +1464,7 @@ defineExpose({
   restartCurrentPty,
   cleanup,
   sendText,
+  pasteText,
   fitCurrentTerminal,
   refreshRemoteSessions,
   captureSnapshot,

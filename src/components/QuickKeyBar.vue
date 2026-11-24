@@ -38,6 +38,11 @@
       :aria-label="'select'"
       @click="$emit('select')"
     >{{ t('quickKeySelectCopy') }}</button>
+    <button
+      class="qk-btn qk-action"
+      :aria-label="'input'"
+      @click="$emit('input')"
+    >{{ t('quickKeyInputBox') }}</button>
     <!-- 高频键常驻工具条（功能名/符号为主，不写组合键） -->
     <button
       v-for="k in hotKeys"
@@ -61,7 +66,7 @@ import { computed, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 
 defineProps<{ keyboardOpen?: boolean }>()
-defineEmits<{ select: []; toggleKeyboard: []; send: [bytes: string] }>()
+defineEmits<{ select: []; input: []; toggleKeyboard: []; send: [bytes: string] }>()
 
 const { t } = useI18n()
 
