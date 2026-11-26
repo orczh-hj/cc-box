@@ -13,13 +13,26 @@ describe('setEnabled 系列 IPC 契约', () => {
     mockInvoke.mockReset()
   })
 
-  // setPluginEnabled → 命令名 set_plugin_enabled，参数名 pluginId（camelCase，与默认 snake_case 不同）
+  // setPluginEnabled → 命令名 set_plugin_enabled，参数名 pluginId（camelCase，与默认 snake_case 不同）；
+  // actionId：CLI 流式输出定位键（缺省 null = 不 emit，旧远程桌面兼容）
   it('SetPluginEnabled_Call_001', async () => {
     mockInvoke.mockResolvedValue(undefined)
     await setPluginEnabled('paper-tool@orczh', false)
     expect(mockInvoke).toHaveBeenCalledWith('set_plugin_enabled', {
       pluginId: 'paper-tool@orczh',
       enabled: false,
+      scope: undefined,
+      projectPath: undefined,
+      actionId: null,
+    })
+    // 传 actionId 时原样透传（流式输出区按它过滤事件）
+    await setPluginEnabled('paper-tool@orczh', true, 'user', undefined, 'cli-1')
+    expect(mockInvoke).toHaveBeenLastCalledWith('set_plugin_enabled', {
+      pluginId: 'paper-tool@orczh',
+      enabled: true,
+      scope: 'user',
+      projectPath: undefined,
+      actionId: 'cli-1',
     })
   })
 

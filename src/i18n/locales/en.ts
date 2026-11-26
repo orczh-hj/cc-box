@@ -816,6 +816,7 @@
   marketRefreshSelected: 'Refresh this market',
   marketDrawerTitle: 'Markets',
   marketBusyElapsed: '{s}s',
+  marketCliOutput: 'CLI output',
   marketAddProgress: 'Adding… {s}s elapsed (first add clones the repo, up to ~2 min)',
   marketAddProgressLabel: 'Adding market (first clone may take up to ~2 min)',
   marketRefreshProgressLabel: 'Refreshing marketplace from remote…',

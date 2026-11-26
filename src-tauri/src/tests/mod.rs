@@ -37,6 +37,9 @@ mod plugin_market;
 #[cfg(test)]
 mod process_spawn_guard;
 #[cfg(test)]
+#[cfg(target_os = "windows")]
+mod claude_command_spawn;
+#[cfg(test)]
 mod store_edit;
 #[cfg(test)]
 mod logger;

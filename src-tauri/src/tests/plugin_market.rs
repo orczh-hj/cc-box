@@ -72,13 +72,13 @@ fn ValidateInstallScope_白名单与项目路径要求() {
 #[test]
 fn InstallPlugin_前置校验先于子进程() {
     // 缺 @marketplace 后缀
-    let err = install_plugin("paper-tool", "user", None, None).unwrap_err().to_string();
+    let err = install_plugin("paper-tool", "user", None, None, None).unwrap_err().to_string();
     assert!(err.contains("name@marketplace"), "got: {}", err);
     // 非法作用域
-    let err = install_plugin("a@b", "global", None, None).unwrap_err().to_string();
+    let err = install_plugin("a@b", "global", None, None, None).unwrap_err().to_string();
     assert!(err.contains("Invalid install scope"), "got: {}", err);
     // project 缺项目路径
-    let err = install_plugin("a@b", "project", None, None).unwrap_err().to_string();
+    let err = install_plugin("a@b", "project", None, None, None).unwrap_err().to_string();
     assert!(err.contains("project_path"), "got: {}", err);
 }
 

@@ -77,6 +77,8 @@ npm 安装的 claude 是带 `#!/usr/bin/env node` shebang 的脚本，直接 exe
 
 与 PTY 路径的关键差异：PTY 经 Git Bash 执行，`is_runnable_cli` 对**无扩展名文件放行**（`None => true`，语义是「交给 shell 判定」）；但 `claude_command()` 是直接 CreateProcess——**无扩展名的 npm sh shim（`…\npm\claude`）无法作为 PE 执行**（BAD_EXE_FORMAT），所有 CLI 子进程调用静默失败（实测：插件市场安装/注册全部报错、`plugins list` 静默无徽标，而终端内同一 CLI 正常、cmd 手动跑也正常——两种安装形态的行为分叉）。修复：Windows 下 `spawnable_claude_command` 对无扩展名 Explicit 路径**优先取同目录 `.cmd`**（npm shim 必有，CreateProcess 经 cmd 可执行）；无 `.cmd` 维持原路径，失败经错误链上报。`blocking()`（commands.rs）用 anyhow `{:#}` 透出完整错误链——只打最外层 context 时 spawn 失败与 git 报错都会退化成「claude … failed」同一形态，无法定位。
 
+**PathLookup 分支同坑（2026-11 用户事故）**：上述 `.cmd` 修复最初只接在 Explicit 分支，PathLookup 分支仍是裸名 `claude` 交 CreateProcess——Rust std 只补 `.exe`，用户 PATH 里只有 `claude`（sh shim）+ `claude.cmd` 而无 `claude.exe` 时 spawn 直接报 `program not found`（插件市场安装/注册市场全部失败，终端 PTY 经 Git Bash 正常，「终端能用、市场不能用」）。修复：Windows PathLookup 同样先 `find_executable("claude")`（`where` 查找，`is_runnable_cli` 接受 `.cmd/.bat/.exe`）再经 `spawnable_claude_command`；解析失败维持裸名保留原错误链。两个分支教训同源：**`.cmd` 补全逻辑接到一个分支时，必须检查所有构造 `claude` 子进程的分支**（守卫测试 `tests/claude_command_spawn.rs` 用「PATH 仅含 .cmd shim」环境锁定该行为）。
+
 #### 立即退出检测（startup_check，spawn 契约：返回即存活）
 
 进程可能在启动等待期（50ms）内就退出——此时前端终端实例尚未建立，pty-exit 与输出事件全部丢失，表现为**纯白屏且 Rust 侧仍报 spawned successfully**（Mac native claude 12ms 秒退白屏的实测根因）。`spawn_claude`/`spawn_shell` 共用 `startup_check` 收尾：

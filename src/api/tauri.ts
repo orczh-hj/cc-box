@@ -168,6 +168,16 @@ export const onHookEvent = (callback: (payload: HookEventPayload) => void): Prom
 export const onHookStatus = (callback: (payload: HookStatusPayload) => void): Promise<Unlisten> =>
   listen<HookStatusPayload>('hook-status', callback);
 
+/** 插件市场 CLI 输出行（PTY 执行实时上抛；replace=true 时替换输出区最后一行——spinner \r 重绘） */
+export interface PluginCliOutputPayload {
+  actionId: string
+  step: string
+  text: string
+  replace: boolean
+}
+export const onPluginCliOutput = (callback: (payload: PluginCliOutputPayload) => void): Promise<Unlisten> =>
+  listen<PluginCliOutputPayload>('plugin-cli-output', callback);
+
 // Menu events
 export const onMenuSettings = (callback: () => void): Promise<Unlisten> =>
   listen('menu:settings', () => callback());
@@ -358,10 +368,11 @@ export const setPluginEnabled = (
   /** 作用域（user/project/local）：project/local 必须带 projectPath（CLI 需在项目 cwd 执行） */
   scope?: string,
   projectPath?: string,
+  actionId?: string,
 ): Promise<void> =>
   // 后端同步执行 `claude plugin enable/disable` 子进程，可能超过远程 rpc 默认 15s；
   // 桌面实现忽略 timeoutMs（本地 IPC 无超时）。超时会让远程先报错回滚、桌面最终成功。
-  invoke<void>('set_plugin_enabled', { pluginId, enabled, scope, projectPath }, { timeoutMs: 60000 });
+  invoke<void>('set_plugin_enabled', { pluginId, enabled, scope, projectPath, actionId: actionId ?? null }, { timeoutMs: 60000 });
 
 // ---------- Plugin 市场（浏览 + 安装管理）----------
 
@@ -461,17 +472,18 @@ const MARKET_TIMEOUT = { timeoutMs: 240000 };
 export const addPluginMarketplace = (source: string): Promise<string> =>
   invoke<string>('add_plugin_marketplace', { source }, MARKET_TIMEOUT);
 
-/** 移除市场：从 CC-Box 列表删除；alsoUnregister 时同时从 Claude 注销 */
-export const removePluginMarketplace = (name: string, alsoUnregister?: boolean): Promise<void> =>
-  invoke<void>('remove_plugin_marketplace', { name, alsoUnregister: alsoUnregister ?? null }, MARKET_TIMEOUT);
+/** 移除市场：从 CC-Box 列表删除；alsoUnregister 时同时从 Claude 注销；
+ * actionId：流式输出区定位键（缺省走管道一次性执行，无实时输出） */
+export const removePluginMarketplace = (name: string, alsoUnregister?: boolean, actionId?: string): Promise<void> =>
+  invoke<void>('remove_plugin_marketplace', { name, alsoUnregister: alsoUnregister ?? null, actionId: actionId ?? null }, MARKET_TIMEOUT);
 
 /** 刷新市场：已注册 → Claude update；未注册 → 重拉 CC-Box 浏览缓存 */
-export const refreshPluginMarketplace = (name: string): Promise<void> =>
-  invoke<void>('refresh_plugin_marketplace', { name }, MARKET_TIMEOUT);
+export const refreshPluginMarketplace = (name: string, actionId?: string): Promise<void> =>
+  invoke<void>('refresh_plugin_marketplace', { name, actionId: actionId ?? null }, MARKET_TIMEOUT);
 
 /** 注册该市场（显式注册到 Claude；「卸载市场」的逆操作） */
-export const registerPluginMarketplace = (name: string): Promise<void> =>
-  invoke<void>('register_plugin_marketplace', { name }, MARKET_TIMEOUT);
+export const registerPluginMarketplace = (name: string, actionId?: string): Promise<void> =>
+  invoke<void>('register_plugin_marketplace', { name, actionId: actionId ?? null }, MARKET_TIMEOUT);
 
 // pluginRef = name@marketplace；scope = user|project|local（project 必须带 projectPath）；
 // marketSource：未注册市场安装时用于自动注册的来源
@@ -479,23 +491,26 @@ export const installPlugin = (
   pluginRef: string,
   scope: string,
   projectPath?: string,
-  marketSource?: string
+  marketSource?: string,
+  actionId?: string
 ): Promise<void> =>
-  invoke<void>('install_plugin', { pluginRef, scope, projectPath: projectPath ?? null, marketSource: marketSource ?? null }, MARKET_TIMEOUT);
+  invoke<void>('install_plugin', { pluginRef, scope, projectPath: projectPath ?? null, marketSource: marketSource ?? null, actionId: actionId ?? null }, MARKET_TIMEOUT);
 
 export const uninstallPlugin = (
   pluginRef: string,
   scope: string,
-  projectPath?: string
+  projectPath?: string,
+  actionId?: string
 ): Promise<void> =>
-  invoke<void>('uninstall_plugin', { pluginRef, scope, projectPath: projectPath ?? null }, MARKET_TIMEOUT);
+  invoke<void>('uninstall_plugin', { pluginRef, scope, projectPath: projectPath ?? null, actionId: actionId ?? null }, MARKET_TIMEOUT);
 
 export const updatePlugin = (
   pluginRef: string,
   scope: string,
-  projectPath?: string
+  projectPath?: string,
+  actionId?: string
 ): Promise<void> =>
-  invoke<void>('update_plugin', { pluginRef, scope, projectPath: projectPath ?? null }, MARKET_TIMEOUT);
+  invoke<void>('update_plugin', { pluginRef, scope, projectPath: projectPath ?? null, actionId: actionId ?? null }, MARKET_TIMEOUT);
 
 // ---------- 扩展编辑（MCP / Skill / Agent / Hook 表单化新增与编辑）----------
 

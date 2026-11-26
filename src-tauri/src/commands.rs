@@ -825,9 +825,16 @@ pub async fn set_plugin_enabled(
     enabled: bool,
     scope: Option<String>,
     project_path: Option<String>,
+    action_id: Option<String>,
 ) -> Result<(), String> {
-    crate::store::set_plugin_enabled_scoped(&plugin_id, enabled, scope.as_deref(), project_path.as_deref())
-        .map_err(|e| e.to_string())
+    crate::store::set_plugin_enabled_scoped(
+        &plugin_id,
+        enabled,
+        scope.as_deref(),
+        project_path.as_deref(),
+        action_id,
+    )
+    .map_err(|e| e.to_string())
 }
 
 // ---------- Plugin 市场（浏览 + 安装管理）----------
@@ -876,11 +883,13 @@ pub async fn add_plugin_marketplace(source: String) -> Result<String, String> {
 }
 
 /// 移除市场：从 CC-Box 列表删除；also_unregister 时同时从 Claude 注销
+/// （action_id：前端生成的流式输出定位键，None 走管道一次性执行不 emit）
 #[cc_command(write = "plugins")]
 #[tauri::command]
 pub async fn remove_plugin_marketplace(
     name: String,
     also_unregister: Option<bool>,
+    action_id: Option<String>,
 ) -> Result<(), String> {
     log::info!(
         "[PluginMarket] remove marketplace: {} (also_unregister={:?})",
@@ -888,7 +897,7 @@ pub async fn remove_plugin_marketplace(
         also_unregister
     );
     blocking(move || {
-        crate::store::remove_plugin_marketplace(&name, also_unregister.unwrap_or(false))
+        crate::store::remove_plugin_marketplace(&name, also_unregister.unwrap_or(false), action_id)
     })
     .await
 }
@@ -896,17 +905,23 @@ pub async fn remove_plugin_marketplace(
 /// 刷新市场：已注册 → Claude update；未注册 → 重拉 CC-Box 浏览缓存
 #[cc_command(write = "plugins")]
 #[tauri::command]
-pub async fn refresh_plugin_marketplace(name: String) -> Result<(), String> {
+pub async fn refresh_plugin_marketplace(
+    name: String,
+    action_id: Option<String>,
+) -> Result<(), String> {
     log::info!("[PluginMarket] refresh marketplace: {}", name);
-    blocking(move || crate::store::refresh_plugin_marketplace(&name)).await
+    blocking(move || crate::store::refresh_plugin_marketplace(&name, action_id)).await
 }
 
 /// 注册该市场（显式注册到 Claude；「卸载市场」的逆操作）
 #[cc_command(write = "plugins")]
 #[tauri::command]
-pub async fn register_plugin_marketplace(name: String) -> Result<(), String> {
+pub async fn register_plugin_marketplace(
+    name: String,
+    action_id: Option<String>,
+) -> Result<(), String> {
     log::info!("[PluginMarket] register marketplace: {}", name);
-    blocking(move || crate::store::register_plugin_marketplace(&name)).await
+    blocking(move || crate::store::register_plugin_marketplace(&name, action_id)).await
 }
 
 /// 安装插件（plugin_ref = name@marketplace；scope = user|project|local，
@@ -918,6 +933,7 @@ pub async fn install_plugin(
     scope: String,
     project_path: Option<String>,
     market_source: Option<String>,
+    action_id: Option<String>,
 ) -> Result<(), String> {
     log::info!(
         "[PluginMarket] install {}: scope={} project={:?} market_source={:?}",
@@ -932,6 +948,7 @@ pub async fn install_plugin(
             &scope,
             project_path.as_deref(),
             market_source.as_deref(),
+            action_id,
         )
     })
     .await
@@ -943,6 +960,7 @@ pub async fn uninstall_plugin(
     plugin_ref: String,
     scope: String,
     project_path: Option<String>,
+    action_id: Option<String>,
 ) -> Result<(), String> {
     log::info!(
         "[PluginMarket] uninstall {}: scope={} project={:?}",
@@ -951,7 +969,7 @@ pub async fn uninstall_plugin(
         project_path
     );
     blocking(move || {
-        crate::store::uninstall_plugin(&plugin_ref, &scope, project_path.as_deref())
+        crate::store::uninstall_plugin(&plugin_ref, &scope, project_path.as_deref(), action_id)
     })
     .await
 }
@@ -962,6 +980,7 @@ pub async fn update_plugin(
     plugin_ref: String,
     scope: String,
     project_path: Option<String>,
+    action_id: Option<String>,
 ) -> Result<(), String> {
     log::info!(
         "[PluginMarket] update {}: scope={} project={:?}",
@@ -969,7 +988,10 @@ pub async fn update_plugin(
         scope,
         project_path
     );
-    blocking(move || crate::store::update_plugin(&plugin_ref, &scope, project_path.as_deref())).await
+    blocking(move || {
+        crate::store::update_plugin(&plugin_ref, &scope, project_path.as_deref(), action_id)
+    })
+    .await
 }
 
 // ==================== 扩展编辑（MCP / Skill / Agent / Hook 表单化新增与编辑） ====================

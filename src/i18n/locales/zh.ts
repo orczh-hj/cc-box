@@ -814,6 +814,7 @@
   marketRefreshSelected: '刷新当前市场',
   marketDrawerTitle: '市场',
   marketBusyElapsed: '{s} 秒',
+  marketCliOutput: 'CLI 输出',
   marketAddProgress: '正在添加…已等待 {s} 秒（首次需克隆仓库，最长约 2 分钟）',
   marketAddProgressLabel: '正在添加市场（首次克隆可能较慢，最长约 2 分钟）',
   marketRefreshProgressLabel: '正在从远程刷新市场清单…',

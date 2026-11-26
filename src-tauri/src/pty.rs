@@ -887,3 +887,328 @@ pub fn get_pty_manager() -> Option<Arc<PtyManager>> {
     PTY_MANAGER.lock().clone()
 }
 
+// ==================== 一次性 PTY 命令（插件市场 CLI 流式输出） ====================
+//
+// 市场命令（install/uninstall/update/marketplace add…）耗时可达 120s 且唯一
+// 实时信息源是 CLI 的 TTY 渲染（spinner/状态行）——管道下 Node stdout 块缓冲，
+// 输出到进程退出才一帧到达（实测）。本执行器把 CLI 跑在隐藏 PTY 里，输出
+// 实时清洗（strip_ansi + \r 合并）后经回调上抛，调用方决定 emit 什么事件。
+
+/// 行合并器：把 PTY 文本流按行切分并处理 `\r` 重绘语义。
+/// - `\n` / `\r\n` → 提交一行 (line, replace=false)
+/// - 裸 `\r`（spinner 重绘）→ 提交 (line, replace=true)，前端替换上一行
+#[derive(Default)]
+pub(crate) struct PtyLineMerger {
+    pending: String,
+    /// 上一字符是否为 `\r`（跨 chunk 判定 `\r\n`）
+    saw_cr: bool,
+}
+
+impl PtyLineMerger {
+    pub(crate) fn feed(&mut self, chunk: &str) -> Vec<(String, bool)> {
+        let mut out = Vec::new();
+        for c in chunk.chars() {
+            if self.saw_cr {
+                self.saw_cr = false;
+                if c == '\n' {
+                    out.push((std::mem::take(&mut self.pending), false));
+                    continue;
+                }
+                if !self.pending.is_empty() {
+                    out.push((std::mem::take(&mut self.pending), true));
+                }
+            }
+            match c {
+                '\n' => out.push((std::mem::take(&mut self.pending), false)),
+                '\r' => self.saw_cr = true,
+                _ => self.pending.push(c),
+            }
+        }
+        if self.saw_cr && !self.pending.is_empty() {
+            out.push((std::mem::take(&mut self.pending), true));
+            self.saw_cr = false;
+        }
+        out
+    }
+
+    /// EOF 时刷出残留（不足一行也算一行）
+    pub(crate) fn flush(&mut self) -> Option<(String, bool)> {
+        if self.pending.is_empty() {
+            return None;
+        }
+        Some((std::mem::take(&mut self.pending), false))
+    }
+}
+
+/// bash 单引号包裹（单引号内无任何展开）；参数含单引号时断言拒绝——
+/// 市场参数（plugin-ref/市场名/URL）经 validate 已不含单引号
+fn bash_quote(arg: &str) -> String {
+    assert!(!arg.contains('\''), "arg contains single quote: {:?}", arg);
+    format!("'{}'", arg)
+}
+
+/// PowerShell 双引号包裹（无 Git Bash 时的回退包装）
+fn ps_quote(arg: &str) -> String {
+    format!("\"{}\"", arg)
+}
+
+/// 取文本尾部 N 行（错误 context 用）
+fn tail_lines(text: &str, n: usize) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    let start = lines.len().saturating_sub(n);
+    lines[start..].join("\n")
+}
+
+/// 一次性 PTY 执行 claude CLI。
+///
+/// 输出实时清洗后经 `on_line(text, replace)` 上抛（在调用方线程被调用），
+/// 同时累积全量清洗文本返回。spawn 失败/超时返回 Err；非零退出返回
+/// `Ok((false, output))`（由调用方按现有语义判失败）。
+/// 不注册 instances/writers、不发 pty-* 事件——与交互终端完全隔离。
+pub(crate) fn run_claude_pty_command(
+    args: &[&str],
+    cwd: Option<&Path>,
+    timeout: Duration,
+    mut on_line: impl FnMut(&str, bool),
+) -> anyhow::Result<(bool, String)> {
+    // 目标解析与 spawn_claude 同源（platform::cli_target 单点）：显式配置用
+    // 完整路径；PathLookup Windows 用裸名让 shell 做 PATHEXT 查找，Unix 解析
+    // 成可运行文件（与 spawn_claude 同语义）
+    let configured = crate::store::get_app_config().ok().and_then(|c| c.claude_path);
+    let target = crate::platform::cli_target(configured.as_deref());
+
+    let pair = native_pty_system()
+        .openpty(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .context("openpty failed")?;
+
+    #[cfg(target_os = "windows")]
+    let claude_cmd = match &target {
+        crate::platform::CliTarget::Explicit(path) => format!("\"{}\"", path),
+        crate::platform::CliTarget::PathLookup => "claude".to_string(),
+    };
+
+    let mut cmd = {
+        #[cfg(target_os = "windows")]
+        {
+            let git_bash = crate::store::detect_git_bash_path();
+            let invocation = match &git_bash {
+                Some(_) => {
+                    let mut s = claude_cmd;
+                    for a in args {
+                        s.push(' ');
+                        s.push_str(&bash_quote(a));
+                    }
+                    s
+                }
+                None => {
+                    let mut s = claude_cmd;
+                    for a in args {
+                        s.push(' ');
+                        s.push_str(&ps_quote(a));
+                    }
+                    s
+                }
+            };
+            let (program, shell_args) =
+                crate::platform::get_claude_shell(&invocation, git_bash.as_deref());
+            let mut c = CommandBuilder::new(&program);
+            for a in &shell_args {
+                c.arg(a);
+            }
+            if let Some(gb) = &git_bash {
+                c.env("CLAUDE_CODE_GIT_BASH_PATH", gb);
+            }
+            c
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let program = match &target {
+                crate::platform::CliTarget::Explicit(path) => path.clone(),
+                crate::platform::CliTarget::PathLookup => crate::platform::find_executable("claude")
+                    .unwrap_or_else(|| "claude".to_string()),
+            };
+            let mut c = CommandBuilder::new(&program);
+            for a in args {
+                c.arg(a);
+            }
+            c
+        }
+    };
+
+    for (k, v) in env::vars() {
+        cmd.env(k, v);
+    }
+    cmd.env("TERM", "xterm-256color");
+    cmd.env("COLORTERM", "truecolor");
+    if let Ok(config) = crate::store::get_app_config() {
+        if let Some(vars) = config.claude_env_vars {
+            for (k, v) in &vars {
+                cmd.env(k, v);
+            }
+        }
+    }
+    if let Some(dir) = cwd {
+        cmd.cwd(dir);
+    }
+
+    let mut child = pair.slave.spawn_command(cmd).context("PTY spawn failed")?;
+    let mut reader = pair
+        .master
+        .try_clone_reader()
+        .context("clone reader failed")?;
+    // master 必须保活到子进程退出：Windows conpty 下关闭 master 句柄会立即
+    // 终止伪控制台（进程秒退、输出全丢——实测 uninstall「exit non-zero 空输出」
+    // 根因）。slave 不 drop 会向 PTY 回传输入，但一次性命令无需写 stdin；
+    // 保留 slave 不读也无害，pair 整体留到函数末尾自然 drop 最简单。
+    let _pair_alive = pair;
+
+    // 读线程：只把解码后的原始文本累积进共享缓冲（on_line 回调持有方在
+    // 主线程，规避 FnMut 跨线程 Send 约束）
+    let raw: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
+    let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let raw_for_reader = raw.clone();
+    let done_for_reader = done.clone();
+    thread::Builder::new()
+        .name("pty-once-reader".to_string())
+        .spawn(move || {
+            let mut buf = [0u8; 4096];
+            let mut decoder = crate::pty_decoder::PtyDecoder::new();
+            loop {
+                use std::io::Read;
+                match reader.read(&mut buf) {
+                    Ok(0) => {
+                        let tail = decoder.flush();
+                        if !tail.is_empty() {
+                            raw_for_reader.lock().push_str(&tail);
+                        }
+                        break;
+                    }
+                    Ok(n) => {
+                        let decoded = decoder.decode(&buf[..n]);
+                        if !decoded.is_empty() {
+                            raw_for_reader.lock().push_str(&decoded);
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            done_for_reader.store(true, std::sync::atomic::Ordering::SeqCst);
+        })
+        .context("spawn reader thread failed")?;
+
+    // 主循环：轮询共享缓冲 → 增量清洗/合并/回调；同时等待子进程退出
+    let mut merger = PtyLineMerger::default();
+    let mut consumed = 0usize;
+    let mut full = String::new();
+    let start = std::time::Instant::now();
+    let status = loop {
+        {
+            let mut r = raw.lock();
+            if r.len() > consumed {
+                let new_text = r[consumed..].to_string();
+                consumed = r.len();
+                drop(r);
+                let cleaned = strip_ansi(&new_text);
+                for (line, replace) in merger.feed(&cleaned) {
+                    full.push_str(&line);
+                    full.push('\n');
+                    on_line(&line, replace);
+                }
+            }
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {
+                if start.elapsed() >= timeout {
+                    if let Some(pid) = child.process_id() {
+                        crate::store::kill_process_tree(pid);
+                    }
+                    let _ = child.wait();
+                    let tail = tail_lines(&full, 10);
+                    anyhow::bail!(
+                        "claude {} timed out after {}s\n--- 最近输出 ---\n{}",
+                        args.join(" "),
+                        timeout.as_secs(),
+                        tail
+                    );
+                }
+                thread::sleep(Duration::from_millis(50));
+            }
+            Err(e) => anyhow::bail!("wait failed: {}", e),
+        }
+    };
+
+    // EOF 收尾：等读线程结束（通常已随子进程退出到达），刷出残留
+    for _ in 0..20 {
+        if done.load(std::sync::atomic::Ordering::SeqCst) {
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    {
+        let r = raw.lock();
+        if r.len() > consumed {
+            let cleaned = strip_ansi(&r[consumed..]);
+            for (line, replace) in merger.feed(&cleaned) {
+                full.push_str(&line);
+                full.push('\n');
+                on_line(&line, replace);
+            }
+        }
+    }
+    if let Some((line, replace)) = merger.flush() {
+        full.push_str(&line);
+        full.push('\n');
+        on_line(&line, replace);
+    }
+
+    Ok((status.success(), full))
+}
+
+#[cfg(test)]
+mod once_command_tests {
+    use super::PtyLineMerger;
+
+    // spinner 帧（\r 重绘）合并为 replace 行，终态行正常提交
+    #[test]
+    fn PtyLineMerger_Spinner重绘合并_001() {
+        let mut m = PtyLineMerger::default();
+        let out = m.feed("⠙ Adding marketplace…\r⠹ Adding marketplace…\r✔ Successfully added\n");
+        assert_eq!(out.len(), 3);
+        assert_eq!(out[0], ("⠙ Adding marketplace…".to_string(), true));
+        assert_eq!(out[1], ("⠹ Adding marketplace…".to_string(), true));
+        assert_eq!(out[2], ("✔ Successfully added".to_string(), false));
+    }
+
+    // \r\n 是普通换行（Windows shell 包装常见）
+    #[test]
+    fn PtyLineMerger_CRLF普通换行_002() {
+        let mut m = PtyLineMerger::default();
+        let out = m.feed("line1\r\nline2\r\n");
+        assert_eq!(
+            out,
+            vec![("line1".to_string(), false), ("line2".to_string(), false)]
+        );
+    }
+
+    // 跨 chunk 的半行与 \r\n 拆分都正确处理
+    #[test]
+    fn PtyLineMerger_跨chunk拆分_003() {
+        let mut m = PtyLineMerger::default();
+        let a = m.feed("hello wor");
+        assert!(a.is_empty());
+        let b = m.feed("ld\r");
+        assert_eq!(b, vec![("hello world".to_string(), true)]);
+        // \r 在上一 chunk 结尾、\n 在这一 chunk 开头 → 普通换行
+        let c = m.feed("\nnext");
+        assert_eq!(c, vec![("".to_string(), false)]);
+        let d = m.flush();
+        assert_eq!(d, Some(("next".to_string(), false)));
+    }
+}
+

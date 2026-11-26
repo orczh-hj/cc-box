@@ -2972,9 +2972,15 @@ pub(crate) fn spawnable_claude_command(path: &str) -> std::process::Command {
 /// 构造 claude 子进程：目标解析与 PTY 启动共用 `platform::cli_target`
 /// （CLAUDE.md 约定：CLI 启动目标只在单点决定，不能在别处直接写 `claude`——
 /// 用户配置了非 PATH 内的 CLI 时，子进程会找不到可执行文件）。
-fn claude_command() -> std::process::Command {
+pub(crate) fn claude_command() -> std::process::Command {
     let configured = get_app_config().ok().and_then(|c| c.claude_path);
-    let mut cmd = match crate::platform::cli_target(configured.as_deref()) {
+    claude_command_with_target(configured.as_deref())
+}
+
+/// 可注入目标解析的版本（测试传 None 强制走 PathLookup 分支，
+/// 不依赖本机 `~/.cc-box/config.json` 是否配置了 claude_path）
+pub(crate) fn claude_command_with_target(configured: Option<&str>) -> std::process::Command {
+    let mut cmd = match crate::platform::cli_target(configured) {
         crate::platform::CliTarget::Explicit(path) => {
             #[cfg(target_os = "windows")]
             {
@@ -2996,9 +3002,16 @@ fn claude_command() -> std::process::Command {
             }
             #[cfg(not(unix))]
             {
-                // Windows：CreateProcess 不能直接执行 npm 的 .cmd 包装，这里依赖
-                // PATH 能解析到可执行文件（npm 安装通常同时提供 claude.exe）。
-                crate::platform::new_command("claude")
+                // Windows：CreateProcess 不能直接执行 npm 的无扩展名 sh shim，
+                // 也不认 `.cmd`（Rust std 只补 .exe）。与终端语义对齐：先按
+                // PATH 解析出真实文件（find_executable 接受 .cmd/.bat/.exe），
+                // 再经 spawnable_claude_command 补 `.cmd`。
+                // 真实事故：PATH 只有 claude.cmd 的环境下裸名 spawn 报
+                // program not found，插件市场安装/注册全部失败。
+                match crate::platform::find_executable("claude") {
+                    Some(path) => spawnable_claude_command(&path),
+                    None => crate::platform::new_command("claude"),
+                }
             }
         }
     };
@@ -3090,7 +3103,7 @@ pub(crate) fn invalidate_plugins_list_cache() {
 }
 
 /// 检测 Git Bash 路径（Windows）
-fn detect_git_bash_path() -> Option<String> {
+pub(crate) fn detect_git_bash_path() -> Option<String> {
     if !cfg!(target_os = "windows") {
         return None;
     }
@@ -4081,6 +4094,7 @@ fn run_plugin_toggle(
     enabled: bool,
     scope: &str,
     project_path: Option<&str>,
+    ctx: Option<&CliStreamCtx>,
 ) -> Result<()> {
     validate_simple_name(plugin_id).context("Invalid plugin id")?;
     // plugin_id 可能含 @（如 paper-tool@orczh），允许这个字符
@@ -4091,7 +4105,11 @@ fn run_plugin_toggle(
     // project/local 需要项目 cwd；user 不需要
     let cwd = install_scope_cwd(scope, project_path)?;
     let result = tolerate_toggle_idempotent(
-        run_claude_command_argv(&["plugin", action, plugin_id, "-s", scope], cwd.as_deref()),
+        run_claude_command_ctx(
+            &["plugin", action, plugin_id, "-s", scope],
+            cwd.as_deref(),
+            ctx,
+        ),
         enabled,
     );
     // 无论成败都失效缓存：CLI 可能已部分写入，且失败后下次读取必须反映真实状态
@@ -4103,8 +4121,18 @@ fn run_plugin_toggle(
 }
 
 /// 切换 plugin 启用状态（调用 claude plugin enable/disable）
-pub fn set_plugin_enabled(plugin_id: &str, enabled: bool) -> Result<()> {
-    run_plugin_toggle(plugin_id, enabled, "user", None)
+pub fn set_plugin_enabled(
+    plugin_id: &str,
+    enabled: bool,
+    action_id: Option<String>,
+) -> Result<()> {
+    run_plugin_toggle(
+        plugin_id,
+        enabled,
+        "user",
+        None,
+        action_id.map(|id| CliStreamCtx { action_id: id, step: "toggle".into() }).as_ref(),
+    )
 }
 
 /// 切换 plugin 启用状态（带作用域）：project/local 安装绑定项目目录——CLI 的
@@ -4115,8 +4143,15 @@ pub fn set_plugin_enabled_scoped(
     enabled: bool,
     scope: Option<&str>,
     project_path: Option<&str>,
+    action_id: Option<String>,
 ) -> Result<()> {
-    run_plugin_toggle(plugin_id, enabled, scope.unwrap_or("user"), project_path)
+    run_plugin_toggle(
+        plugin_id,
+        enabled,
+        scope.unwrap_or("user"),
+        project_path,
+        action_id.map(|id| CliStreamCtx { action_id: id, step: "toggle".into() }).as_ref(),
+    )
 }
 
 // ---------- Plugin 市场（浏览 + 安装管理，全部包装 claude plugin CLI）----------
@@ -4200,7 +4235,7 @@ pub(crate) fn run_command_parts_with_timeout(
 
 /// 终止进程树：Windows 上 cmd/npm 等 wrapper 会派生孙进程（claude → node），
 /// 只 kill 外层会留下持有管道的孤儿——用 taskkill /T 连树杀；Unix 直接 SIGKILL。
-fn kill_process_tree(pid: u32) {
+pub(crate) fn kill_process_tree(pid: u32) {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -4227,6 +4262,67 @@ fn run_claude_command_argv(args: &[&str], cwd: Option<&Path>) -> Result<String> 
     }
     run_command_with_timeout(&mut cmd, CLI_MARKET_TIMEOUT)
         .with_context(|| format!("claude {} failed", args.join(" ")))
+}
+
+// ---------- 市场命令流式执行（PTY + plugin-cli-output 事件） ----------
+//
+// 市场操作可达 120s 且唯一实时信息源是 CLI 的 TTY 渲染（管道下 Node stdout
+// 块缓冲，输出进程退出才到——实测）。经 run_claude_pty_command 执行并把清洗
+// 后的行实时 emit 给前端；action_id 由前端生成传入，None 时静默退回管道执行
+// （旧远程桌面/无 UI 场景不 emit）。
+
+/// 一次市场动作的流式上下文：actionId 定位前端输出区，step 标注当前 CLI 段
+#[derive(Clone, Debug)]
+pub(crate) struct CliStreamCtx {
+    pub(crate) action_id: String,
+    pub(crate) step: String,
+}
+
+/// emit 一行输出（无全局句柄——如测试环境——静默跳过）
+fn emit_cli_line(ctx: &CliStreamCtx, text: &str, replace: bool) {
+    use serde_json::json;
+    if let Some(app) = crate::gui_app_handle() {
+        crate::events::emit_all(
+            app,
+            crate::events::names::PLUGIN_CLI_OUTPUT,
+            json!({
+                "actionId": ctx.action_id,
+                "step": ctx.step,
+                "text": text,
+                "replace": replace,
+            }),
+        );
+    }
+}
+
+/// 带流式上下文的 claude CLI 调用：有 ctx 走 PTY 流式（实时 emit），否则
+/// 退回管道一次性执行。成败判定与错误形态与 run_claude_command_argv 一致。
+fn run_claude_command_ctx(
+    args: &[&str],
+    cwd: Option<&Path>,
+    ctx: Option<&CliStreamCtx>,
+) -> Result<String> {
+    let Some(ctx) = ctx else {
+        return run_claude_command_argv(args, cwd);
+    };
+    let ctx = ctx.clone();
+    let (success, output) = crate::pty::run_claude_pty_command(
+        args,
+        cwd,
+        CLI_MARKET_TIMEOUT,
+        |text, replace| emit_cli_line(&ctx, text, replace),
+    )
+    .with_context(|| format!("claude {} failed", args.join(" ")))?;
+    if success {
+        Ok(output)
+    } else {
+        // PTY 下 stdout/stderr 合流，全部在 output 里
+        bail!(
+            "claude {} failed (exit non-zero): {}",
+            args.join(" "),
+            output.trim()
+        )
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -6135,7 +6231,11 @@ pub(crate) const CCBOX_MARKET_NAME: &str = "ccbox-market";
 /// 内置官方市场兜底来源（首选 OSS 推荐清单中的当前值）
 pub(crate) const CCBOX_MARKET_SOURCE: &str = "https://gitee.com/orczh/ccbox-market.git";
 
-pub fn remove_plugin_marketplace(name: &str, also_unregister: bool) -> Result<()> {
+pub fn remove_plugin_marketplace(
+    name: &str,
+    also_unregister: bool,
+    action_id: Option<String>,
+) -> Result<()> {
     validate_simple_name(name)?;
     // ccbox-market 是 CC-Box 官方精选来源：不可移除也不可卸载
     if name.eq_ignore_ascii_case(CCBOX_MARKET_NAME) {
@@ -6145,8 +6245,11 @@ pub fn remove_plugin_marketplace(name: &str, also_unregister: bool) -> Result<()
         if !market_registered(name)? {
             bail!("市场 {} 未注册", name);
         }
+        let ctx_opt = action_id
+            .map(|id| CliStreamCtx { action_id: id, step: "market-remove".into() });
         let res =
-            run_claude_command_argv(&["plugin", "marketplace", "remove", name], None).map(|_| ());
+            run_claude_command_ctx(&["plugin", "marketplace", "remove", name], None, ctx_opt.as_ref())
+                .map(|_| ());
         // 注销影响 plugins list 视角（该市场插件随之不可用）——级联失效两份缓存
         invalidate_plugins_list_cache();
         return res;
@@ -6171,16 +6274,18 @@ pub fn remove_plugin_marketplace(name: &str, also_unregister: bool) -> Result<()
 
 /// 注册该市场（「卸载市场」的逆操作）：显式 `claude plugin marketplace add <source>`。
 /// 市场须在 CC-Box 列表中（来源可查），已注册时幂等成功。
-pub fn register_plugin_marketplace(name: &str) -> Result<()> {
+pub fn register_plugin_marketplace(name: &str, action_id: Option<String>) -> Result<()> {
     validate_simple_name(name)?;
     if market_registered(name)? {
         return Ok(());
     }
     let source = custom_market_source(name)
         .context(format!("市场 {} 不在列表中，无法获取来源", name))?;
+    let ctx_opt = action_id
+        .map(|id| CliStreamCtx { action_id: id, step: "register-market".into() });
     // 失败详情落日志：注册失败的根因（CLI spawn/git clone 报错原文）只返回前端
     // toast，日志侧此前无痕迹
-    let add_res = run_claude_command_argv(&["plugin", "marketplace", "add", &source], None);
+    let add_res = run_claude_command_ctx(&["plugin", "marketplace", "add", &source], None, ctx_opt.as_ref());
     if let Err(e) = &add_res {
         log::warn!("[PluginMarket] register marketplace {} failed: {:?}", source, e);
     }
@@ -6195,10 +6300,13 @@ pub fn register_plugin_marketplace(name: &str) -> Result<()> {
 
 /// 刷新市场：已注册 → Claude `marketplace update`（git pull）；
 /// 未注册（仅列表）→ 强制重拉 CC-Box 浏览缓存。
-pub fn refresh_plugin_marketplace(name: &str) -> Result<()> {
+pub fn refresh_plugin_marketplace(name: &str, action_id: Option<String>) -> Result<()> {
     validate_simple_name(name)?;
+    let ctx_opt = action_id
+        .map(|id| CliStreamCtx { action_id: id, step: "market-update".into() });
     let res = if market_registered(name)? {
-        run_claude_command_argv(&["plugin", "marketplace", "update", name], None).map(|_| ())
+        run_claude_command_ctx(&["plugin", "marketplace", "update", name], None, ctx_opt.as_ref())
+            .map(|_| ())
     } else if let Some(source) = custom_market_source(name) {
         refresh_market_browse_copy(&source).map(|_| ())
     } else {
@@ -6215,6 +6323,7 @@ fn install_plugin_lifecycle(
     scope: &str,
     project_path: Option<&str>,
     market_source: Option<&str>,
+    ctx: Option<&CliStreamCtx>,
 ) -> Result<()> {
     validate_plugin_ref(plugin_ref)?;
     validate_install_scope(scope)?;
@@ -6232,7 +6341,11 @@ fn install_plugin_lifecycle(
                     ))?;
                 // 失败详情落日志：此路径 `?` 早退不经过主命令的失败日志点
                 // （曾致用户环境 add 持续失败而日志无任何痕迹）
-                let add_res = run_claude_command_argv(&["plugin", "marketplace", "add", &source], None);
+                let add_res = run_claude_command_ctx(
+                    &["plugin", "marketplace", "add", &source],
+                    None,
+                    ctx.map(|c| CliStreamCtx { step: "register-market".into(), ..c.clone() }).as_ref(),
+                );
                 if let Err(e) = &add_res {
                     log::warn!(
                         "[PluginMarket] auto-register marketplace {} failed: {:?}",
@@ -6244,9 +6357,10 @@ fn install_plugin_lifecycle(
             }
         }
     }
-    let res = run_claude_command_argv(
+    let res = run_claude_command_ctx(
         &["plugin", action, plugin_ref, "-s", scope],
         cwd.as_deref(),
+        ctx,
     );
     // 无论成败都失效缓存：CLI 可能已部分写入
     invalidate_plugins_list_cache();
@@ -6262,9 +6376,10 @@ fn install_plugin_lifecycle(
     if action == "install" {
         // CLI 已启用时报 already enabled（幂等当失败）——目标态即成功（共用宽容函数）
         let enable_res = tolerate_toggle_idempotent(
-            run_claude_command_argv(
+            run_claude_command_ctx(
                 &["plugin", "enable", plugin_ref, "-s", scope],
                 cwd.as_deref(),
+                ctx.map(|c| CliStreamCtx { step: "enable".into(), ..c.clone() }).as_ref(),
             ),
             true,
         );
@@ -6286,15 +6401,32 @@ pub fn install_plugin(
     scope: &str,
     project_path: Option<&str>,
     market_source: Option<&str>,
+    action_id: Option<String>,
 ) -> Result<()> {
-    install_plugin_lifecycle("install", plugin_ref, scope, project_path, market_source)
+    let ctx = action_id
+        .map(|id| CliStreamCtx { action_id: id, step: "install".to_string() });
+    install_plugin_lifecycle("install", plugin_ref, scope, project_path, market_source, ctx.as_ref())
 }
 
-pub fn uninstall_plugin(plugin_ref: &str, scope: &str, project_path: Option<&str>) -> Result<()> {
-    install_plugin_lifecycle("uninstall", plugin_ref, scope, project_path, None)
+pub fn uninstall_plugin(
+    plugin_ref: &str,
+    scope: &str,
+    project_path: Option<&str>,
+    action_id: Option<String>,
+) -> Result<()> {
+    let ctx = action_id
+        .map(|id| CliStreamCtx { action_id: id, step: "uninstall".into() });
+    install_plugin_lifecycle("uninstall", plugin_ref, scope, project_path, None, ctx.as_ref())
 }
 
-pub fn update_plugin(plugin_ref: &str, scope: &str, project_path: Option<&str>) -> Result<()> {
-    install_plugin_lifecycle("update", plugin_ref, scope, project_path, None)
+pub fn update_plugin(
+    plugin_ref: &str,
+    scope: &str,
+    project_path: Option<&str>,
+    action_id: Option<String>,
+) -> Result<()> {
+    let ctx = action_id
+        .map(|id| CliStreamCtx { action_id: id, step: "update".into() });
+    install_plugin_lifecycle("update", plugin_ref, scope, project_path, None, ctx.as_ref())
 }
 

@@ -36,6 +36,12 @@ use std::sync::{LazyLock, Mutex, OnceLock};
 
 /// GUI 主进程句柄：Broker 要求关闭/重启窗口时由 broker_client 调用。
 static GUI_APP_HANDLE: OnceLock<tauri::AppHandle> = OnceLock::new();
+
+/// 全局句柄只读访问（无窗口的测试环境为 None）：后台任务（如插件市场
+/// CLI 流式输出）emit 桌面事件时使用，免得命令签名处处携带 AppHandle
+pub(crate) fn gui_app_handle() -> Option<&'static tauri::AppHandle> {
+    GUI_APP_HANDLE.get()
+}
 /// 新建窗口注册后 Broker 很快下发 openRemote；前端可能尚未挂载监听。
 /// 记录最近一次请求，前端启动时取走（5s 内有效）。
 static PENDING_OPEN_REMOTE_MS: AtomicU64 = AtomicU64::new(0);

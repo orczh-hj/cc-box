@@ -367,6 +367,8 @@
             <span class="busy-text">{{ busyLabel }}</span>
             <span class="busy-sec">{{ t('marketBusyElapsed', { s: busySeconds }) }}</span>
           </div>
+          <!-- CLI 实时输出（PTY 流式上抛；成功 2s 后收起，失败保持展开供查看复制） -->
+          <PluginCliOutput v-if="cliLines.length" :lines="cliLines" />
         </div>
       </div>
     </Transition>
@@ -396,6 +398,8 @@ import { useSidebarStore } from '@/stores/sidebar'
 import { uiConfirm } from '@/composables/useConfirm'
 import { useIsMobile, useMediaQuery } from '@/composables/useMediaQuery'
 import { CCBOX_MARKET, filterPlugins, isIconUrl, orderMarkets } from '../editor/model'
+import PluginCliOutput from './PluginCliOutput.vue'
+import type { PluginCliOutputPayload } from '@/api/tauri'
 
 const { t } = useI18n()
 const appStore = useAppStore()
@@ -668,7 +672,7 @@ function selectByName(candidate: string) {
 async function refreshSelected() {
   const target = selected.value?.name
   if (!target) return
-  await runAction('market', 'market:refresh', () => refreshPluginMarketplace(target))
+  await runAction('market', 'market:refresh', id => refreshPluginMarketplace(target, id))
 }
 
 /** 移除该市场 = 仅从 CC-Box 列表移除（含浏览缓存；不动 Claude 注册） */
@@ -684,13 +688,13 @@ async function removeMarket(m: MarketplaceInfo) {
 async function registerMarket(m: MarketplaceInfo) {
   if (m.registered) return
   if (!(await uiConfirm(t('marketRegisterConfirm', { name: m.name })))) return
-  await runAction('market', 'market:register', () => registerPluginMarketplace(m.name))
+  await runAction('market', 'market:register', id => registerPluginMarketplace(m.name, id))
 }
 
 /** 卸载市场 = 从 Claude 注销（列表条目保留，仍可浏览） */
 async function unregisterMarket(m: MarketplaceInfo) {
   if (!(await uiConfirm(t('marketRemoveConfirm', { name: m.name }), { danger: true }))) return
-  await runAction('market', 'market:unregister', () => removePluginMarketplace(m.name, true))
+  await runAction('market', 'market:unregister', id => removePluginMarketplace(m.name, true, id))
 }
 
 function scopeArg(): string | undefined {
@@ -715,8 +719,8 @@ async function install(p: MarketplacePluginEntry) {
   const ref = `${p.name}@${selected.value.name}`
   // 未注册市场：安装时后端按 market_source 自动注册到 Claude
   const marketSource = selected.value.registered ? undefined : selected.value.source
-  const ok = await runAction('plugin', pluginActionKey(p, 'install'), () =>
-    installPlugin(ref, scope.value, scopeArg(), marketSource)
+  const ok = await runAction('plugin', pluginActionKey(p, 'install'), id =>
+    installPlugin(ref, scope.value, scopeArg(), marketSource, id)
   )
   if (ok && appStore.cwd) sidebarStore.loadPlugins(appStore.cwd, { silent: true })
 }
@@ -726,8 +730,8 @@ async function uninstall(p: MarketplacePluginEntry) {
   if (!(await uiConfirm(t('marketUninstallConfirm', { name: p.name }), { danger: true, okText: t('marketUninstall') }))) return
   const ref = `${p.name}@${selected.value.name}`
   const { scope: s, projectPath } = matchedTarget(p)
-  const ok = await runAction('plugin', pluginActionKey(p, 'uninstall'), () =>
-    uninstallPlugin(ref, s, projectPath)
+  const ok = await runAction('plugin', pluginActionKey(p, 'uninstall'), id =>
+    uninstallPlugin(ref, s, projectPath, id)
   )
   if (ok && appStore.cwd) sidebarStore.loadPlugins(appStore.cwd, { silent: true })
 }
@@ -736,8 +740,8 @@ async function updateEntry(p: MarketplacePluginEntry) {
   if (!selected.value) return
   const ref = `${p.name}@${selected.value.name}`
   const { scope: s, projectPath } = matchedTarget(p)
-  await runAction('plugin', pluginActionKey(p, 'update'), () =>
-    updatePlugin(ref, s, projectPath)
+  await runAction('plugin', pluginActionKey(p, 'update'), id =>
+    updatePlugin(ref, s, projectPath, id)
   )
 }
 
@@ -747,25 +751,31 @@ async function toggleEnabled(p: MarketplacePluginEntry) {
   const ref = `${p.name}@${selected.value.name}`
   const next = !p.enabled
   const { scope: s, projectPath } = matchedTarget(p)
-  await runAction('plugin', pluginActionKey(p, 'toggle'), () =>
-    setPluginEnabled(ref, next, s, projectPath)
+  await runAction('plugin', pluginActionKey(p, 'toggle'), id =>
+    setPluginEnabled(ref, next, s, projectPath, id)
   )
   if (appStore.cwd) sidebarStore.loadPlugins(appStore.cwd, { silent: true })
 }
 
-/** 统一动作包装：单动作忙标记 + 错误归属 + 完成后重拉市场列表 */
+/** 统一动作包装：单动作忙标记 + 错误归属 + 完成后重拉市场列表；
+ * 同时生成 actionId 供后端流式上抛 CLI 输出（成功 2s 后收起输出区，失败保留） */
 async function runAction(
   scopeOfError: 'add' | 'plugin' | 'market',
   key: string,
-  fn: () => Promise<unknown>
+  fn: (actionId?: string) => Promise<unknown>
 ): Promise<boolean> {
   if (busyKey.value) return false
   busyKey.value = key
   actionError.value = ''
   errorScope.value = scopeOfError
+  const actionId = `cli-${Date.now()}-${Math.floor(Math.random() * 1e6)}`
+  cliActionId.value = actionId
+  cliLines.value = []
+  if (cliHideTimer) clearTimeout(cliHideTimer)
   try {
-    await fn()
+    await fn(actionId)
     await fetchMarkets()
+    cliHideTimer = setTimeout(() => (cliLines.value = []), 2000)
     return true
   } catch (e) {
     actionError.value = friendlyError(e)
@@ -774,6 +784,36 @@ async function runAction(
     busyKey.value = ''
   }
 }
+
+// ---------- CLI 实时输出（plugin-cli-output 事件 → 输出区行） ----------
+const cliLines = ref<string[]>([])
+const cliActionId = ref('')
+let cliHideTimer: ReturnType<typeof setTimeout> | undefined
+let unlistenCli: Awaited<ReturnType<typeof transport.listen>> | undefined
+
+onMounted(async () => {
+  unlistenCli = await transport.listen<PluginCliOutputPayload>(
+    'plugin-cli-output',
+    ({ actionId, text, replace }) => {
+      if (actionId !== cliActionId.value) return
+      // replace=true：CLI spinner 的 \r 重绘——替换最后一行而非追加（不刷屏）
+      if (replace && cliLines.value.length) {
+        cliLines.value.splice(cliLines.value.length - 1, 1, text)
+      } else {
+        cliLines.value.push(text)
+      }
+      // 上限 200 行：极端刷屏时丢最旧的（错误原文在尾部，保留策略偏尾部）
+      if (cliLines.value.length > 200) {
+        cliLines.value.splice(0, cliLines.value.length - 200)
+      }
+    }
+  )
+})
+
+onUnmounted(() => {
+  void unlistenCli?.()
+  if (cliHideTimer) clearTimeout(cliHideTimer)
+})
 </script>
 
 <style scoped>

@@ -233,6 +233,7 @@ npm run release -- --bump patch --notes "### Features\n- Add feature"
 - **删除一律彻底删**：四类资源二次确认后直接移除并清理 disabled 备份（可逆性由开关承担）；确认框统一走前端 `uiConfirm`（`ConfirmDialog.vue`，App.vue 挂载一份），禁止 `window.confirm`。插件卸载本就是真实卸载（CLI）。
 - **公开仓库 `C:/ccbox-plugins`（Gitee `ccbox-market`）面向公开读者**：README 与内容**不写 CC-Box 侧实现细节**（精选字段等约定只记录在本仓库文档）。
 - 市场缓存/懒注册/排序精选字段/组件明细/刷新分流等全部细节 → [docs/extensions.md](docs/extensions.md)「Plugin 市场」
+- **市场 CLI 操作实时输出**：带 `action_id`（前端生成）的市场/插件 CLI 命令走 `run_claude_pty_command`（隐藏 PTY——管道下 CLI stdout 块缓冲，TTY 渲染是唯一实时信息源），行清洗后经 `plugin-cli-output` 事件推送；`action_id=None` 退回管道执行不 emit（旧远程桌面兼容）→ [docs/extensions.md](docs/extensions.md)「CLI 输出实时呈现」
 
 ### 新增功能检查清单（速查）
 
@@ -243,7 +244,7 @@ UI 已浏览器化（一套 UI 走桌面 Tauri / 宽屏浏览器 / 手机浏览�
 - **新事件** → `events.rs` 常量 + `emit_all`；远程会话类事件用 `remote_state::emit_event` / `emit_event_ex` / `emit_desktop_only`
 - **新协议消息** → `remote/protocol/` 四处同步：crate 定义 → protocol.ts → samples/ → remote/docs/protocol.md
 - **CLI 启动参数** → 只改 `pty::build_claude_args`，勿在前端另写一份
-- **CLI 进程启动** → 目标只由 `platform::cli_target()` 决定（配置可运行 → 完整路径；否则 PathLookup → Unix execvp 裸名 / Windows Git Bash `-c` 裸名）；Unix 不经 shell 中转；遵守 spawn「返回即存活」契约。**非 PTY 子进程（`claude_command`）注意**：直接 CreateProcess，无扩展名 npm sh shim 不可执行——`spawnable_claude_command` 优先取同目录 `.cmd`（踩坑与错误链要求 → [docs/terminal-integration.md](docs/terminal-integration.md)「非 PTY 子进程 spawn」）
+- **CLI 进程启动** → 目标只由 `platform::cli_target()` 决定（配置可运行 → 完整路径；否则 PathLookup → Unix execvp 裸名 / Windows Git Bash `-c` 裸名）；Unix 不经 shell 中转；遵守 spawn「返回即存活」契约。**非 PTY 子进程（`claude_command`）注意**：直接 CreateProcess，无扩展名 npm sh shim 不可执行、Rust std 只补 `.exe`——**Explicit 与 PathLookup 两个分支都必须**经 `find_executable` 解析 + `spawnable_claude_command` 优先取同目录 `.cmd`（PathLookup 曾漏接致「PATH 只有 claude.cmd 的用户」市场安装全部 program not found；守卫测试 `tests/claude_command_spawn.rs`。踩坑与错误链要求 → [docs/terminal-integration.md](docs/terminal-integration.md)「非 PTY 子进程 spawn」）
 - **前端 invoke/listen** → 一律经 `src/api/transport.ts`（组件禁止直接 import @tauri-apps/api）
 
 守卫测试、背景与踩坑说明 → [docs/development.md](docs/development.md)「新增功能检查清单（完整版）」
