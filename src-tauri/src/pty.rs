@@ -116,7 +116,14 @@ pub(crate) fn strip_ansi(s: &str) -> String {
                     }
                 }
             }
-            // 单字符转义（ESC c 等）：跳过
+            // 单字符转义（ESC c 等）：跳过 ESC 后的这一个字符
+            Some(c2 @ ('(' | ')')) => {
+                // SCS 字符集选择（ESC ( B / ESC ) 0 等）：序列共三字节，
+                // 再消费一个字符——否则设计字符 'B' 会残留为孤立字符
+                // （实测 uninstall 输出末尾孤立「B」的根因）
+                let _ = c2;
+                let _ = chars.next();
+            }
             Some(_) => {}
             None => break,
         }
@@ -891,52 +898,184 @@ pub fn get_pty_manager() -> Option<Arc<PtyManager>> {
 //
 // 市场命令（install/uninstall/update/marketplace add…）耗时可达 120s 且唯一
 // 实时信息源是 CLI 的 TTY 渲染（spinner/状态行）——管道下 Node stdout 块缓冲，
-// 输出到进程退出才一帧到达（实测）。本执行器把 CLI 跑在隐藏 PTY 里，输出
-// 实时清洗（strip_ansi + \r 合并）后经回调上抛，调用方决定 emit 什么事件。
+// 输出到进程退出才一帧到达（实测）。本执行器把 CLI 跑在隐藏 PTY 里，输出经
+// 字符矩阵渲染（PtyScreen）还原为可读文本，再经回调上抛。
+//
+// 为什么必须渲染矩阵而不是线性清洗：CLI 的 TUI 层（Ink 类）在全屏模式下用
+// 「光标绝对定位（ESC[r;cH）+ 光标右移代替空格（ESC[nC）」重绘，实测连词间
+// 空格都是 ESC[1C 画的——任何线性 strip/merge 都还原不了，只有带光标状态的
+// 字符矩阵能正确呈现（CI=1 试图让 CLI 退化为静态输出，实测无效）。
 
-/// 行合并器：把 PTY 文本流按行切分并处理 `\r` 重绘语义。
-/// - `\n` / `\r\n` → 提交一行 (line, replace=false)
-/// - 裸 `\r`（spinner 重绘）→ 提交 (line, replace=true)，前端替换上一行
-#[derive(Default)]
-pub(crate) struct PtyLineMerger {
-    pending: String,
-    /// 上一字符是否为 `\r`（跨 chunk 判定 `\r\n`）
-    saw_cr: bool,
+/// 输出事件：Line = 追加一行；Screen = 整屏重置（TUI 重绘帧，前端清空重建）
+pub(crate) enum PtyOut {
+    Line(String),
+    Screen(String),
 }
 
-impl PtyLineMerger {
-    pub(crate) fn feed(&mut self, chunk: &str) -> Vec<(String, bool)> {
-        let mut out = Vec::new();
-        for c in chunk.chars() {
-            if self.saw_cr {
-                self.saw_cr = false;
-                if c == '\n' {
-                    out.push((std::mem::take(&mut self.pending), false));
-                    continue;
-                }
-                if !self.pending.is_empty() {
-                    out.push((std::mem::take(&mut self.pending), true));
-                }
-            }
-            match c {
-                '\n' => out.push((std::mem::take(&mut self.pending), false)),
-                '\r' => self.saw_cr = true,
-                _ => self.pending.push(c),
-            }
+/// mini 终端屏幕：80×24 字符矩阵 + 光标，渲染覆盖 CLI 实测用到的序列子集
+/// （CUP 定位 / CUF·CUB·CUU·CUD 移动 / ED·EL 清除 / \r \n / 可见字符 / OSC /
+/// 私有序列忽略）。 unwritten 格子即空格——ESC[nC「画空格」由提取时自然成立。
+/// feed 是跨 chunk 持久的状态机：转义序列拆在两次 feed 之间也能正确续解析
+/// （实测 chunk 边界切在 CSI 中间的情况真实存在）。
+pub(crate) struct PtyScreen {
+    cols: usize,
+    rows: usize,
+    grid: Vec<char>,
+    row: usize,
+    col: usize,
+    /// 解析状态（跨 feed 持久）
+    st: ParseSt,
+}
+
+enum ParseSt {
+    Plain,
+    /// 已见 ESC
+    Esc,
+    /// 已见 ESC [，累积参数直到终结字节
+    Csi(String),
+    /// OSC（ESC ]）直到 BEL 或 ESC \
+    Osc,
+    /// OSC 中已见 ESC（等待 \）
+    OscEsc,
+    /// SCS（ESC ( / ESC )）：再消费一个字符
+    Scs,
+}
+
+impl Default for PtyScreen {
+    fn default() -> Self {
+        Self::new(80, 24)
+    }
+}
+
+impl PtyScreen {
+    pub(crate) fn new(cols: usize, rows: usize) -> Self {
+        Self {
+            cols,
+            rows,
+            grid: vec![' '; cols * rows],
+            row: 0,
+            col: 0,
+            st: ParseSt::Plain,
         }
-        if self.saw_cr && !self.pending.is_empty() {
-            out.push((std::mem::take(&mut self.pending), true));
-            self.saw_cr = false;
-        }
-        out
     }
 
-    /// EOF 时刷出残留（不足一行也算一行）
-    pub(crate) fn flush(&mut self) -> Option<(String, bool)> {
-        if self.pending.is_empty() {
-            return None;
+    fn clear_all(&mut self) {
+        self.grid.fill(' ');
+    }
+
+    fn clear_row_tail(&mut self) {
+        // EL：从光标清到本行行尾
+        for i in (self.row * self.cols + self.col)..((self.row + 1) * self.cols) {
+            self.grid[i] = ' ';
         }
-        Some((std::mem::take(&mut self.pending), false))
+    }
+
+    fn put(&mut self, c: char) {
+        if self.col >= self.cols {
+            self.col = 0;
+            self.newline();
+        }
+        self.grid[self.row * self.cols + self.col] = c;
+        self.col += 1;
+    }
+
+    fn newline(&mut self) {
+        self.row += 1;
+        if self.row >= self.rows {
+            // 底部滚动：丢首行，底部开新行
+            self.grid.drain(..self.cols);
+            self.grid.resize(self.cols * self.rows, ' ');
+            self.row = self.rows - 1;
+        }
+    }
+
+    /// 渲染一段 PTY 文本（已解码，可能含 ANSI 序列）
+    pub(crate) fn feed(&mut self, s: &str) {
+        for c in s.chars() {
+            match std::mem::replace(&mut self.st, ParseSt::Plain) {
+                ParseSt::Plain => match c {
+                    '\u{1b}' => self.st = ParseSt::Esc,
+                    '\r' => self.col = 0,
+                    '\n' => self.newline(),
+                    '\u{8}' => self.col = self.col.saturating_sub(1), // BS
+                    '\t' => {
+                        let next = (self.col / 8 + 1) * 8;
+                        self.col = next.min(self.cols - 1);
+                    }
+                    c if (c as u32) < 32 => {} // 其余控制字符忽略
+                    c => self.put(c),
+                },
+                ParseSt::Esc => match c {
+                    '[' => self.st = ParseSt::Csi(String::new()),
+                    ']' => self.st = ParseSt::Osc,
+                    '(' | ')' => self.st = ParseSt::Scs,
+                    _ => {} // 其它单字符转义（ESC c 等）忽略，回 Plain
+                },
+                ParseSt::Csi(mut params) => {
+                    if ('@'..='~').contains(&c) {
+                        self.apply_csi(&params, c);
+                    } else {
+                        params.push(c);
+                        self.st = ParseSt::Csi(params);
+                    }
+                }
+                ParseSt::Osc => match c {
+                    '\u{7}' => {} // BEL 终结，回 Plain（replace 已发生）
+                    '\u{1b}' => self.st = ParseSt::OscEsc,
+                    _ => self.st = ParseSt::Osc,
+                },
+                ParseSt::OscEsc => {
+                    // ESC \（ST）终结；其它字符回 Plain（容错）
+                }
+                ParseSt::Scs => {} // 设计符已消费，回 Plain
+            }
+        }
+    }
+
+    fn apply_csi(&mut self, params: &str, final_byte: char) {
+        // 跳过私有标记（?25l/h 等）
+        let nums: Vec<usize> = params
+            .trim_start_matches(['?', '>', '<', '='])
+            .split(';')
+            .map(|p| p.parse::<usize>().unwrap_or(1))
+            .collect();
+        match final_byte {
+            'H' | 'f' => {
+                let r = nums.first().copied().unwrap_or(1).max(1);
+                let c = nums.get(1).copied().unwrap_or(1).max(1);
+                self.row = (r - 1).min(self.rows - 1);
+                self.col = (c - 1).min(self.cols - 1);
+            }
+            'A' => self.row = self.row.saturating_sub(nums.first().copied().unwrap_or(1)),
+            'B' => self.row = (self.row + nums.first().copied().unwrap_or(1)).min(self.rows - 1),
+            'C' => self.col = (self.col + nums.first().copied().unwrap_or(1)).min(self.cols - 1),
+            'D' => self.col = self.col.saturating_sub(nums.first().copied().unwrap_or(1)),
+            'G' => self.col = (nums.first().copied().unwrap_or(1).max(1) - 1).min(self.cols - 1),
+            'd' => self.row = (nums.first().copied().unwrap_or(1).max(1) - 1).min(self.rows - 1),
+            'J' => {
+                // ED：2（或空）= 全屏；0/1（局部清除）按全屏近似——TUI 清屏帧
+                let mode = params.trim_start_matches('?');
+                if mode.is_empty() || mode == "0" || mode == "2" {
+                    self.clear_all();
+                }
+            }
+            'K' => self.clear_row_tail(),
+            _ => {} // m/l/h/s/u 等忽略
+        }
+    }
+
+    /// 当前屏幕文本（行尾空格去除；全空行跳过）
+    pub(crate) fn dump_lines(&self) -> Vec<String> {
+        (0..self.rows)
+            .map(|r| {
+                self.grid[r * self.cols..(r + 1) * self.cols]
+                    .iter()
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .filter(|l| !l.is_empty())
+            .collect()
     }
 }
 
@@ -961,15 +1100,16 @@ fn tail_lines(text: &str, n: usize) -> String {
 
 /// 一次性 PTY 执行 claude CLI。
 ///
-/// 输出实时清洗后经 `on_line(text, replace)` 上抛（在调用方线程被调用），
-/// 同时累积全量清洗文本返回。spawn 失败/超时返回 Err；非零退出返回
-/// `Ok((false, output))`（由调用方按现有语义判失败）。
+/// 输出渲染进字符矩阵（PtyScreen）后按帧 diff 经 `on_out` 上抛（调用方线程）：
+/// 新增行 → `PtyOut::Line`；整屏重绘 → `PtyOut::Screen`（全文重置）。
+/// 返回值 full 为最终屏幕帧文本。spawn 失败/超时返回 Err；非零退出返回
+/// `Ok((false, full))`（由调用方按现有语义判失败）。
 /// 不注册 instances/writers、不发 pty-* 事件——与交互终端完全隔离。
 pub(crate) fn run_claude_pty_command(
     args: &[&str],
     cwd: Option<&Path>,
     timeout: Duration,
-    mut on_line: impl FnMut(&str, bool),
+    mut on_line: impl FnMut(PtyOut),
 ) -> anyhow::Result<(bool, String)> {
     // 目标解析与 spawn_claude 同源（platform::cli_target 单点）：显式配置用
     // 完整路径；PathLookup Windows 用裸名让 shell 做 PATHEXT 查找，Unix 解析
@@ -1006,7 +1146,10 @@ pub(crate) fn run_claude_pty_command(
                     s
                 }
                 None => {
-                    let mut s = claude_cmd;
+                    // PowerShell 回退：& 调用操作符必须存在——否则裸字符串
+                    // 字面量后跟参数会被解析为「意外标记」（实测 ParserError）
+                    let mut s = String::from("& ");
+                    s.push_str(&claude_cmd);
                     for a in args {
                         s.push(' ');
                         s.push_str(&ps_quote(a));
@@ -1045,6 +1188,11 @@ pub(crate) fn run_claude_pty_command(
     }
     cmd.env("TERM", "xterm-256color");
     cmd.env("COLORTERM", "truecolor");
+    // CI=1：Ink 类 TUI（claude CLI 的渲染层）读到后禁用全屏交互渲染与
+    // spinner 动画，输出退化为静态纯文本——PTY 下 CLI 会用「光标右移画
+    // 空格 + 绝对定位重绘」（实测 ESC[1C 代替词间空格），线性清洗根本
+    // 还原不了；静态文本对输出区展示才是可读形态
+    cmd.env("CI", "1");
     if let Ok(config) = crate::store::get_app_config() {
         if let Some(vars) = config.claude_env_vars {
             for (k, v) in &vars {
@@ -1101,11 +1249,44 @@ pub(crate) fn run_claude_pty_command(
         })
         .context("spawn reader thread failed")?;
 
-    // 主循环：轮询共享缓冲 → 增量清洗/合并/回调；同时等待子进程退出
-    let mut merger = PtyLineMerger::default();
+    // 主循环：轮询共享缓冲 → 渲染进字符矩阵 → 屏幕帧 diff 回调；同时等待子进程
+    let debug_raw = std::env::var("CCBOX_DEBUG_PTY_RAW").is_ok();
+    let mut screen = PtyScreen::default();
+    let mut prev_lines: Vec<String> = Vec::new();
     let mut consumed = 0usize;
     let mut full = String::new();
+    let mut have_full = false;
     let start = std::time::Instant::now();
+
+    // 渲染并 diff：新帧以上一帧为前缀 → 只发新增行；否则发整屏重置帧
+    // （TUI 每帧整屏重绘/绝对定位改写，线性行 diff 只能表达这两种形态）
+    let mut render_diff = |screen: &mut PtyScreen,
+                           text: &str,
+                           prev: &mut Vec<String>,
+                           full: &mut String,
+                           have_full: &mut bool,
+                           on_line: &mut dyn FnMut(PtyOut)| {
+        screen.feed(text);
+        let lines = screen.dump_lines();
+        let is_prefix = lines.len() >= prev.len()
+            && lines[..prev.len()] == prev[..]
+            && !(prev.is_empty() && lines.is_empty());
+        if is_prefix {
+            for line in &lines[prev.len()..] {
+                on_line(PtyOut::Line(line.clone()));
+            }
+        } else {
+            on_line(PtyOut::Screen(lines.join("\n")));
+        }
+        // full 只在首次拿到非空屏幕时写（错误尾部取自最终帧）
+        if !*have_full && !lines.is_empty() {
+            full.push_str(&lines.join("\n"));
+            full.push('\n');
+            *have_full = true;
+        }
+        *prev = lines;
+    };
+
     let status = loop {
         {
             let mut r = raw.lock();
@@ -1113,12 +1294,10 @@ pub(crate) fn run_claude_pty_command(
                 let new_text = r[consumed..].to_string();
                 consumed = r.len();
                 drop(r);
-                let cleaned = strip_ansi(&new_text);
-                for (line, replace) in merger.feed(&cleaned) {
-                    full.push_str(&line);
-                    full.push('\n');
-                    on_line(&line, replace);
+                if debug_raw {
+                    eprintln!("[pty-once RAW] {:?}", new_text);
                 }
+                render_diff(&mut screen, &new_text, &mut prev_lines, &mut full, &mut have_full, &mut on_line);
             }
         }
         match child.try_wait() {
@@ -1143,7 +1322,7 @@ pub(crate) fn run_claude_pty_command(
         }
     };
 
-    // EOF 收尾：等读线程结束（通常已随子进程退出到达），刷出残留
+    // EOF 收尾：等读线程结束（通常已随子进程退出到达），渲染残留后终帧 diff
     for _ in 0..20 {
         if done.load(std::sync::atomic::Ordering::SeqCst) {
             break;
@@ -1153,18 +1332,13 @@ pub(crate) fn run_claude_pty_command(
     {
         let r = raw.lock();
         if r.len() > consumed {
-            let cleaned = strip_ansi(&r[consumed..]);
-            for (line, replace) in merger.feed(&cleaned) {
-                full.push_str(&line);
-                full.push('\n');
-                on_line(&line, replace);
+            let new_text = r[consumed..].to_string();
+            consumed = r.len();
+            if debug_raw {
+                eprintln!("[pty-once RAW] {:?}", new_text);
             }
+            render_diff(&mut screen, &new_text, &mut prev_lines, &mut full, &mut have_full, &mut on_line);
         }
-    }
-    if let Some((line, replace)) = merger.flush() {
-        full.push_str(&line);
-        full.push('\n');
-        on_line(&line, replace);
     }
 
     Ok((status.success(), full))
@@ -1172,43 +1346,73 @@ pub(crate) fn run_claude_pty_command(
 
 #[cfg(test)]
 mod once_command_tests {
-    use super::PtyLineMerger;
+    use super::{PtyOut, PtyScreen};
 
-    // spinner 帧（\r 重绘）合并为 replace 行，终态行正常提交
+    // 手动实测（需本机 claude CLI）：cargo test PtyOnce_live_plugin_list -- --ignored --nocapture
+    // CCBOX_DEBUG_PTY_RAW=1 时额外打印原始 PTY 字节（排查 spinner 序列残留）
     #[test]
-    fn PtyLineMerger_Spinner重绘合并_001() {
-        let mut m = PtyLineMerger::default();
-        let out = m.feed("⠙ Adding marketplace…\r⠹ Adding marketplace…\r✔ Successfully added\n");
-        assert_eq!(out.len(), 3);
-        assert_eq!(out[0], ("⠙ Adding marketplace…".to_string(), true));
-        assert_eq!(out[1], ("⠹ Adding marketplace…".to_string(), true));
-        assert_eq!(out[2], ("✔ Successfully added".to_string(), false));
+    #[ignore]
+    fn PtyOnce_live_plugin_list() {
+        let (ok, full) = super::run_claude_pty_command(
+            &["plugin", "list"],
+            None,
+            std::time::Duration::from_secs(60),
+            |out| match out {
+                PtyOut::Line(l) => println!("LINE: {l:?}"),
+                PtyOut::Screen(s) => println!("SCREEN-RESET:\n{s}"),
+            },
+        )
+        .expect("pty run failed");
+        println!("success={ok}\n---FULL---\n{}", full);
     }
 
-    // \r\n 是普通换行（Windows shell 包装常见）
+    // ESC[nC（光标右移）在提取时表现为空格——Ink TUI 用它画词间空格（实测根因）
     #[test]
-    fn PtyLineMerger_CRLF普通换行_002() {
-        let mut m = PtyLineMerger::default();
-        let out = m.feed("line1\r\nline2\r\n");
-        assert_eq!(
-            out,
-            vec![("line1".to_string(), false), ("line2".to_string(), false)]
-        );
+    fn PtyScreen_CUF画空格_001() {
+        let mut s = PtyScreen::default();
+        s.feed("Installed\u{1b}[1Cplugins:\u{1b}[1C2 items");
+        assert_eq!(s.dump_lines(), vec!["Installed plugins: 2 items"]);
     }
 
-    // 跨 chunk 的半行与 \r\n 拆分都正确处理
+    // CUP 绝对定位写两处，dump 按行还原（跳过中间全空行）
     #[test]
-    fn PtyLineMerger_跨chunk拆分_003() {
-        let mut m = PtyLineMerger::default();
-        let a = m.feed("hello wor");
-        assert!(a.is_empty());
-        let b = m.feed("ld\r");
-        assert_eq!(b, vec![("hello world".to_string(), true)]);
-        // \r 在上一 chunk 结尾、\n 在这一 chunk 开头 → 普通换行
-        let c = m.feed("\nnext");
-        assert_eq!(c, vec![("".to_string(), false)]);
-        let d = m.flush();
-        assert_eq!(d, Some(("next".to_string(), false)));
+    fn PtyScreen_CUP定位还原_002() {
+        let mut s = PtyScreen::default();
+        s.feed("\u{1b}[3;3H❯\u{1b}[1Cplugin-a\u{1b}[6;5HVersion:\u{1b}[1C1.2.3");
+        assert_eq!(s.dump_lines(), vec!["  ❯ plugin-a", "    Version: 1.2.3"]);
+    }
+
+    // 清屏后重写：旧内容消失，只剩新帧（spinner 重绘的矩阵语义）
+    #[test]
+    fn PtyScreen_清屏重绘_003() {
+        let mut s = PtyScreen::default();
+        s.feed("\u{1b}[2J\u{1b}[H⠙ Installing\u{1b}[2J\u{1b}[H✔ Done");
+        assert_eq!(s.dump_lines(), vec!["✔ Done"]);
+    }
+
+    // 底部滚动：超出屏高的行顶出首行；结尾 \r\n 在底部同样滚动（真实终端语义）
+    #[test]
+    fn PtyScreen_底部滚动_004() {
+        let mut s = PtyScreen::new(40, 3);
+        s.feed("row1\r\nrow2\r\nrow3\r\nrow4\r\n");
+        assert_eq!(s.dump_lines(), vec!["row3", "row4"]);
+    }
+
+    // OSC 标题与 SCS 字符集序列不残留字符（ESC]0;...BEL / ESC(B）
+    #[test]
+    fn PtyScreen_OSC与SCS不残留_005() {
+        let mut s = PtyScreen::default();
+        s.feed("\u{1b}]0;window title\u{7}\u{1b}(Bplain");
+        assert_eq!(s.dump_lines(), vec!["plain"]);
+    }
+
+    // 跨 chunk 半序列：CSI 拆在两个 feed 里仍正确解析
+    #[test]
+    fn PtyScreen_跨chunk序列拆分_006() {
+        let mut s = PtyScreen::default();
+        s.feed("A\u{1b}[1");
+        s.feed("CB");
+        assert_eq!(s.dump_lines(), vec!["A B"]);
     }
 }
 

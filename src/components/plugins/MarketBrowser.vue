@@ -794,10 +794,13 @@ let unlistenCli: Awaited<ReturnType<typeof transport.listen>> | undefined
 onMounted(async () => {
   unlistenCli = await transport.listen<PluginCliOutputPayload>(
     'plugin-cli-output',
-    ({ actionId, text, replace }) => {
+    ({ actionId, text, replace, reset }) => {
       if (actionId !== cliActionId.value) return
-      // replace=true：CLI spinner 的 \r 重绘——替换最后一行而非追加（不刷屏）
-      if (replace && cliLines.value.length) {
+      // reset=true：TUI 整屏重绘帧（后端矩阵渲染）——清空重建
+      if (reset) {
+        cliLines.value = text ? text.split('\n') : []
+      } else if (replace && cliLines.value.length) {
+        // 行级替换（预留）：替换最后一行而非追加
         cliLines.value.splice(cliLines.value.length - 1, 1, text)
       } else {
         cliLines.value.push(text)

@@ -168,12 +168,14 @@ export const onHookEvent = (callback: (payload: HookEventPayload) => void): Prom
 export const onHookStatus = (callback: (payload: HookStatusPayload) => void): Promise<Unlisten> =>
   listen<HookStatusPayload>('hook-status', callback);
 
-/** 插件市场 CLI 输出行（PTY 执行实时上抛；replace=true 时替换输出区最后一行——spinner \r 重绘） */
+/** 插件市场 CLI 输出行（PTY 执行实时上抛）；reset=true 为整屏重置帧
+ * （TUI 绝对定位重绘，前端清空重建），replace 保留给行级替换 */
 export interface PluginCliOutputPayload {
   actionId: string
   step: string
   text: string
   replace: boolean
+  reset?: boolean
 }
 export const onPluginCliOutput = (callback: (payload: PluginCliOutputPayload) => void): Promise<Unlisten> =>
   listen<PluginCliOutputPayload>('plugin-cli-output', callback);

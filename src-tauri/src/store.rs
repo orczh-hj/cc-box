@@ -3108,6 +3108,21 @@ pub(crate) fn detect_git_bash_path() -> Option<String> {
         return None;
     }
 
+    // 与 pty.rs 终端侧 detect_git_bash 前两步同源（config → env）：GUI 进程
+    // PATH 可能没有 git，漏查这两步会让市场 PTY 命令误回退 PowerShell
+    if let Ok(config) = get_app_config() {
+        if let Some(ref path) = config.git_bash_path {
+            if Path::new(path).exists() {
+                return Some(path.clone());
+            }
+        }
+    }
+    if let Ok(path) = std::env::var("CLAUDE_CODE_GIT_BASH_PATH") {
+        if Path::new(&path).exists() {
+            return Some(path);
+        }
+    }
+
     let git_path = crate::platform::find_executable("git")?;
     let parent = Path::new(&git_path).parent()?;
     let bash_path = parent.join("bash.exe");
@@ -4278,20 +4293,28 @@ pub(crate) struct CliStreamCtx {
     pub(crate) step: String,
 }
 
-/// emit 一行输出（无全局句柄——如测试环境——静默跳过）
-fn emit_cli_line(ctx: &CliStreamCtx, text: &str, replace: bool) {
+/// emit 一条输出事件（无全局句柄——如测试环境——静默跳过）
+fn emit_cli_out(ctx: &CliStreamCtx, out: crate::pty::PtyOut) {
     use serde_json::json;
     if let Some(app) = crate::gui_app_handle() {
-        crate::events::emit_all(
-            app,
-            crate::events::names::PLUGIN_CLI_OUTPUT,
-            json!({
+        let payload = match out {
+            crate::pty::PtyOut::Line(text) => json!({
                 "actionId": ctx.action_id,
                 "step": ctx.step,
                 "text": text,
-                "replace": replace,
+                "replace": false,
             }),
-        );
+            // 整屏重置帧：前端清空输出区重建（TUI 每帧绝对定位重绘，
+            // 线性行替换无法表达）
+            crate::pty::PtyOut::Screen(text) => json!({
+                "actionId": ctx.action_id,
+                "step": ctx.step,
+                "text": text,
+                "replace": true,
+                "reset": true,
+            }),
+        };
+        crate::events::emit_all(app, crate::events::names::PLUGIN_CLI_OUTPUT, payload);
     }
 }
 
@@ -4310,7 +4333,7 @@ fn run_claude_command_ctx(
         args,
         cwd,
         CLI_MARKET_TIMEOUT,
-        |text, replace| emit_cli_line(&ctx, text, replace),
+        |out| emit_cli_out(&ctx, out),
     )
     .with_context(|| format!("claude {} failed", args.join(" ")))?;
     if success {
