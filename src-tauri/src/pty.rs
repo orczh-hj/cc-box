@@ -1353,10 +1353,17 @@ mod once_command_tests {
     #[test]
     #[ignore]
     fn PtyOnce_live_plugin_list() {
+        // 任意命令可用环境变量注入：CCBOX_PTY_TEST_ARGS="plugin,list"
+        let args: Vec<String> = std::env::var("CCBOX_PTY_TEST_ARGS")
+            .unwrap_or_else(|_| "plugin,list".into())
+            .split(',')
+            .map(str::to_string)
+            .collect();
+        let argrefs: Vec<&str> = args.iter().map(String::as_str).collect();
         let (ok, full) = super::run_claude_pty_command(
-            &["plugin", "list"],
+            &argrefs,
             None,
-            std::time::Duration::from_secs(60),
+            std::time::Duration::from_secs(120),
             |out| match out {
                 PtyOut::Line(l) => println!("LINE: {l:?}"),
                 PtyOut::Screen(s) => println!("SCREEN-RESET:\n{s}"),

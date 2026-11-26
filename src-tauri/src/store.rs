@@ -4146,7 +4146,7 @@ pub fn set_plugin_enabled(
         enabled,
         "user",
         None,
-        action_id.map(|id| CliStreamCtx { action_id: id, step: "toggle".into() }).as_ref(),
+        action_id.map(|id| CliStreamCtx { action_id: id, step: "toggle".into(), quiet: false }).as_ref(),
     )
 }
 
@@ -4165,7 +4165,7 @@ pub fn set_plugin_enabled_scoped(
         enabled,
         scope.unwrap_or("user"),
         project_path,
-        action_id.map(|id| CliStreamCtx { action_id: id, step: "toggle".into() }).as_ref(),
+        action_id.map(|id| CliStreamCtx { action_id: id, step: "toggle".into(), quiet: false }).as_ref(),
     )
 }
 
@@ -4286,11 +4286,14 @@ fn run_claude_command_argv(args: &[&str], cwd: Option<&Path>) -> Result<String> 
 // 后的行实时 emit 给前端；action_id 由前端生成传入，None 时静默退回管道执行
 // （旧远程桌面/无 UI 场景不 emit）。
 
-/// 一次市场动作的流式上下文：actionId 定位前端输出区，step 标注当前 CLI 段
+/// 一次市场动作的流式上下文：actionId 定位前端输出区，step 标注当前 CLI 段；
+/// quiet = 内部步骤不流式展示（如安装后 auto-enable——CLI 对「已启用」恒报
+/// ✘ Failed to enable ... already enabled 误报，展示出来用户必误读为失败）
 #[derive(Clone, Debug)]
 pub(crate) struct CliStreamCtx {
     pub(crate) action_id: String,
     pub(crate) step: String,
+    pub(crate) quiet: bool,
 }
 
 /// emit 一条输出事件（无全局句柄——如测试环境——静默跳过）
@@ -4329,11 +4332,16 @@ fn run_claude_command_ctx(
         return run_claude_command_argv(args, cwd);
     };
     let ctx = ctx.clone();
+    let quiet = ctx.quiet;
     let (success, output) = crate::pty::run_claude_pty_command(
         args,
         cwd,
         CLI_MARKET_TIMEOUT,
-        |out| emit_cli_out(&ctx, out),
+        |out| {
+            if !quiet {
+                emit_cli_out(&ctx, out);
+            }
+        },
     )
     .with_context(|| format!("claude {} failed", args.join(" ")))?;
     if success {
@@ -6269,7 +6277,7 @@ pub fn remove_plugin_marketplace(
             bail!("市场 {} 未注册", name);
         }
         let ctx_opt = action_id
-            .map(|id| CliStreamCtx { action_id: id, step: "market-remove".into() });
+            .map(|id| CliStreamCtx { action_id: id, step: "market-remove".into(), quiet: false });
         let res =
             run_claude_command_ctx(&["plugin", "marketplace", "remove", name], None, ctx_opt.as_ref())
                 .map(|_| ());
@@ -6305,7 +6313,7 @@ pub fn register_plugin_marketplace(name: &str, action_id: Option<String>) -> Res
     let source = custom_market_source(name)
         .context(format!("市场 {} 不在列表中，无法获取来源", name))?;
     let ctx_opt = action_id
-        .map(|id| CliStreamCtx { action_id: id, step: "register-market".into() });
+        .map(|id| CliStreamCtx { action_id: id, step: "register-market".into(), quiet: false });
     // 失败详情落日志：注册失败的根因（CLI spawn/git clone 报错原文）只返回前端
     // toast，日志侧此前无痕迹
     let add_res = run_claude_command_ctx(&["plugin", "marketplace", "add", &source], None, ctx_opt.as_ref());
@@ -6326,7 +6334,7 @@ pub fn register_plugin_marketplace(name: &str, action_id: Option<String>) -> Res
 pub fn refresh_plugin_marketplace(name: &str, action_id: Option<String>) -> Result<()> {
     validate_simple_name(name)?;
     let ctx_opt = action_id
-        .map(|id| CliStreamCtx { action_id: id, step: "market-update".into() });
+        .map(|id| CliStreamCtx { action_id: id, step: "market-update".into(), quiet: false });
     let res = if market_registered(name)? {
         run_claude_command_ctx(&["plugin", "marketplace", "update", name], None, ctx_opt.as_ref())
             .map(|_| ())
@@ -6367,7 +6375,7 @@ fn install_plugin_lifecycle(
                 let add_res = run_claude_command_ctx(
                     &["plugin", "marketplace", "add", &source],
                     None,
-                    ctx.map(|c| CliStreamCtx { step: "register-market".into(), ..c.clone() }).as_ref(),
+                    ctx.map(|c| CliStreamCtx { step: "register-market".into(), quiet: false, ..c.clone() }).as_ref(),
                 );
                 if let Err(e) = &add_res {
                     log::warn!(
@@ -6402,7 +6410,7 @@ fn install_plugin_lifecycle(
             run_claude_command_ctx(
                 &["plugin", "enable", plugin_ref, "-s", scope],
                 cwd.as_deref(),
-                ctx.map(|c| CliStreamCtx { step: "enable".into(), ..c.clone() }).as_ref(),
+                ctx.map(|c| CliStreamCtx { step: "enable".into(), quiet: true, ..c.clone() }).as_ref(),
             ),
             true,
         );
@@ -6427,7 +6435,7 @@ pub fn install_plugin(
     action_id: Option<String>,
 ) -> Result<()> {
     let ctx = action_id
-        .map(|id| CliStreamCtx { action_id: id, step: "install".to_string() });
+        .map(|id| CliStreamCtx { action_id: id, step: "install".to_string(), quiet: false });
     install_plugin_lifecycle("install", plugin_ref, scope, project_path, market_source, ctx.as_ref())
 }
 
@@ -6438,7 +6446,7 @@ pub fn uninstall_plugin(
     action_id: Option<String>,
 ) -> Result<()> {
     let ctx = action_id
-        .map(|id| CliStreamCtx { action_id: id, step: "uninstall".into() });
+        .map(|id| CliStreamCtx { action_id: id, step: "uninstall".into(), quiet: false });
     install_plugin_lifecycle("uninstall", plugin_ref, scope, project_path, None, ctx.as_ref())
 }
 
@@ -6449,7 +6457,7 @@ pub fn update_plugin(
     action_id: Option<String>,
 ) -> Result<()> {
     let ctx = action_id
-        .map(|id| CliStreamCtx { action_id: id, step: "update".into() });
+        .map(|id| CliStreamCtx { action_id: id, step: "update".into(), quiet: false });
     install_plugin_lifecycle("update", plugin_ref, scope, project_path, None, ctx.as_ref())
 }
 
