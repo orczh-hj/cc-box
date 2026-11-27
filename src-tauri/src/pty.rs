@@ -1047,8 +1047,18 @@ impl PtyScreen {
                 self.col = (c - 1).min(self.cols - 1);
             }
             'A' => self.row = self.row.saturating_sub(nums.first().copied().unwrap_or(1)),
-            'B' => self.row = (self.row + nums.first().copied().unwrap_or(1)).min(self.rows - 1),
-            'C' => self.col = (self.col + nums.first().copied().unwrap_or(1)).min(self.cols - 1),
+            'B' => {
+                self.row = self
+                    .row
+                    .saturating_add(nums.first().copied().unwrap_or(1))
+                    .min(self.rows - 1)
+            }
+            'C' => {
+                self.col = self
+                    .col
+                    .saturating_add(nums.first().copied().unwrap_or(1))
+                    .min(self.cols - 1)
+            }
             'D' => self.col = self.col.saturating_sub(nums.first().copied().unwrap_or(1)),
             'G' => self.col = (nums.first().copied().unwrap_or(1).max(1) - 1).min(self.cols - 1),
             'd' => self.row = (nums.first().copied().unwrap_or(1).max(1) - 1).min(self.rows - 1),
@@ -1079,16 +1089,10 @@ impl PtyScreen {
     }
 }
 
-/// bash 单引号包裹（单引号内无任何展开）；参数含单引号时断言拒绝——
-/// 市场参数（plugin-ref/市场名/URL）经 validate 已不含单引号
-fn bash_quote(arg: &str) -> String {
-    assert!(!arg.contains('\''), "arg contains single quote: {:?}", arg);
-    format!("'{}'", arg)
-}
-
-/// PowerShell 双引号包裹（无 Git Bash 时的回退包装）
-fn ps_quote(arg: &str) -> String {
-    format!("\"{}\"", arg)
+/// bash / PowerShell 共用的单引号包裹：单引号串内无任何展开（$、反引号等
+/// 字面处理），内部单引号以 `''` 转义。两平台语义一致，注入面收敛到一处。
+fn shell_quote(arg: &str) -> String {
+    format!("'{}'", arg.replace('\'', "''"))
 }
 
 /// 取文本尾部 N 行（错误 context 用）
@@ -1136,26 +1140,18 @@ pub(crate) fn run_claude_pty_command(
         #[cfg(target_os = "windows")]
         {
             let git_bash = crate::store::detect_git_bash_path();
+            // bash 与 PowerShell 回退统一用单引号包裹（shell_quote，内部 '
+            // 以 '' 转义）——无插值、无注入面。PowerShell 侧 & 调用操作符
+            // 必须存在，否则裸字符串字面量后跟参数会被解析为「意外标记」
+            // （实测 ParserError）。
+            let mut invocation = claude_cmd.clone();
+            for a in args {
+                invocation.push(' ');
+                invocation.push_str(&shell_quote(a));
+            }
             let invocation = match &git_bash {
-                Some(_) => {
-                    let mut s = claude_cmd;
-                    for a in args {
-                        s.push(' ');
-                        s.push_str(&bash_quote(a));
-                    }
-                    s
-                }
-                None => {
-                    // PowerShell 回退：& 调用操作符必须存在——否则裸字符串
-                    // 字面量后跟参数会被解析为「意外标记」（实测 ParserError）
-                    let mut s = String::from("& ");
-                    s.push_str(&claude_cmd);
-                    for a in args {
-                        s.push(' ');
-                        s.push_str(&ps_quote(a));
-                    }
-                    s
-                }
+                Some(_) => invocation,
+                None => format!("& {}", invocation),
             };
             let (program, shell_args) =
                 crate::platform::get_claude_shell(&invocation, git_bash.as_deref());
@@ -1188,10 +1184,9 @@ pub(crate) fn run_claude_pty_command(
     }
     cmd.env("TERM", "xterm-256color");
     cmd.env("COLORTERM", "truecolor");
-    // CI=1：Ink 类 TUI（claude CLI 的渲染层）读到后禁用全屏交互渲染与
-    // spinner 动画，输出退化为静态纯文本——PTY 下 CLI 会用「光标右移画
-    // 空格 + 绝对定位重绘」（实测 ESC[1C 代替词间空格），线性清洗根本
-    // 还原不了；静态文本对输出区展示才是可读形态
+    // CI=1 本意是让 Ink 类 TUI 退化为静态输出；实测 claude CLI 无视它仍全屏
+    // 渲染（光标右移画空格 + 绝对定位重绘）——这正是需要 PtyScreen 矩阵渲染
+    // 的原因。保留无害，删掉亦无行为差异。
     cmd.env("CI", "1");
     if let Ok(config) = crate::store::get_app_config() {
         if let Some(vars) = config.claude_env_vars {
@@ -1255,7 +1250,6 @@ pub(crate) fn run_claude_pty_command(
     let mut prev_lines: Vec<String> = Vec::new();
     let mut consumed = 0usize;
     let mut full = String::new();
-    let mut have_full = false;
     let start = std::time::Instant::now();
 
     // 渲染并 diff：新帧以上一帧为前缀 → 只发新增行；否则发整屏重置帧
@@ -1264,7 +1258,6 @@ pub(crate) fn run_claude_pty_command(
                            text: &str,
                            prev: &mut Vec<String>,
                            full: &mut String,
-                           have_full: &mut bool,
                            on_line: &mut dyn FnMut(PtyOut)| {
         screen.feed(text);
         let lines = screen.dump_lines();
@@ -1278,11 +1271,11 @@ pub(crate) fn run_claude_pty_command(
         } else {
             on_line(PtyOut::Screen(lines.join("\n")));
         }
-        // full 只在首次拿到非空屏幕时写（错误尾部取自最终帧）
-        if !*have_full && !lines.is_empty() {
-            full.push_str(&lines.join("\n"));
+        // full 恒为最新屏幕帧（错误文案/超时「最近输出」取自它——必须是
+        // 最终帧而非首帧，否则 install 失败时 toast 里只有开头的 spinner 行）
+        if !lines.is_empty() {
+            *full = lines.join("\n");
             full.push('\n');
-            *have_full = true;
         }
         *prev = lines;
     };
@@ -1297,7 +1290,7 @@ pub(crate) fn run_claude_pty_command(
                 if debug_raw {
                     eprintln!("[pty-once RAW] {:?}", new_text);
                 }
-                render_diff(&mut screen, &new_text, &mut prev_lines, &mut full, &mut have_full, &mut on_line);
+                render_diff(&mut screen, &new_text, &mut prev_lines, &mut full, &mut on_line);
             }
         }
         match child.try_wait() {
@@ -1333,11 +1326,10 @@ pub(crate) fn run_claude_pty_command(
         let r = raw.lock();
         if r.len() > consumed {
             let new_text = r[consumed..].to_string();
-            consumed = r.len();
             if debug_raw {
                 eprintln!("[pty-once RAW] {:?}", new_text);
             }
-            render_diff(&mut screen, &new_text, &mut prev_lines, &mut full, &mut have_full, &mut on_line);
+            render_diff(&mut screen, &new_text, &mut prev_lines, &mut full, &mut on_line);
         }
     }
 
@@ -1346,7 +1338,18 @@ pub(crate) fn run_claude_pty_command(
 
 #[cfg(test)]
 mod once_command_tests {
-    use super::{PtyOut, PtyScreen};
+    use super::{PtyOut, PtyScreen, shell_quote};
+
+    // bash / PowerShell 单引号包裹：内部单引号以 '' 转义（POSIX 与 PowerShell
+    // 同语义），包裹后 $、反引号等一律字面处理——注入面收敛点
+    #[test]
+    fn ShellQuote_单引号转义_001() {
+        assert_eq!(shell_quote("abc"), "'abc'");
+        assert_eq!(shell_quote("it's"), "'it''s'");
+        assert_eq!(shell_quote(""), "''");
+        // 含 shell 元字符的来源被完整字面包裹
+        assert_eq!(shell_quote("a$(rm -rf)b`c`d e"), "'a$(rm -rf)b`c`d e'");
+    }
 
     // 手动实测（需本机 claude CLI）：cargo test PtyOnce_live_plugin_list -- --ignored --nocapture
     // CCBOX_DEBUG_PTY_RAW=1 时额外打印原始 PTY 字节（排查 spinner 序列残留）

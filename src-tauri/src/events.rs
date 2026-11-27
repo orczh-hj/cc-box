@@ -38,7 +38,8 @@ pub mod names {
     /// 前端在市场面板可见时自动重拉列表，不可见则下次打开自然读到新缓存）
     pub const MARKET_UPDATED: &str = "market-updated";
     /// 插件市场 CLI 输出流（PTY 执行实时上抛；payload {actionId, step, text,
-    /// replace}，replace=true 时前端替换输出区最后一行——spinner \r 重绘）
+    /// replace, reset}——reset=true 为整屏重置帧（TUI 绝对定位重绘，前端清空
+    /// 重建），replace 为行级替换预留位，当前恒 false）
     pub const PLUGIN_CLI_OUTPUT: &str = "plugin-cli-output";
 }
 

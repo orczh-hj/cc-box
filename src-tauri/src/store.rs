@@ -3108,8 +3108,9 @@ pub(crate) fn detect_git_bash_path() -> Option<String> {
         return None;
     }
 
-    // 与 pty.rs 终端侧 detect_git_bash 前两步同源（config → env）：GUI 进程
-    // PATH 可能没有 git，漏查这两步会让市场 PTY 命令误回退 PowerShell
+    // 与 pty.rs 终端侧 detect_git_bash 同源（config → env → 安装器默认位置
+    // → where git）：漏查任何一步都会让市场 PTY 命令误回退 PowerShell——
+    // 便携版 Git 用户无 PATH git 时尤其如此
     if let Ok(config) = get_app_config() {
         if let Some(ref path) = config.git_bash_path {
             if Path::new(path).exists() {
@@ -3121,6 +3122,10 @@ pub(crate) fn detect_git_bash_path() -> Option<String> {
         if Path::new(&path).exists() {
             return Some(path);
         }
+    }
+    #[cfg(target_os = "windows")]
+    if let Some(bash_path) = crate::checks::detect_portable_git_default() {
+        return Some(bash_path);
     }
 
     let git_path = crate::platform::find_executable("git")?;
@@ -6114,7 +6119,15 @@ pub fn get_market_presets() -> Result<Vec<MarketPreset>> {
 
 pub(crate) fn validate_marketplace_source(source: &str) -> Result<String> {
     let s = source.trim();
-    if s.is_empty() || s.len() > 512 || s.contains('\n') || s.contains('\r') || s.contains('\0') {
+    // 单引号一并拒绝：市场 PTY 命令经 bash/PowerShell 单引号包装执行，
+    // 让带引号的来源在这里报可读错误，而不是漏到 shell 层
+    if s.is_empty()
+        || s.len() > 512
+        || s.contains('\n')
+        || s.contains('\r')
+        || s.contains('\0')
+        || s.contains('\'')
+    {
         bail!("Invalid marketplace source");
     }
     Ok(s.to_string())
@@ -6363,13 +6376,15 @@ fn install_plugin_lifecycle(
     if action == "install" {
         if let Some(market) = plugin_ref.rsplit('@').next() {
             if !market_registered(market)? {
-                let source = market_source
-                    .map(|s| s.to_string())
-                    .or_else(|| custom_market_source(market))
-                    .context(format!(
-                        "市场 {} 未注册且无来源可自动添加；请先将该市场加入列表",
-                        market
-                    ))?;
+                let source = match market_source {
+                    // 前端传参过校验（含单引号拒绝——PTY 命令经单引号包装执行）
+                    Some(s) => Some(validate_marketplace_source(s)?),
+                    None => custom_market_source(market),
+                }
+                .context(format!(
+                    "市场 {} 未注册且无来源可自动添加；请先将该市场加入列表",
+                    market
+                ))?;
                 // 失败详情落日志：此路径 `?` 早退不经过主命令的失败日志点
                 // （曾致用户环境 add 持续失败而日志无任何痕迹）
                 let add_res = run_claude_command_ctx(

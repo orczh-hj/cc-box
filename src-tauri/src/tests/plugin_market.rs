@@ -20,6 +20,10 @@ fn ValidateMarketplaceSource_拒绝非法并修剪空白() {
     assert!(validate_marketplace_source("a\nb").is_err());
     assert!(validate_marketplace_source("a\rb").is_err());
     assert!(validate_marketplace_source(&"x".repeat(513)).is_err());
+    // 单引号拒绝：PTY 命令经 bash/PowerShell 单引号包装执行（2026-11-27 审核发现
+    // install 懒注册的 market_source 裸传、含 ' 时破坏包装），在此报可读错误
+    assert!(validate_marketplace_source("https://user:'pass'@example.com/m.json").is_err());
+    assert!(validate_marketplace_source("it's-a-market").is_err());
 
     // 合法形态：GitHub 简写 / URL / 本地路径
     for ok in ["anthropics/claude-plugins-official", "https://example.com/marketplace.json", "D:\\repos\\my-market"] {
