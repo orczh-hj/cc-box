@@ -1221,7 +1221,10 @@ onUnmounted(() => {
 .plugin-list {
   flex: 1;
   min-height: 0;
+  min-width: 0;
   overflow-y: auto;
+  /* 横向永不滚动：行宽 100% + padding/border 时溢出只裁不滚（曾出现横向滚动条） */
+  overflow-x: hidden;
   display: flex;
   flex-direction: column;
   gap: 2px;
@@ -1233,7 +1236,11 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   gap: 3px;
+  /* 含 padding/border 的盒模型：width 100% 才真正等于容器宽（button 默认
+     content-box，曾致每行溢出 ~22px 触发列表横向滚动） */
+  box-sizing: border-box;
   width: 100%;
+  min-width: 0;
   padding: 9px 10px;
   border: 1px solid transparent;
   border-radius: 9px;

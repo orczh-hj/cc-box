@@ -133,6 +133,7 @@ import { useI18n } from 'vue-i18n'
 import { useAppStore, DEFAULT_CLAUDE_ENV_VARS } from '@/stores/app'
 import { isTauriEnv } from '@/api/platform'
 import { getRemoteStatus, setBrokerAutostart, getCheckResults, getInstalledClaudeVersion, getClaudeConfigDir } from '@/api/tauri'
+import { uiConfirm } from '@/composables/useConfirm'
 
 const { t } = useI18n()
 const appStore = useAppStore()
@@ -207,6 +208,15 @@ onUnmounted(() => {
 async function handleAutostartChange(e: Event) {
   const input = e.target as HTMLInputElement
   const enabled = input.checked
+  // 关闭有后果（下次开机后台服务不再自动启动 → 远程连接不可用，需手动打开
+  // CC-Box），二次确认；开启无破坏性不弹。取消则复选框回弹。
+  if (!enabled) {
+    const ok = await uiConfirm(t('startupBrokerAutostartOffConfirm'), { danger: true })
+    if (!ok) {
+      input.checked = true
+      return
+    }
+  }
   autostartBusy.value = true
   autostartError.value = ''
   try {

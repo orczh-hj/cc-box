@@ -62,6 +62,7 @@ import { useIsMobile } from '@/composables/useMediaQuery'
 import { safeDispose } from '@/utils/dispose'
 import { relativizePath } from '@/utils/path'
 import { mapTerminalGlyphs } from '@/utils/terminal-glyphs'
+import { createCursorShowFilter } from '@/utils/cursor-filter'
 import { buildTapMouseInit } from '@/utils/tap-mouse'
 import { shouldInterceptImeInput, imeAppendDelta, imeBackspaceDelta } from '@/utils/ime-paste'
 import { loadOsc52Clipboard } from '@/utils/osc52-clipboard'
@@ -119,6 +120,8 @@ const terminalInstances = reactive(new Map<string, {
   term: Terminal
   fitAddon: FitAddon
   ptyId: string
+  /** 「显示光标」序列过滤器（每个实例独立，持有跨 chunk 的暂存状态） */
+  cursorFilter: ReturnType<typeof createCursorShowFilter>
 }>())
 
 // Terminal DOM 元素引用
@@ -440,6 +443,8 @@ function createTerminal(tabId: string): Terminal {
     lineHeight: 1.2,
     cursorBlink: true,
     cursorStyle: 'bar',
+    // 失焦态不画光标（聚焦态的隐藏在 PTY 数据入口过滤，见 filterCursorShow）
+    cursorInactiveStyle: 'none',
     theme: appStore.theme === 'dark' ? darkTheme : lightTheme,
     allowProposedApi: true,
     macOptionIsMeta: true,
@@ -711,9 +716,13 @@ async function setupEventListeners() {
   unlistenPtyOutput = await onPtyOutput(({ id, data }) => {
     for (const [_tabId, instance] of terminalInstances) {
       if (instance.ptyId === id) {
+        // 隐藏原生光标：中和 CLI 发来的「显示光标」序列（Claude 自己画输入光标，
+        // 原生光标只会作为黑块随 TUI 重绘跳动）；过滤器按实例持有，处理跨 chunk 拆分
+        const shown = instance.cursorFilter.filter(data)
+        if (!shown) break
         // 浏览器远程模式：移动端字体缺媒体控制符字形（⏵⏵/⏸ 渲染为 tofu），
         // 写入前兜底替换为等义通用符号；桌面端有系统字体回退，原样写入
-        instance.term.write(isTauriEnv ? data : mapTerminalGlyphs(data))
+        instance.term.write(isTauriEnv ? shown : mapTerminalGlyphs(shown))
         break
       }
     }
@@ -879,7 +888,7 @@ async function createTerminalForTab(tabId: string, ptyId: string) {
   const fitAddon = new FitAddon()
   term.loadAddon(fitAddon)
 
-  terminalInstances.set(tabId, { term: markRaw(term), fitAddon: markRaw(fitAddon), ptyId })
+  terminalInstances.set(tabId, { term: markRaw(term), fitAddon: markRaw(fitAddon), ptyId, cursorFilter: markRaw(createCursorShowFilter()) })
 
   const el = await waitForElement(tabId)
   if (el) {
@@ -974,7 +983,7 @@ async function startTab(tabId: string) {
       // 浏览器端 spawnSession 内部已 create+attach，记录标记防重复 attach
       attachedPtyIds.add(info.id)
       if (!isTauriEnv) focusedPtyId = info.id
-      terminalInstances.set(tabId, { term: markRaw(term), fitAddon: markRaw(fitAddon), ptyId: info.id })
+      terminalInstances.set(tabId, { term: markRaw(term), fitAddon: markRaw(fitAddon), ptyId: info.id, cursorFilter: markRaw(createCursorShowFilter()) })
       sessionStore.setTabPty(tabId, info.id)
       sessionStore.setActiveTab(tabId)
       currentDisplayTabId.value = tabId
@@ -1059,7 +1068,7 @@ async function restartTab(tabId: string) {
       // 浏览器端 spawnSession 内部已 create+attach，记录标记防重复 attach
       attachedPtyIds.add(info.id)
       if (!isTauriEnv) focusedPtyId = info.id
-      terminalInstances.set(tabId, { term: markRaw(term), fitAddon: markRaw(fitAddon), ptyId: info.id })
+      terminalInstances.set(tabId, { term: markRaw(term), fitAddon: markRaw(fitAddon), ptyId: info.id, cursorFilter: markRaw(createCursorShowFilter()) })
       sessionStore.setTabPty(tabId, info.id)
       sessionStore.setActiveTab(tabId)
       currentDisplayTabId.value = tabId
@@ -1099,7 +1108,7 @@ async function showSpawnError(tabId: string, term: Terminal, fitAddon: FitAddon,
   // 错误只进 console——这正是「spawn 失败 → 白屏」的成因。
   // 占位实例的 ptyId 为空：没有底层进程，不会触发 attach/输入转发。
   if (!terminalInstances.has(tabId)) {
-    terminalInstances.set(tabId, { term: markRaw(term), fitAddon: markRaw(fitAddon), ptyId: '' })
+    terminalInstances.set(tabId, { term: markRaw(term), fitAddon: markRaw(fitAddon), ptyId: '', cursorFilter: markRaw(createCursorShowFilter()) })
   }
   // 失败 Tab 可能在启动期间未被激活（activeTab watcher 因 isPtyStarting 提前返回）。
   // 仅当它确实是当前活跃 Tab 时才切换显示，避免后台启动失败把用户视图切走

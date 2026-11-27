@@ -82,6 +82,7 @@
   startupBrokerAutostart: 'Launch background service at login',
   startupBrokerAutostartHint: 'Starts the CC-Box background service at login (tray resident, keeps remote access online).',
   startupBrokerAutostartUnavailable: 'Background service is not connected; unavailable right now.',
+  startupBrokerAutostartOffConfirm: 'The background service will no longer start automatically. After a reboot you must open CC-Box manually to use remote access. Turn it off?',
   launchWindow: 'Launch window',
   newWindow: 'New window',
   launchingWindow: 'Launching…',

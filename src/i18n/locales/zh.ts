@@ -82,6 +82,7 @@
   startupBrokerAutostart: '开机自启动（后台服务）',
   startupBrokerAutostartHint: '登录后启动 CC-Box 后台服务（托盘常驻，保持远程服务在线）',
   startupBrokerAutostartUnavailable: '后台服务未连接，暂时无法修改',
+  startupBrokerAutostartOffConfirm: '关闭后，下次开机不会自动启动后台服务——重启电脑后需要手动打开 CC-Box 才能使用远程连接。确认关闭？',
   launchWindow: '启动窗口',
   newWindow: '新建窗口',
   launchingWindow: '正在启动…',
