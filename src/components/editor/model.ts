@@ -249,19 +249,41 @@ export function hookFormError(form: HookForm): string | null {
   return null
 }
 
+/** hookFormToObject 可能产出的键（其余视为未知自定义键，表单流转中原样保留） */
+const HOOK_MANAGED_KEYS = ['type', 'timeout', 'command', 'url', 'headers', 'prompt', 'model']
+
+/** 表单重建 hook 对象：受管字段以表单为准（类型切换不残留旧类型字段，
+ * 如 command→http 后不留 command），未知自定义键（async 等）从旧对象带回 */
+export function hookEntryRebuild(
+  prevHook: Record<string, unknown> | undefined,
+  form: HookForm
+): Record<string, unknown> {
+  const next = hookFormToObject(form)
+  if (prevHook) {
+    for (const [k, v] of Object.entries(prevHook)) {
+      if (!HOOK_MANAGED_KEYS.includes(k) && !(k in next)) next[k] = v
+    }
+  }
+  return next
+}
+
 /** hook 表单 → 保存请求；projectPath 为当前项目（user 作用域忽略），
- * original 为编辑定位（跨事件/跨作用域编辑由后端处理） */
+ * original 为编辑定位（跨事件/跨作用域编辑由后端处理）；
+ * prevHook 为原始条目的 hook 对象（编辑态由调用方从 lastEntry 取）——
+ * 已知类型的未知自定义键（async/statusMessage 等）经 hookEntryRebuild 带回，
+ * 不传维持旧行为（只产受管键）。mcp_tool 走 rawHook，与此参数无关。 */
 export function buildHookPayload(
   form: HookForm,
   projectPath: string | undefined,
   original?: HookOriginal,
-  originalScope?: string
+  originalScope?: string,
+  prevHook?: Record<string, unknown>
 ): SaveHookRequest {
   return {
     scope: form.scope,
     event: form.event,
     matcher: form.matcher.trim() || undefined,
-    hook: hookFormToObject(form),
+    hook: prevHook ? hookEntryRebuild(prevHook, form) : hookFormToObject(form),
     projectPath: form.scope === 'user' ? undefined : projectPath,
     original,
     originalScope,
@@ -269,22 +291,13 @@ export function buildHookPayload(
 }
 
 /**
- * matcher 条目 JSON（源码模式）→ 表单。非法结构返回 null。
- * 形态：{ matcher?, hooks: [<hook 对象>] }，只编辑首个 hook（多命令条目
- * 由面板禁止进入编辑器）。
+ * matcher 条目对象核心解析。形态：{ matcher?, hooks: [<hook 对象>] }，只编辑
+ * 首个 hook（多命令条目由面板禁止进入编辑器）。非法结构返回 null。
  */
-export function hookEntryToForm(
-  json: string,
+function hookMatcherEntryToForm(
+  obj: Record<string, unknown>,
   defaults: { scope: HookForm['scope']; event: string }
 ): HookForm | null {
-  let parsed: unknown
-  try {
-    parsed = JSON.parse(json)
-  } catch {
-    return null
-  }
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null
-  const obj = parsed as Record<string, unknown>
   const hooks = obj.hooks
   if (!Array.isArray(hooks) || hooks.length === 0) return null
   const first = hooks[0] as Record<string, unknown> | undefined
@@ -308,6 +321,113 @@ export function hookEntryToForm(
   // 未识别类型（mcp_tool 等）：hook 对象原样保留，保存时原样写回
   if (type === 'mcp_tool') form.rawHook = first
   return form
+}
+
+/** matcher 条目 JSON（裸片段）→ 表单。非法结构返回 null。 */
+export function hookEntryToForm(
+  json: string,
+  defaults: { scope: HookForm['scope']; event: string }
+): HookForm | null {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(json)
+  } catch {
+    return null
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null
+  return hookMatcherEntryToForm(parsed as Record<string, unknown>, defaults)
+}
+
+// ==================== JSON 模式（带键原生形态） ====================
+//
+// JSON 模式与原生文件里条目的真实形态 1:1 对应：
+// - MCP   → {"<名称>": { …server 配置… }}（mcpServers 下该条目）
+// - Hook  → {"<事件>": [ { matcher?, hooks: [...] } ]}（hooks 下该条目）
+// 作用域决定落到哪个文件，不进 JSON。单键语义：解析唯一键回填名称/事件
+// （JSON 改键 = 重命名 / 跨事件移动），多键、多条数组报错拒绝。
+
+/** MCP JSON 解析失败原因（组件映射 i18n） */
+export type McpJsonFailReason = 'invalid' | 'notObject' | 'multiKey'
+
+export type McpJsonParseResult =
+  | { ok: true; name: string; config: Record<string, unknown> }
+  | { ok: false; reason: McpJsonFailReason }
+
+/** 表单 → MCP JSON 文本：{"<名称>": {…配置…}} */
+export function mcpEntryToJson(name: string, config: Record<string, unknown>): string {
+  return JSON.stringify({ [name.trim()]: config }, null, 2)
+}
+
+/** MCP JSON 文本 → 名称 + 配置。单键对象，其余结构拒绝。 */
+export function mcpEntryFromJson(text: string): McpJsonParseResult {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(text)
+  } catch {
+    return { ok: false, reason: 'invalid' }
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return { ok: false, reason: 'notObject' }
+  }
+  const obj = parsed as Record<string, unknown>
+  const keys = Object.keys(obj)
+  if (keys.length !== 1) return { ok: false, reason: 'multiKey' }
+  const config = obj[keys[0]]
+  if (!config || typeof config !== 'object' || Array.isArray(config)) {
+    return { ok: false, reason: 'notObject' }
+  }
+  return { ok: true, name: keys[0], config: config as Record<string, unknown> }
+}
+
+/** Hook JSON 解析失败原因（组件映射 i18n） */
+export type HookJsonFailReason =
+  | 'invalid'
+  | 'notObject'
+  | 'multiKey'
+  | 'notArray'
+  | 'multiEntry'
+  | 'badEntry'
+
+export type HookJsonParseResult =
+  | { ok: true; event: string; entry: Record<string, unknown>; form: HookForm }
+  | { ok: false; reason: HookJsonFailReason }
+
+/** 表单 → Hook JSON 文本：{"<事件>": [matcher 条目]} */
+export function hookEntryToJson(event: string, entry: Record<string, unknown>): string {
+  return JSON.stringify({ [event.trim()]: [entry] }, null, 2)
+}
+
+/** Hook JSON 文本 → 事件 + matcher 条目 + 表单。事件取自唯一键。 */
+export function hookEntryFromJson(
+  text: string,
+  defaults: { scope: HookForm['scope'] }
+): HookJsonParseResult {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(text)
+  } catch {
+    return { ok: false, reason: 'invalid' }
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return { ok: false, reason: 'notObject' }
+  }
+  const obj = parsed as Record<string, unknown>
+  const keys = Object.keys(obj)
+  if (keys.length !== 1) return { ok: false, reason: 'multiKey' }
+  const event = keys[0]
+  const list = obj[event]
+  if (!Array.isArray(list)) return { ok: false, reason: 'notArray' }
+  if (list.length !== 1) return { ok: false, reason: 'multiEntry' }
+  const entry = list[0]
+  if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+    return { ok: false, reason: 'badEntry' }
+  }
+  const form = hookMatcherEntryToForm(entry as Record<string, unknown>, {
+    scope: defaults.scope,
+    event,
+  })
+  if (!form) return { ok: false, reason: 'badEntry' }
+  return { ok: true, event, entry: entry as Record<string, unknown>, form }
 }
 
 // ==================== MCP ====================

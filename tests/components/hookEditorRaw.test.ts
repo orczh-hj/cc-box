@@ -63,7 +63,10 @@ describe('HookEditor 未知字段保留', () => {
     ms.vm.$emit('update:modelValue', 'json')
     await flushPromises()
     const text = (w.find('textarea').element as HTMLTextAreaElement).value
-    const parsed = JSON.parse(text)
+    const wrapper = JSON.parse(text)
+    // 带键原生形态：{"<事件>": [matcher 条目]}，事件键与表单事件一致
+    expect(Object.keys(wrapper)).toEqual(['PreToolUse'])
+    const parsed = wrapper.PreToolUse[0]
     expect(parsed.hooks[0].command).toBe('echo changed')
     expect(parsed.hooks[0].async).toBe(true)
     expect(parsed.customMeta).toBe('keep-me')

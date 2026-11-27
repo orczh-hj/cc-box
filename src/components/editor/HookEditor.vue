@@ -18,9 +18,10 @@
       <div class="editor-field-row">
         <div class="editor-field">
           <span class="editor-label">{{ t('editorHookEvent') }}<span class="editor-req">*</span></span>
-          <select v-model="form.event" class="editor-select" :disabled="isEdit">
-            <option v-for="e in HOOK_EVENTS" :key="e" :value="e">{{ e }}</option>
+          <select v-model="form.event" class="editor-select">
+            <option v-for="e in eventOptions" :key="e" :value="e">{{ e }}</option>
           </select>
+          <span v-if="isEdit && original && form.event !== original.event" class="editor-hint">{{ t('editorHookEventMoveHint') }}</span>
         </div>
         <div class="editor-field" style="max-width: 140px">
           <span class="editor-label">{{ t('editorScope') }}</span>
@@ -129,10 +130,12 @@ import {
   HOOK_EVENTS,
   HOOK_TYPES,
   buildHookPayload,
-  hookEntryToForm,
+  hookEntryFromJson,
+  hookEntryRebuild,
+  hookEntryToJson,
   hookFormError,
-  hookFormToObject,
   type HookForm,
+  type HookJsonFailReason,
 } from './model'
 
 const { t } = useI18n()
@@ -172,6 +175,21 @@ const emptyForm = (): HookForm => ({
 })
 
 const form = ref<HookForm>(emptyForm())
+/** 事件下拉：常用事件 + 当前值不在清单时动态注入（JSON 键改出的自定义事件等） */
+const eventOptions = computed(() =>
+  (HOOK_EVENTS as readonly string[]).includes(form.value.event)
+    ? [...HOOK_EVENTS]
+    : [form.value.event, ...HOOK_EVENTS]
+)
+/** JSON 结构错误 → 提示文案 key（reason 见 model.ts HookJsonFailReason） */
+const HOOK_JSON_ERROR_KEYS: Record<HookJsonFailReason, string> = {
+  invalid: 'editorJsonInvalid',
+  notObject: 'editorJsonMustBeObject',
+  multiKey: 'editorHookJsonSingleEvent',
+  notArray: 'editorHookJsonSingleEntry',
+  multiEntry: 'editorHookJsonSingleEntry',
+  badEntry: 'editorHookJsonInvalid',
+}
 const original = ref<{ event: string; matcher?: string; key: string } | undefined>(undefined)
 /** 编辑打开时的作用域（跨作用域保存 = 从旧 settings 移除后写入新作用域） */
 const originalScope = ref<HookForm['scope']>('user')
@@ -198,24 +216,21 @@ watch(mode, (m, old) => {
 })
 
 // 表单改动实时生成 JSON；JSON 失焦时校验并回填表单
+// （JSON 为带键原生形态 {"<事件>": [matcher 条目]}，事件取自唯一键）
 const { regenerate, commitFromText } = useEditorFormSync({
   form,
   text: jsonText,
   isFormMode: () => mode.value === 'form',
-  build: f => JSON.stringify(regeneratedEntry(f), null, 2),
-  parse: (text, current) => {
-    const parsed = hookEntryToForm(text, { scope: current.scope, event: current.event })
-    if (!parsed) {
-      jsonError.value = t('editorHookJsonInvalid')
+  build: f => hookEntryToJson(f.event, regeneratedEntry(f)),
+  parse: (text, _current) => {
+    const parsed = hookEntryFromJson(text, { scope: form.value.scope })
+    if (!parsed.ok) {
+      jsonError.value = t(HOOK_JSON_ERROR_KEYS[parsed.reason])
       return null
     }
     jsonError.value = ''
-    try {
-      lastEntry = JSON.parse(text)
-    } catch {
-      lastEntry = null
-    }
-    return { ...parsed, scope: current.scope, event: current.event }
+    lastEntry = parsed.entry
+    return parsed.form
   },
 })
 
@@ -287,8 +302,8 @@ function regeneratedEntry(f: HookForm): Record<string, unknown> {
   const base = lastEntry ? JSON.parse(JSON.stringify(lastEntry)) : {}
   const prevHook = Array.isArray(base.hooks) && base.hooks[0] && typeof base.hooks[0] === 'object'
     ? base.hooks[0]
-    : {}
-  base.hooks = [{ ...prevHook, ...hookFormToObject(f) }]
+    : undefined
+  base.hooks = [hookEntryRebuild(prevHook, f)]
   if (f.matcher.trim()) base.matcher = f.matcher.trim()
   else delete base.matcher
   return base
@@ -316,12 +331,22 @@ async function onSave() {
   }
   busy.value = true
   try {
+    // prevHook = 原始条目的 hook 对象：已知类型的未知自定义键（async 等）
+    // 经 hookEntryRebuild 带回（与 MCP 侧 lastConfig 保留同一取舍）
+    const prevHook = (() => {
+      const hooks = lastEntry?.hooks
+      const first = Array.isArray(hooks) ? hooks[0] : undefined
+      return first && typeof first === 'object' && !Array.isArray(first)
+        ? (first as Record<string, unknown>)
+        : undefined
+    })()
     await saveHook(
       buildHookPayload(
         form.value,
         appStore.cwd || undefined,
         original.value,
-        isEdit.value && form.value.scope !== originalScope.value ? originalScope.value : undefined
+        isEdit.value && form.value.scope !== originalScope.value ? originalScope.value : undefined,
+        prevHook
       )
     )
     emit('saved')

@@ -4,12 +4,18 @@ import {
   argsSplit,
   buildHookPayload,
   filterPlugins,
+  hookEntryFromJson,
+  hookEntryRebuild,
   hookEntryToForm,
+  hookEntryToJson,
   isIconUrl,
   mcpConfigToForm,
+  mcpEntryFromJson,
+  mcpEntryToJson,
   orderMarkets,
   mcpFormToConfig,
   parseFrontmatter,
+  type HookForm,
 } from '@/components/editor/model'
 
 // ==================== Markdown frontmatter ====================
@@ -258,6 +264,31 @@ describe('Hook_Payload', () => {
     )
     expect(prompt.hook).toEqual({ type: 'prompt', prompt: '检查任务', model: 'haiku', timeout: 60 })
   })
+
+  // 2026-11-27 审核：保存链此前走 hookFormToObject（只产受管键），JSON 模式
+  // 编辑出的未知自定义键（async 等）在保存时静默丢失——prevHook 带回修复
+  it('BuildHookPayload_004_prevHook保留未知自定义键', () => {
+    const form = {
+      scope: 'user', event: 'PostToolUse', type: 'command', matcher: 'Bash',
+      command: 'new-cmd', url: '', headers: [], prompt: '', model: '', timeout: '',
+    } as Parameters<typeof buildHookPayload>[0]
+    // 不传 prevHook：维持旧行为（只产受管键）
+    expect(buildHookPayload(form, undefined).hook).toEqual({ type: 'command', command: 'new-cmd' })
+    // 传 prevHook：受管字段以表单为准，未知键从旧对象带回
+    const payload = buildHookPayload(form, undefined, undefined, undefined, {
+      type: 'command', command: 'old-cmd', timeout: 5, async: true, statusMessage: '运行中',
+    })
+    expect(payload.hook).toEqual({
+      type: 'command', command: 'new-cmd', async: true, statusMessage: '运行中',
+    })
+    // 类型切换：旧类型字段（command）不残留
+    const switched = buildHookPayload(
+      { ...form, type: 'prompt', prompt: '检查', command: 'old' },
+      undefined, undefined, undefined,
+      { type: 'command', command: 'old-cmd', async: true }
+    )
+    expect(switched.hook).toEqual({ type: 'prompt', prompt: '检查', async: true })
+  })
 })
 
 /** matcher 条目 JSON → 表单：command/http/prompt/agent 按类型取字段；未知类型原样保留；非法结构拒绝 */
@@ -304,6 +335,118 @@ describe('HookEntry_ToForm', () => {
     expect(hookEntryToForm('{"matcher":"x"}', { scope: 'user', event: 'Stop' })).toBeNull()
     expect(hookEntryToForm('{"hooks":[]}', { scope: 'user', event: 'Stop' })).toBeNull()
     expect(hookEntryToForm('{"hooks":["x"]}', { scope: 'user', event: 'Stop' })).toBeNull()
+  })
+})
+
+// ==================== JSON 模式（带键原生形态） ====================
+
+/** MCP 带键 JSON：{"<名称>": 配置}——与 mcpServers 下条目形态 1:1，
+ * 解析唯一键回填名称，JSON 改键 = 重命名 */
+describe('McpJson_Keyed', () => {
+  it('ToJson_001_名称为键包裹配置', () => {
+    const json = mcpEntryToJson('srv', { type: 'stdio', command: 'npx' })
+    // 独立真值：解析回手写对象
+    expect(JSON.parse(json)).toEqual({ srv: { type: 'stdio', command: 'npx' } })
+  })
+
+  it('FromJson_002_单键解析与改键重命名', () => {
+    const r = mcpEntryFromJson('{\n  "old-name": { "type": "http", "url": "https://x/mcp" }\n}')
+    expect(r).toEqual({ ok: true, name: 'old-name', config: { type: 'http', url: 'https://x/mcp' } })
+    // JSON 改键 = 重命名：名称来自键
+    const renamed = mcpEntryFromJson('{ "new-name": { "type": "http", "url": "https://x/mcp" } }')
+    expect(renamed).toEqual({ ok: true, name: 'new-name', config: { type: 'http', url: 'https://x/mcp' } })
+  })
+
+  it('FromJson_003_非法结构拒绝', () => {
+    expect(mcpEntryFromJson('not json')).toEqual({ ok: false, reason: 'invalid' })
+    expect(mcpEntryFromJson('[]')).toEqual({ ok: false, reason: 'notObject' })
+    // 值不是对象（名称键下必须是配置对象）
+    expect(mcpEntryFromJson('{"a": 1}')).toEqual({ ok: false, reason: 'notObject' })
+    // 0 个或 2 个键
+    expect(mcpEntryFromJson('{}')).toEqual({ ok: false, reason: 'multiKey' })
+    expect(mcpEntryFromJson('{"a": {}, "b": {}}')).toEqual({ ok: false, reason: 'multiKey' })
+  })
+})
+
+/** Hook 带键 JSON：{"<事件>": [matcher 条目]}——与 settings.json hooks 下条目形态
+ * 1:1，事件取自唯一键，JSON 改键 = 跨事件移动 */
+describe('HookJson_Keyed', () => {
+  const entry = { matcher: 'Bash', hooks: [{ type: 'command', command: 'fmt' }] }
+
+  it('ToJson_001_事件为键包裹条目数组', () => {
+    const json = hookEntryToJson('PreToolUse', entry)
+    expect(JSON.parse(json)).toEqual({ PreToolUse: [entry] })
+  })
+
+  it('FromJson_002_键为事件且回填表单', () => {
+    const r = hookEntryFromJson(hookEntryToJson('PreToolUse', entry), { scope: 'user' })
+    expect(r.ok).toBe(true)
+    if (r.ok) {
+      expect(r.event).toBe('PreToolUse')
+      expect(r.entry).toEqual(entry)
+      expect(r.form).toEqual({
+        scope: 'user', event: 'PreToolUse', type: 'command', matcher: 'Bash',
+        command: 'fmt', url: '', headers: [], prompt: '', model: '', timeout: '',
+      })
+    }
+    // 改键 = 跨事件移动：事件跟随键；scope 取 defaults
+    const moved = hookEntryFromJson(
+      '{"PostToolUse": [{"hooks": [{"type": "http", "url": "http://x/h"}]}]}',
+      { scope: 'project' }
+    )
+    expect(moved.ok).toBe(true)
+    if (moved.ok) {
+      expect(moved.event).toBe('PostToolUse')
+      expect(moved.form.event).toBe('PostToolUse')
+      expect(moved.form.scope).toBe('project')
+      expect(moved.form.type).toBe('http')
+      expect(moved.form.url).toBe('http://x/h')
+    }
+  })
+
+  it('FromJson_003_非法结构拒绝', () => {
+    expect(hookEntryFromJson('not json', { scope: 'user' })).toEqual({ ok: false, reason: 'invalid' })
+    expect(hookEntryFromJson('[]', { scope: 'user' })).toEqual({ ok: false, reason: 'notObject' })
+    // 0 个或 2 个事件键
+    expect(hookEntryFromJson('{}', { scope: 'user' })).toEqual({ ok: false, reason: 'multiKey' })
+    expect(hookEntryFromJson('{"A": {}, "B": []}', { scope: 'user' })).toEqual({ ok: false, reason: 'multiKey' })
+    // 值不是数组
+    expect(hookEntryFromJson('{"A": {}}', { scope: 'user' })).toEqual({ ok: false, reason: 'notArray' })
+    // 数组只能有一条 matcher 条目（0 条 / 2 条）
+    expect(hookEntryFromJson('{"A": []}', { scope: 'user' })).toEqual({ ok: false, reason: 'multiEntry' })
+    expect(hookEntryFromJson('{"A": [1, 2]}', { scope: 'user' })).toEqual({ ok: false, reason: 'multiEntry' })
+    // 条目不是对象 / hooks 缺失或为空
+    expect(hookEntryFromJson('{"A": ["x"]}', { scope: 'user' })).toEqual({ ok: false, reason: 'badEntry' })
+    expect(hookEntryFromJson('{"A": [{"hooks": []}]}', { scope: 'user' })).toEqual({ ok: false, reason: 'badEntry' })
+  })
+})
+
+/** 表单重建 hook 对象：受管字段以表单为准，未知自定义键保留 */
+describe('HookEntry_Rebuild', () => {
+  // 回归：类型切换曾把旧类型字段残留进条目（command→http 后 hooks[0] 仍有 command）
+  it('Rebuild_001_类型切换不残留旧字段', () => {
+    const base: HookForm = {
+      scope: 'user', event: 'PreToolUse', type: 'command', matcher: '',
+      command: 'old-cmd', url: '', headers: [], prompt: '', model: '', timeout: '',
+    }
+    const next = hookEntryRebuild(
+      { type: 'command', command: 'old-cmd', timeout: 30 },
+      { ...base, type: 'http', url: 'http://x/hook' }
+    )
+    // 独立手写真值：command/timeout 随类型切换丢弃，不残留
+    expect(next).toEqual({ type: 'http', url: 'http://x/hook' })
+  })
+
+  it('Rebuild_002_未知自定义键跨类型保留', () => {
+    const base: HookForm = {
+      scope: 'user', event: 'Stop', type: 'prompt', matcher: '',
+      command: '', url: '', headers: [], prompt: '', model: '', timeout: '',
+    }
+    const next = hookEntryRebuild(
+      { type: 'command', command: 'old', async: true, statusMessage: '运行中' },
+      { ...base, prompt: '检查' }
+    )
+    expect(next).toEqual({ type: 'prompt', prompt: '检查', async: true, statusMessage: '运行中' })
   })
 })
 

@@ -15,13 +15,14 @@
 
 | 编辑器 | 表单字段 | 源码/JSON 模式 | 落盘 |
 |---|---|---|---|
-| `McpEditor.vue` | 名称(可改)/作用域/类型(stdio\|http\|sse)/命令+参数/环境变量/URL+Headers | server 配置 JSON（双向同步） | 三作用域，见下 |
+| `McpEditor.vue` | 名称(可改)/作用域/类型(stdio\|http\|sse)/命令+参数/环境变量/URL+Headers | `{"<名称>": 配置}` 键值 JSON（双向同步，改键=重命名） | 三作用域，见下 |
 | `SkillEditor.vue` | 名称(可改)/作用域/描述/正文 | SKILL.md 全文（校验 frontmatter 可解析 + name 一致） | `<scope skills>/<name>/SKILL.md` |
 | `AgentEditor.vue` | 名称(可改)/作用域/描述/tools/model/正文 | md 全文 | `<scope agents>/<name>.md` |
-| `HookEditor.vue` | 事件/作用域/类型(command\|http\|prompt\|agent\|mcp_tool)/匹配器/按类型字段/超时 | matcher 条目 JSON | settings.json `hooks.<event>` 合并 |
+| `HookEditor.vue` | 事件(可改)/作用域/类型(command\|http\|prompt\|agent\|mcp_tool)/匹配器/按类型字段/超时 | `{"<事件>": [matcher 条目]}` 键值 JSON（改键=跨事件移动） | settings.json `hooks.<event>` 合并 |
 
 通用约定：
 
+- **JSON 模式 = 带键原生形态**：MCP 显示 `{"<名称>": {…配置…}}`、Hook 显示 `{"<事件>": [matcher 条目]}`——与原生文件里该条目的形态 1:1（作用域决定落到哪个文件，不进 JSON）。单键语义：失焦/保存解析唯一键回填名称/事件（**JSON 改键 = 重命名 / 跨事件移动**，保存走 original/originalName 链路）；多键对象、Hook 事件数组多条条目报错拒绝。hook 事件不再锁死（表单下拉与 JSON 键均可改，保存时从原事件摘除写入新事件，自定义事件动态注入下拉）；旧「裸片段」格式不兼容（jsonText 不持久化，错误提示给出正确形态）。纯函数在 `model.ts`（`mcpEntryToJson/FromJson`、`hookEntryToJson/FromJson`）。
 - **作用域**：skill/agent = user/project；mcp/hook = user/project/local，**编辑中可改**——保存时跨作用域移动（skill/agent 整目录 move + disabled 备份随迁；MCP 从旧作用域配置移除原 key；hook 从旧 settings 移除原条目，均不留 disabled 备份——条目是迁移不是删除）。删除/定位按打开时的原作用域（用户改选未保存不影响）。项目级写入前提示（`.mcp.json`/`.claude/` 会随 git 提交）。
 - **原子写 + 跨进程锁**：JSON 走 `write_json_atomic`；锁文件集中放 `~/.cc-box/locks/<hash>.lock`（不在项目根落 `config.lock`，避免污染用户 git 工作区）。
 - **可逆**：**删除一律彻底删**（四类资源，二次确认后直接移除并清理历史 disabled 备份，不可恢复）；可逆性由「开关」承担——禁用 = 移入 `~/.cc-box/disabled/`，启用移回。二次确认统一用前端 `uiConfirm`（`ConfirmDialog.vue`，App.vue 挂载一份），不用浏览器原生 confirm。
@@ -42,7 +43,7 @@
 - 条目定位：hooks 数组条目无 id，定位键 = `hash(event | matcher | hook0 签名)`（`hook_entry_key`）；command 类型签名 = 命令原文（老 disabled 备份文件名兼容），其他类型 = hook 对象 canonical JSON。前端一律使用列表下发的 `key`（`HookListItem.key`）做启停/删除/编辑定位；外部手改后失配报「配置已被外部修改，请刷新」——不做模糊匹配。
 - **插件 hooks 分组**：Hooks 面板末尾有「插件」组（只读，头部/指示器/行样式与其他组同构——注意 `.expand-icon` 样式须在 HooksPanel 本地定义，HookGroup 的 scoped 样式不外溢），条目来自已安装插件的 hooks——`PluginInfo.hooks` 为 `PluginHookEntry[]`（事件 + matcher + 类型 + 摘要 + 超时），由 `parse_plugin_hooks_detail` 逐条展开（hooks/hooks.json、根 hooks.json、plugin.json 内联 object 或路径式声明；摘要取 command→url→prompt 回退）。行标题只显示事件名，点击展开只读详情（plugin/matcher/type/timeout/cmd），无开关、无编辑。Plugins 面板的 hooks 明细展示事件 + matcher + 摘要。
 - 开关：禁用 = 条目摘出存 `disabled/hooks/hook-<key>.json`；启用 = 找回写回。前端与 skills/agents/mcp 同一模式：store `toggleHookEnabled` 乐观更新 + `markSelfWrite('hooks')` 抑制本端回环刷新，其他端经 state-changed 静默重拉。
-- 事件清单：前端下拉为常用 13 事件（已对 Claude Code `HOOK_EVENTS` 源码核实），后端只校验形态（`^[A-Za-z_]{2,40}$`），向前兼容新事件。
+- 事件清单：前端下拉为常用 13 事件（已对 Claude Code `HOOK_EVENTS` 源码核实），条目事件不在清单时（JSON 键改出/旧配置自定义事件）动态注入下拉首项；后端只校验形态（`^[A-Za-z_]{2,40}$`），向前兼容新事件。
 - `_ccbox` 标记方案**已废弃**（本轮不需要商店所有权），hook 条目保持 Claude 原生结构零污染。
 
 ## Plugin 市场

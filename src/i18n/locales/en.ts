@@ -732,6 +732,8 @@
   editorJsonInvalid: 'Failed to parse JSON',
   editorJsonMustBeObject: 'JSON must be an object',
   editorMcpFormUnsupported: 'This JSON cannot be represented by the form (e.g. type is not a listed option). Original kept; you can stay in JSON mode and save, or fix it before switching to form',
+  editorMcpJsonHint: "JSON is the entry's exact shape in the config file: {'{'} \"<name>\": {'{'} …config… {'}'} {'}'}; editing the key renames it",
+  editorMcpJsonSingleKey: "JSON must contain exactly one name key: {'{'} \"<name>\": {'{'} …config… {'}'} {'}'}",
   mcpNew: 'New MCP Server',
   editorMcpNewTitle: 'New MCP Server',
   editorMcpEditTitle: 'Edit MCP Server: {name}',
@@ -793,9 +795,12 @@
   editorHookMcpToolHint: 'Edit this type in JSON mode (switch to JSON in the header)',
   editorHookTimeout: 'Timeout (seconds, optional)',
   editorHookTimeoutHint: 'Empty uses the Claude Code default',
-  editorHookJsonHint: "Matcher entry shape: {'{'} matcher, hooks: [{'{'} type, … {'}'}] {'}'}",
+  editorHookJsonHint: "JSON is the entry's exact shape in settings.json: {'{'} \"<event>\": [ {'{'} matcher, hooks: [...] {'}'} ] {'}'}; editing the key moves it across events",
   editorHookMultiHint: 'Multiple commands — merge them in settings.json before editing',
   editorHookJsonInvalid: "Not a valid hook matcher entry (needs hooks: [ {'{'} … {'}'} ])",
+  editorHookJsonSingleEvent: "JSON must contain exactly one event key: {'{'} \"<event>\": [ …matcher entry… ] {'}'}",
+  editorHookJsonSingleEntry: "The event array supports a single matcher entry only (merge multiple commands in settings.json first)",
+  editorHookEventMoveHint: 'Will move from the original event to the selected one on save',
   editorHookDeleteConfirm: 'Delete {event} hook? It will be removed permanently (including any disabled backup).',
 
   // ---------- Plugin market ----------

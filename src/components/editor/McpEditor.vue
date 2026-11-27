@@ -98,6 +98,7 @@
         spellcheck="false"
         @blur="onJsonBlur"
       ></textarea>
+      <span class="editor-hint">{{ t('editorMcpJsonHint') }}</span>
     </div>
 
     <div v-if="error" class="editor-error">{{ error }}</div>
@@ -113,7 +114,15 @@ import { useEditorFormSync } from '@/composables/useEditorFormSync'
 import { uiConfirm } from '@/composables/useConfirm'
 import EditorModal from './EditorModal.vue'
 import ModeSwitch from './ModeSwitch.vue'
-import { argsJoin, mcpConfigToForm, mcpFormToConfig, type McpForm } from './model'
+import {
+  argsJoin,
+  mcpConfigToForm,
+  mcpEntryFromJson,
+  mcpEntryToJson,
+  mcpFormToConfig,
+  type McpForm,
+  type McpJsonFailReason,
+} from './model'
 
 const { t } = useI18n()
 const appStore = useAppStore()
@@ -165,6 +174,12 @@ const error = ref('')
 /** 表单无法管理的未知顶层键（region/ttl 等）：表单流转时原样保留 */
 const MANAGED_CONFIG_KEYS = ['type', 'command', 'args', 'url', 'env', 'headers']
 let lastConfig: Record<string, unknown> | null = null
+/** JSON 结构错误 → 提示文案 key（reason 见 model.ts McpJsonFailReason） */
+const MCP_JSON_ERROR_KEYS: Record<McpJsonFailReason, string> = {
+  invalid: 'editorJsonInvalid',
+  notObject: 'editorJsonMustBeObject',
+  multiKey: 'editorMcpJsonSingleKey',
+}
 const busy = ref(false)
 
 /** 表单基线（脏检查） */
@@ -231,7 +246,7 @@ watch(
           ...(props.server.env && Object.keys(props.server.env).length ? { env: props.server.env } : {}),
           ...(props.server.headers && Object.keys(props.server.headers).length ? { headers: props.server.headers } : {}),
         }
-        jsonText.value = JSON.stringify(dumped, null, 2)
+        jsonText.value = mcpEntryToJson(props.server.name, dumped)
         lastConfig = dumped
       }
     } else {
@@ -240,7 +255,7 @@ watch(
     }
     // 未知形态分支已自带 jsonText（覆盖会丢配置），只在表单模式生成
     if (mode.value !== 'json') {
-      jsonText.value = JSON.stringify(currentFormConfig(), null, 2)
+      jsonText.value = mcpEntryToJson(form.value.name, currentFormConfig())
     }
     baseline = snapshot()
   }
@@ -264,27 +279,23 @@ function snapshot(): string {
 }
 
 // 表单 ↔ JSON 同步：表单改动实时生成 JSON；JSON 失焦时校验并回填表单
+// （JSON 为带键原生形态 {"<名称>": {…配置…}}，名称取自唯一键，改键 = 重命名）
 const { commitFromText } = useEditorFormSync({
   form,
   text: jsonText,
   isFormMode: () => mode.value === 'form',
-  build: () => JSON.stringify(currentFormConfig(), null, 2),
+  build: () => mcpEntryToJson(form.value.name, currentFormConfig()),
   parse: (text, current) => {
-    let parsed: unknown
-    try {
-      parsed = JSON.parse(text)
-    } catch (e) {
-      jsonError.value = String(e instanceof Error ? e.message : e)
+    const parsed = mcpEntryFromJson(text)
+    if (!parsed.ok) {
+      jsonError.value = t(MCP_JSON_ERROR_KEYS[parsed.reason])
       return null
     }
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      jsonError.value = t('editorJsonMustBeObject')
-      return null
-    }
-    lastConfig = parsed as Record<string, unknown>
-    const next = mcpConfigToForm(lastConfig, {
+    jsonError.value = ''
+    lastConfig = parsed.config
+    const next = mcpConfigToForm(parsed.config, {
       scope: current.scope,
-      name: current.name,
+      name: parsed.name,
     })
     if (!next) {
       // JSON 合法但表单无法表达（type 不在选项内等）：提示但不阻断 JSON 模式保存
@@ -306,19 +317,27 @@ function onJsonBlur() {
 async function onSave() {
   error.value = ''
   let config: Record<string, unknown> | null
+  let name: string
   if (mode.value === 'json') {
-    try {
-      config = JSON.parse(jsonText.value)
-    } catch {
-      error.value = t('editorJsonInvalid')
+    // JSON 模式：名称取自唯一键（改键 = 重命名，经 originalName 走改名链路）
+    const parsed = mcpEntryFromJson(jsonText.value)
+    if (!parsed.ok) {
+      error.value = t(MCP_JSON_ERROR_KEYS[parsed.reason])
       return
     }
+    if (!parsed.name.trim()) {
+      error.value = t('editorMcpIncomplete')
+      return
+    }
+    name = parsed.name.trim()
+    config = parsed.config
   } else {
     config = mcpFormToConfig(form.value)
     if (!config) {
       error.value = t('editorMcpIncomplete')
       return
     }
+    name = form.value.name.trim()
   }
   const scope = form.value.scope
   if (scope !== 'user' && !appStore.cwd) {
@@ -329,10 +348,10 @@ async function onSave() {
   try {
     await saveMcpServer({
       scope,
-      name: form.value.name.trim(),
+      name,
       config: config as Record<string, unknown>,
       projectPath: scope !== 'user' ? appStore.cwd : undefined,
-      originalName: isEdit.value && form.value.name.trim() !== originalName.value ? originalName.value : undefined,
+      originalName: isEdit.value && name !== originalName.value ? originalName.value : undefined,
       originalScope: isEdit.value && scope !== originalScope.value ? originalScope.value : undefined,
     })
     emit('saved')

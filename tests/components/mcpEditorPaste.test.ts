@@ -21,12 +21,14 @@ vi.mock('@/api/transport', () => ({
 import McpEditor from '@/components/editor/McpEditor.vue'
 import type { McpServerInfo } from '@/types'
 
-/** 用户粘贴样例：type 不在选项内 + 带自定义字段 */
+/** 用户粘贴样例（带键原生形态）：type 不在选项内 + 带自定义字段 */
 const PASTED_JSON = JSON.stringify(
   {
-    type: 'http-',
-    url: 'https://open.bigmodel.cn/api/mcp/web_reader/mcp-',
-    headers: { Authorization: 'Bearer d3c295BNz' },
+    'web-reader': {
+      type: 'http-',
+      url: 'https://open.bigmodel.cn/api/mcp/web_reader/mcp-',
+      headers: { Authorization: 'Bearer d3c295BNz' },
+    },
   },
   null,
   2
@@ -61,8 +63,9 @@ describe('McpEditor 粘贴未知 type 与未知字段', () => {
     await w.setProps({ visible: true })
     await flushPromises()
     await gotoJsonAndSet(w, PASTED_JSON)
-    // 提示出现（editor-hint，非阻断性错误）
-    expect(w.find('.editor-hint').exists()).toBe(true)
+    // 结构提示出现（非阻断性错误；JSON 模式另有常驻形态说明 editor-hint，按文案区分）
+    const hint = w.findAll('.editor-hint').find(h => h.text() === 'editorMcpFormUnsupported')
+    expect(hint).toBeTruthy()
     expect(w.find('.editor-error').exists()).toBe(false)
     // 提示不阻断 JSON 模式保存（配置本身合法，Claude 侧才校验 type）
     const saveBtn = w.findAll('button').find(b => b.text() === 'save')!
@@ -71,6 +74,8 @@ describe('McpEditor 粘贴未知 type 与未知字段', () => {
     await flushPromises()
     expect(mockSave).toHaveBeenCalledTimes(1)
     const req = mockSave.mock.calls[0][0]
+    // 名称取自 JSON 唯一键
+    expect(req.name).toBe('web-reader')
     expect(req.config.type).toBe('http-')
     expect(req.config.headers.Authorization).toBe('Bearer d3c295BNz')
   })
@@ -88,10 +93,14 @@ describe('McpEditor 粘贴未知 type 与未知字段', () => {
     const w = mountEditor(server)
     await w.setProps({ visible: true })
     await flushPromises()
-    // 先在 JSON 模式写入含未知字段的配置并失焦提交
+    // 先在 JSON 模式写入含未知字段的配置（带键原生形态）并失焦提交
     await gotoJsonAndSet(
       w,
-      JSON.stringify({ type: 'http', url: 'https://example.com/mcp', region: 'cn', ttl: 60 }, null, 2)
+      JSON.stringify(
+        { 'web-reader': { type: 'http', url: 'https://example.com/mcp', region: 'cn', ttl: 60 } },
+        null,
+        2
+      )
     )
     // 切表单，改 url
     const ms2 = w.findComponent({ name: 'ModeSwitch' })
