@@ -454,6 +454,17 @@ function createTerminal(tabId: string): Terminal {
     scrollbar: { showScrollbar: false },
   })
 
+  // 隐藏原生光标（渲染层兜底）：xterm 只在 !isCursorHidden 时画光标，而该标志
+  // 会被数据流里的序列改回可见——不止 ESC[?25h，软复位 ESC[!p 也会置为可见
+  // （只过滤 ?25h 时实测光标仍以线条残留）。每次数据解析完成后强制盖回
+  // 隐藏态，与具体有哪些序列解耦。Claude 的输入光标是自己渲染的，不受影响。
+  const core = (term as unknown as { core?: { coreService?: { isCursorHidden: boolean } } }).core
+  if (core?.coreService) {
+    term.onWriteParsed(() => {
+      core.coreService!.isCursorHidden = true
+    })
+  }
+
   const fitAddon = new FitAddon()
   term.loadAddon(fitAddon)
 
