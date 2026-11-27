@@ -245,6 +245,9 @@ function loadRendererAddons(term: Terminal, tabId: string) {
   }
 
   attachNativePasteIntercept(term, tabId)
+  // 先装兜底再挂 WebGL：attachWebgl 内部会 setRenderer，顺序反了这次设置就拦不到
+  // （此时 term.open() 已执行，_renderService 已存在）
+  hideNativeCursorBeforeRender(term)
   attachWebgl(term)
 }
 
@@ -396,6 +399,8 @@ function attachNativePasteIntercept(term: Terminal, tabId: string) {
 
 // 跟踪每个 Terminal 的 WebGL addon 实例(用于 reload)
 const webglAddons = new WeakMap<Terminal, WebglAddon>()
+/** 已安装原生光标兜底的终端（loadRendererAddons 会被多处调用，防止重复包装） */
+const cursorGuardInstalled = new WeakSet<Terminal>()
 
 function attachWebgl(term: Terminal) {
   try {
@@ -410,6 +415,56 @@ function attachWebgl(term: Terminal) {
   } catch (err) {
     console.warn('[XTerm] WebGL init failed, fallback to DOM renderer:', err)
   }
+}
+
+/**
+ * 原生光标隐藏的渲染层兜底：包装渲染服务的 setRenderer，让每个被设置的渲染器
+ * （WebglAddon / DOM 回退 / context loss 后重建的实例）的 renderRows 在绘制前
+ * 把 coreService.isCursorHidden 强制盖回 true。渲染器只在该标志为 false 时画光标。
+ *
+ * 挂在渲染入口（而非数据解析事件）：光标是渲染时画的，解析完到渲染之间标志
+ * 仍可能被改；在绘制前一刻盖回才与数据流里的序列、写入路径完全无关。
+ *
+ * 依赖 xterm 内部路径，两处踩坑（Chromium 实测，xterm 6.1.0-beta）：
+ * - 访问入口是私有字段 `term._core`，**没有** `term.core`——写错只会得到
+ *   undefined，兜底被静默跳过、不报错（曾因此失效一版）
+ * - `_core._renderService` 在 `term.open()` 内才创建，必须 open() 之后安装
+ * allowProposedApi 已开；升级 xterm 后若光标复现先查这两处。
+ */
+function hideNativeCursorBeforeRender(term: Terminal) {
+  if (cursorGuardInstalled.has(term)) return
+  const core = (
+    term as unknown as {
+      _core?: {
+        coreService?: { isCursorHidden: boolean }
+        _renderService?: { setRenderer: (r: unknown) => void }
+      }
+    }
+  )._core
+  const coreService = core?.coreService
+  const renderService = core?._renderService
+  if (!coreService || !renderService) {
+    console.warn('[XTerm] hideNativeCursor: xterm 内部结构不符（需 term.open() 之后调用），原生光标兜底未安装')
+    return
+  }
+  const original = renderService.setRenderer.bind(renderService)
+  renderService.setRenderer = (renderer: unknown) => {
+    const r = renderer as { renderRows?: (start: number, end: number) => void } | null
+    if (r && typeof r.renderRows === 'function') {
+      const originalRender = r.renderRows.bind(r)
+      r.renderRows = (start: number, end: number) => {
+        coreService.isCursorHidden = true
+        originalRender(start, end)
+      }
+    }
+    original(renderer)
+  }
+  // 已有渲染器（DOM 默认渲染器在 open() 时设置）也要包上
+  const current = (renderService as unknown as { _renderer?: { value?: { renderRows?: unknown } } })._renderer?.value
+  if (current && typeof current.renderRows === 'function') {
+    renderService.setRenderer(current)
+  }
+  cursorGuardInstalled.add(term)
 }
 
 /**
@@ -454,16 +509,13 @@ function createTerminal(tabId: string): Terminal {
     scrollbar: { showScrollbar: false },
   })
 
-  // 隐藏原生光标（渲染层兜底）：xterm 只在 !isCursorHidden 时画光标，而该标志
-  // 会被数据流里的序列改回可见——不止 ESC[?25h，软复位 ESC[!p 也会置为可见
-  // （只过滤 ?25h 时实测光标仍以线条残留）。每次数据解析完成后强制盖回
-  // 隐藏态，与具体有哪些序列解耦。Claude 的输入光标是自己渲染的，不受影响。
-  const core = (term as unknown as { core?: { coreService?: { isCursorHidden: boolean } } }).core
-  if (core?.coreService) {
-    term.onWriteParsed(() => {
-      core.coreService!.isCursorHidden = true
-    })
-  }
+  // 隐藏原生光标：Claude 的输入光标是自己渲染的字符块，不走终端光标；xterm 原生
+  // 光标在 TUI 重绘时随光标位置跳动。渲染器（DOM 与 WebGL 同）只在
+  // !isCursorHidden 时画光标，而该标志会被数据流里的序列改回可见——不止
+  // ESC[?25h，软复位 ESC[!p 也会置为可见。
+  // 兜底在渲染入口强制隐藏（见 hideNativeCursorBeforeRender）。注意不能在此处
+  // 安装：_core._renderService 在 term.open() 内才创建，这里调用会被静默跳过——
+  // 统一在 loadRendererAddons（每个 open() 之后都会调）里安装。
 
   const fitAddon = new FitAddon()
   term.loadAddon(fitAddon)
