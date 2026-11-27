@@ -62,7 +62,6 @@ import { useIsMobile } from '@/composables/useMediaQuery'
 import { safeDispose } from '@/utils/dispose'
 import { relativizePath } from '@/utils/path'
 import { mapTerminalGlyphs } from '@/utils/terminal-glyphs'
-import { createCursorShowFilter } from '@/utils/cursor-filter'
 import { buildTapMouseInit } from '@/utils/tap-mouse'
 import { shouldInterceptImeInput, imeAppendDelta, imeBackspaceDelta } from '@/utils/ime-paste'
 import { loadOsc52Clipboard } from '@/utils/osc52-clipboard'
@@ -120,8 +119,6 @@ const terminalInstances = reactive(new Map<string, {
   term: Terminal
   fitAddon: FitAddon
   ptyId: string
-  /** 「显示光标」序列过滤器（每个实例独立，持有跨 chunk 的暂存状态） */
-  cursorFilter: ReturnType<typeof createCursorShowFilter>
 }>())
 
 // Terminal DOM 元素引用
@@ -222,33 +219,6 @@ function pickFontFamily(): string {
 function effectiveFontSize(size: number | undefined): number {
   const base = size ?? 12
   return isMobile.value ? Math.max(6, Math.round(base * 0.9)) : base
-}
-
-// 在 term.open(el) 之后加载 Unicode 11 + WebGL addon
-//
-// glyph atlas corruption(xtermjs/xterm.js#6038)已由上游修复:
-// PR #6042(共享 atlas 页合并后 renderer 状态过期)+ PR #6043(atlas 页数超容量),
-// 包含在 @xterm/xterm@6.1.0-beta.303 / @xterm/addon-webgl@0.20.0-beta.299。
-//
-// 每次切到 Tab 时主动 reload 该 Tab 的 WebGL addon(见 reloadWebgl)——保留作兜底:
-// beta 线仍可能出现回归,reload 是唯一能消除已发生 corruption 的方式;
-// 放在「Tab 切入」时机执行,切换动画遮盖 reload 的几十毫秒重建,用户无感。
-//
-// 详见 docs/webgl-corruption-fix.md
-function loadRendererAddons(term: Terminal, tabId: string) {
-  try {
-    const unicode11 = new Unicode11Addon()
-    term.loadAddon(unicode11)
-    term.unicode.activeVersion = '11'
-  } catch (err) {
-    console.warn('[XTerm] Unicode 11 addon unavailable, fallback to default:', err)
-  }
-
-  attachNativePasteIntercept(term, tabId)
-  // 先装兜底再挂 WebGL：attachWebgl 内部会 setRenderer，顺序反了这次设置就拦不到
-  // （此时 term.open() 已执行，_renderService 已存在）
-  hideNativeCursorBeforeRender(term)
-  attachWebgl(term)
 }
 
 /**
@@ -397,10 +367,32 @@ function attachNativePasteIntercept(term: Terminal, tabId: string) {
   }, true)
 }
 
+// 在 term.open(el) 之后加载 Unicode 11 + WebGL addon
+//
+// glyph atlas corruption(xtermjs/xterm.js#6038)已由上游修复:
+// PR #6042(共享 atlas 页合并后 renderer 状态过期)+ PR #6043(atlas 页数超容量),
+// 包含在 @xterm/xterm@6.1.0-beta.303 / @xterm/addon-webgl@0.20.0-beta.299。
+//
+// 每次切到 Tab 时主动 reload 该 Tab 的 WebGL addon(见 reloadWebgl)——保留作兜底:
+// beta 线仍可能出现回归,reload 是唯一能消除已发生 corruption 的方式;
+// 放在「Tab 切入」时机执行,切换动画遮盖 reload 的几十毫秒重建,用户无感。
+//
+// 详见 docs/webgl-corruption-fix.md
+function loadRendererAddons(term: Terminal, tabId: string) {
+  try {
+    const unicode11 = new Unicode11Addon()
+    term.loadAddon(unicode11)
+    term.unicode.activeVersion = '11'
+  } catch (err) {
+    console.warn('[XTerm] Unicode 11 addon unavailable, fallback to default:', err)
+  }
+
+  attachNativePasteIntercept(term, tabId)
+  attachWebgl(term)
+}
+
 // 跟踪每个 Terminal 的 WebGL addon 实例(用于 reload)
 const webglAddons = new WeakMap<Terminal, WebglAddon>()
-/** 已安装原生光标兜底的终端（loadRendererAddons 会被多处调用，防止重复包装） */
-const cursorGuardInstalled = new WeakSet<Terminal>()
 
 function attachWebgl(term: Terminal) {
   try {
@@ -418,53 +410,33 @@ function attachWebgl(term: Terminal) {
 }
 
 /**
- * 原生光标隐藏的渲染层兜底：包装渲染服务的 setRenderer，让每个被设置的渲染器
- * （WebglAddon / DOM 回退 / context loss 后重建的实例）的 renderRows 在绘制前
- * 把 coreService.isCursorHidden 强制盖回 true。渲染器只在该标志为 false 时画光标。
+ * 隐藏 xterm 原生光标。
  *
- * 挂在渲染入口（而非数据解析事件）：光标是渲染时画的，解析完到渲染之间标志
- * 仍可能被改；在绘制前一刻盖回才与数据流里的序列、写入路径完全无关。
+ * 为什么要隐藏：Claude CLI 的输入光标是它自己渲染的字符块，不走终端光标；
+ * 原生光标在它那里纯属多余——TUI 重绘时跟着光标位置跳，表现为「随渲染
+ * 点位闪烁的黑块/线条」（spinner 行更新处最明显）。
  *
- * 依赖 xterm 内部路径，两处踩坑（Chromium 实测，xterm 6.1.0-beta）：
- * - 访问入口是私有字段 `term._core`，**没有** `term.core`——写错只会得到
- *   undefined，兜底被静默跳过、不报错（曾因此失效一版）
- * - `_core._renderService` 在 `term.open()` 内才创建，必须 open() 之后安装
- * allowProposedApi 已开；升级 xterm 后若光标复现先查这两处。
+ * 怎么做到：两种渲染器（DOM / WebGL）都只在 isCursorHidden 为 false 时画光标，
+ * 而 CLI 会用序列把它改回去（ESC[?25h、软复位 ESC[!p）。与其过滤序列或在渲染
+ * 入口反复盖回，不如让这个标志「写了也白写」：把 coreService 上的 isCursorHidden
+ * 定义成 getter 恒返回 true 的访问器属性，setter 为空操作。
+ *
+ * setter 不能省：xterm 是 ES 模块（严格模式），对只有 getter 的属性赋值会抛
+ * TypeError，且抛在它的写入循环里——write() 回调永不触发，终端输出流彻底卡死
+ * （Chromium 实测：软复位一执行即卡住）。只读访问器此路不通。
+ *
+ * 依赖 xterm 内部路径 `term._core.coreService`（注意是 `_core`，没有 `term.core`；
+ * 写错只会得到 undefined 且不报错）。coreService 在构造时就存在，不受 open()
+ * 时机影响，也无需关心渲染器如何切换。allowProposedApi 已开；升级 xterm 后若
+ * 光标复现先查这里。
  */
-function hideNativeCursorBeforeRender(term: Terminal) {
-  if (cursorGuardInstalled.has(term)) return
-  const core = (
-    term as unknown as {
-      _core?: {
-        coreService?: { isCursorHidden: boolean }
-        _renderService?: { setRenderer: (r: unknown) => void }
-      }
-    }
-  )._core
-  const coreService = core?.coreService
-  const renderService = core?._renderService
-  if (!coreService || !renderService) {
-    console.warn('[XTerm] hideNativeCursor: xterm 内部结构不符（需 term.open() 之后调用），原生光标兜底未安装')
+function hideNativeCursor(term: Terminal) {
+  const coreService = (term as unknown as { _core?: { coreService?: object } })._core?.coreService
+  if (!coreService || !('isCursorHidden' in coreService)) {
+    console.warn('[XTerm] hideNativeCursor: xterm 内部结构不符，原生光标未能隐藏')
     return
   }
-  const original = renderService.setRenderer.bind(renderService)
-  renderService.setRenderer = (renderer: unknown) => {
-    const r = renderer as { renderRows?: (start: number, end: number) => void } | null
-    if (r && typeof r.renderRows === 'function') {
-      const originalRender = r.renderRows.bind(r)
-      r.renderRows = (start: number, end: number) => {
-        coreService.isCursorHidden = true
-        originalRender(start, end)
-      }
-    }
-    original(renderer)
-  }
-  // 已有渲染器（DOM 默认渲染器在 open() 时设置）也要包上
-  const current = (renderService as unknown as { _renderer?: { value?: { renderRows?: unknown } } })._renderer?.value
-  if (current && typeof current.renderRows === 'function') {
-    renderService.setRenderer(current)
-  }
-  cursorGuardInstalled.add(term)
+  Object.defineProperty(coreService, 'isCursorHidden', { get: () => true, set: () => {} })
 }
 
 /**
@@ -498,8 +470,6 @@ function createTerminal(tabId: string): Terminal {
     lineHeight: 1.2,
     cursorBlink: true,
     cursorStyle: 'bar',
-    // 失焦态不画光标（聚焦态的隐藏在 PTY 数据入口过滤，见 filterCursorShow）
-    cursorInactiveStyle: 'none',
     theme: appStore.theme === 'dark' ? darkTheme : lightTheme,
     allowProposedApi: true,
     macOptionIsMeta: true,
@@ -508,14 +478,7 @@ function createTerminal(tabId: string): Terminal {
     // 鼠标滚轮滚动 scrollback 不受影响（滚动条仅视觉隐藏）
     scrollbar: { showScrollbar: false },
   })
-
-  // 隐藏原生光标：Claude 的输入光标是自己渲染的字符块，不走终端光标；xterm 原生
-  // 光标在 TUI 重绘时随光标位置跳动。渲染器（DOM 与 WebGL 同）只在
-  // !isCursorHidden 时画光标，而该标志会被数据流里的序列改回可见——不止
-  // ESC[?25h，软复位 ESC[!p 也会置为可见。
-  // 兜底在渲染入口强制隐藏（见 hideNativeCursorBeforeRender）。注意不能在此处
-  // 安装：_core._renderService 在 term.open() 内才创建，这里调用会被静默跳过——
-  // 统一在 loadRendererAddons（每个 open() 之后都会调）里安装。
+  hideNativeCursor(term)
 
   const fitAddon = new FitAddon()
   term.loadAddon(fitAddon)
@@ -779,13 +742,9 @@ async function setupEventListeners() {
   unlistenPtyOutput = await onPtyOutput(({ id, data }) => {
     for (const [_tabId, instance] of terminalInstances) {
       if (instance.ptyId === id) {
-        // 隐藏原生光标：中和 CLI 发来的「显示光标」序列（Claude 自己画输入光标，
-        // 原生光标只会作为黑块随 TUI 重绘跳动）；过滤器按实例持有，处理跨 chunk 拆分
-        const shown = instance.cursorFilter.filter(data)
-        if (!shown) break
         // 浏览器远程模式：移动端字体缺媒体控制符字形（⏵⏵/⏸ 渲染为 tofu），
         // 写入前兜底替换为等义通用符号；桌面端有系统字体回退，原样写入
-        instance.term.write(isTauriEnv ? shown : mapTerminalGlyphs(shown))
+        instance.term.write(isTauriEnv ? data : mapTerminalGlyphs(data))
         break
       }
     }
@@ -951,7 +910,7 @@ async function createTerminalForTab(tabId: string, ptyId: string) {
   const fitAddon = new FitAddon()
   term.loadAddon(fitAddon)
 
-  terminalInstances.set(tabId, { term: markRaw(term), fitAddon: markRaw(fitAddon), ptyId, cursorFilter: markRaw(createCursorShowFilter()) })
+  terminalInstances.set(tabId, { term: markRaw(term), fitAddon: markRaw(fitAddon), ptyId })
 
   const el = await waitForElement(tabId)
   if (el) {
@@ -1046,7 +1005,7 @@ async function startTab(tabId: string) {
       // 浏览器端 spawnSession 内部已 create+attach，记录标记防重复 attach
       attachedPtyIds.add(info.id)
       if (!isTauriEnv) focusedPtyId = info.id
-      terminalInstances.set(tabId, { term: markRaw(term), fitAddon: markRaw(fitAddon), ptyId: info.id, cursorFilter: markRaw(createCursorShowFilter()) })
+      terminalInstances.set(tabId, { term: markRaw(term), fitAddon: markRaw(fitAddon), ptyId: info.id })
       sessionStore.setTabPty(tabId, info.id)
       sessionStore.setActiveTab(tabId)
       currentDisplayTabId.value = tabId
@@ -1131,7 +1090,7 @@ async function restartTab(tabId: string) {
       // 浏览器端 spawnSession 内部已 create+attach，记录标记防重复 attach
       attachedPtyIds.add(info.id)
       if (!isTauriEnv) focusedPtyId = info.id
-      terminalInstances.set(tabId, { term: markRaw(term), fitAddon: markRaw(fitAddon), ptyId: info.id, cursorFilter: markRaw(createCursorShowFilter()) })
+      terminalInstances.set(tabId, { term: markRaw(term), fitAddon: markRaw(fitAddon), ptyId: info.id })
       sessionStore.setTabPty(tabId, info.id)
       sessionStore.setActiveTab(tabId)
       currentDisplayTabId.value = tabId
@@ -1171,7 +1130,7 @@ async function showSpawnError(tabId: string, term: Terminal, fitAddon: FitAddon,
   // 错误只进 console——这正是「spawn 失败 → 白屏」的成因。
   // 占位实例的 ptyId 为空：没有底层进程，不会触发 attach/输入转发。
   if (!terminalInstances.has(tabId)) {
-    terminalInstances.set(tabId, { term: markRaw(term), fitAddon: markRaw(fitAddon), ptyId: '', cursorFilter: markRaw(createCursorShowFilter()) })
+    terminalInstances.set(tabId, { term: markRaw(term), fitAddon: markRaw(fitAddon), ptyId: '' })
   }
   // 失败 Tab 可能在启动期间未被激活（activeTab watcher 因 isPtyStarting 提前返回）。
   // 仅当它确实是当前活跃 Tab 时才切换显示，避免后台启动失败把用户视图切走
