@@ -97,10 +97,7 @@
               :aria-label="t('windowManage')"
               @click="handleLaunchWindow"
             >
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <rect x="3" y="4" width="18" height="16" rx="2"/>
-                <line x1="3" y1="9" x2="21" y2="9"/>
-              </svg>
+              <img src="@/assets/icons/window.svg" alt="Windows" />
             </button>
             <!-- 窗口管理按钮（置顶/半屏停靠）：与终端 header 一致，仅桌面 Tauri -->
             <template v-if="isTauriEnv">
@@ -117,7 +114,7 @@
             </template>
             <!-- 设备切换——仅浏览器远程模式 -->
             <button v-if="!isTauriEnv" class="header-btn" @click="openDeviceSwitcher()" :title="t('deviceSwitchTitle')">
-              <img src="@/assets/icons/phone.svg" alt="Devices" />
+              <img src="@/assets/icons/desktop.svg" alt="Devices" />
             </button>
             <button class="settings-btn" @click="handleSettingsClick" :title="t('titleSettings', { key: ctrl + '+,' })">
               <img src="@/assets/icons/settings.svg" alt="Settings" />
@@ -840,13 +837,15 @@ async function handleSaveDefault() {
   letter-spacing: -0.3px;
 }
 
+/* 与 .header-btn 同规格（32px 按钮 / 18px 图标 / 不透明）：窗口、设备、设置三个
+   图标并排，规格不一致会看出大小与深浅差异 */
 .settings-btn {
   position: relative;
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 28px;
-  height: 28px;
+  width: 32px;
+  height: 32px;
   border: none;
   background: transparent;
   color: var(--text-secondary);
@@ -873,18 +872,13 @@ async function handleSaveDefault() {
 }
 
 .settings-btn img {
-  width: 16px;
-  height: 16px;
-  opacity: 0.85;
+  width: 18px;
+  height: 18px;
 }
 
 .settings-btn:hover {
   background: var(--hover-bg);
   color: var(--text-primary);
-}
-
-.settings-btn:hover img {
-  opacity: 1;
 }
 
 .search-box {

@@ -8,7 +8,7 @@
       :aria-label="t('deviceSwitchTitle')"
       @click="openDeviceSwitcher()"
     >
-      <img src="@/assets/icons/phone.svg" alt="Devices" />
+      <img src="@/assets/icons/desktop.svg" alt="Devices" />
     </button>
     <div class="welcome-content">
       <div class="logo">
