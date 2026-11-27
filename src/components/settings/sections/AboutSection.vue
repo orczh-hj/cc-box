@@ -36,15 +36,43 @@
         <span class="link-arrow">→</span>
       </a>
     </div>
+
+    <div class="reward-card">
+      <div class="reward-info">
+        <span class="reward-title">{{ t('rewardTitle') }}</span>
+        <span class="reward-desc">{{ t('rewardDesc') }}</span>
+      </div>
+      <button class="reward-code" :title="t('rewardHint')" @click="showRewardPreview = true">
+        <img src="@/assets/images/wechat-reward.jpg" :alt="t('rewardTitle')" />
+        <span class="reward-hint">{{ t('rewardHint') }}</span>
+      </button>
+    </div>
+
+    <!-- 放大预览：便于手机对着屏幕扫 -->
+    <Teleport to="body">
+      <div v-if="showRewardPreview" class="reward-preview" @click="showRewardPreview = false">
+        <img src="@/assets/images/wechat-reward.jpg" :alt="t('rewardTitle')" />
+      </div>
+    </Teleport>
   </div>
 </template>
 
 <script setup lang="ts">
+import { onBeforeUnmount, onMounted, ref } from 'vue'
 import { openExternal } from '@/api/platform'
 import { useI18n } from 'vue-i18n'
 
 const { t } = useI18n()
 const currentVersion = __APP_VERSION__
+
+const showRewardPreview = ref(false)
+
+function closeOnEscape(e: KeyboardEvent) {
+  if (e.key === 'Escape') showRewardPreview.value = false
+}
+
+onMounted(() => window.addEventListener('keydown', closeOnEscape))
+onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
 </script>
 
 <style scoped>
@@ -154,5 +182,80 @@ const currentVersion = __APP_VERSION__
 .link-arrow {
   color: var(--text-tertiary);
   font-size: 14px;
+}
+
+.reward-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  margin-top: 8px;
+  padding: 12px 14px;
+  border-radius: 6px;
+}
+
+.reward-info {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.reward-title {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-tertiary);
+}
+
+.reward-desc {
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--text-primary);
+}
+
+.reward-code {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  padding: 0;
+  border: none;
+  background: transparent;
+  cursor: zoom-in;
+}
+
+.reward-code img {
+  width: 112px;
+  height: auto;
+  border-radius: 8px;
+  box-shadow: 0 0 0 1px var(--border-color);
+  transition: box-shadow 0.15s ease;
+}
+
+.reward-code:hover img {
+  box-shadow: 0 0 0 1px var(--text-tertiary);
+}
+
+.reward-hint {
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
+
+.reward-preview {
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(0, 0, 0, 0.75);
+  cursor: zoom-out;
+}
+
+.reward-preview img {
+  max-width: min(480px, 100%);
+  max-height: 100%;
+  border-radius: 8px;
 }
 </style>

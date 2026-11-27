@@ -300,6 +300,9 @@
   officialSite: 'Official Website',
   githubRepo: 'GitHub Repository',
   claudeDocs: 'Claude Code Docs',
+  rewardTitle: 'WeChat Reward',
+  rewardDesc: 'CC-Box is free. If it helps you, you can buy the author a coffee.',
+  rewardHint: 'Click to enlarge, scan with WeChat',
 
   // Keyboard shortcuts
   keyboardShortcuts: 'Keyboard Shortcuts',

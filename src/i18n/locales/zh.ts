@@ -300,6 +300,9 @@
   officialSite: '官网主页',
   githubRepo: 'GitHub 仓库',
   claudeDocs: 'Claude Code 文档',
+  rewardTitle: '微信赞赏',
+  rewardDesc: 'CC-Box 免费使用。如果它帮到了你，可以请作者喝杯咖啡。',
+  rewardHint: '点击放大，用微信扫一扫',
 
   // Keyboard shortcuts
   keyboardShortcuts: '快捷键',
