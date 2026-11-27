@@ -433,9 +433,36 @@ fn handle_menu_event(app: &tauri::AppHandle, id: &str) {
         let enabled = crate::broker::status_snapshot()
             .map(|s| s.autostart)
             .unwrap_or_else(crate::broker::autostart::is_enabled);
+        if enabled {
+            // 关闭有后果：下次开机后台服务不再自动启动，重启后需手动打开
+            // CC-Box 才能远程连接——与设置页开关同一处二次确认。开启无后果不弹。
+            let (title, message, confirm) = if zh {
+                (
+                    "关闭开机自启动",
+                    "关闭后，下次开机不会自动启动后台服务——重启电脑后需要手动打开 CC-Box 才能使用远程连接。确认关闭？",
+                    "关闭",
+                )
+            } else {
+                (
+                    "Turn off launch at login",
+                    "The background service will no longer start automatically. After a reboot you must open CC-Box manually to use remote access. Continue?",
+                    "Turn off",
+                )
+            };
+            confirm_destructive(app, title, message, confirm, || {
+                tauri::async_runtime::spawn(async {
+                    if let Err(e) =
+                        crate::broker::control(BrokerOp::SetAutostart { enabled: false }).await
+                    {
+                        log::warn!("[broker-tray] disable autostart failed: {}", e);
+                    }
+                });
+            });
+            return;
+        }
         tauri::async_runtime::spawn(async move {
-            if let Err(e) = crate::broker::control(BrokerOp::SetAutostart { enabled: !enabled }).await {
-                log::warn!("[broker-tray] toggle autostart failed: {}", e);
+            if let Err(e) = crate::broker::control(BrokerOp::SetAutostart { enabled: true }).await {
+                log::warn!("[broker-tray] enable autostart failed: {}", e);
             }
         });
         return;
