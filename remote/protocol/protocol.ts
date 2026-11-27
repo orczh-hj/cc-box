@@ -83,6 +83,9 @@ export type ServerMessage =
       /** 目标电脑操作系统（windows/macos/linux）；手机键盘平台键名依据，
        *  旧桌面端不下发（缺省按 Windows 显示） */
       platform?: string
+      /** 设备码：桌面端持久不变的身份标识（刷新密钥不换），手机据它识别
+       *  「同一台电脑」并在重新配对后替换旧条目；旧桌面端不下发 */
+      deviceCode?: string
     }
   | { type: 'hello.error'; error: string }
   | { type: 'sessions'; list: RemoteSession[]; revision: number }
@@ -229,6 +232,7 @@ export function parseServerMessage(raw: unknown): ServerMessage | null {
               }
             : {}),
           ...(str(raw.platform) ? { platform: raw.platform } : {}),
+          ...(str(raw.deviceCode) ? { deviceCode: raw.deviceCode } : {}),
         }
       }
       return null

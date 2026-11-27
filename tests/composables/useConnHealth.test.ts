@@ -110,4 +110,36 @@ describe('useConnHealth 组合行为', () => {
     ws2.serverSend({ type: 'hello.ok', ver: 1, deviceName: 'D', connId: 2, revision: 0 })
     expect(health.level.value).toBe('ok')
   })
+
+  /** 推进一轮离线循环：1s 后重连、握手、relay 告知设备离线、断开 */
+  async function tickOffline(): Promise<void> {
+    await vi.advanceTimersByTimeAsync(1_000)
+    const ws = FakeWebSocket.instances[FakeWebSocket.instances.length - 1]
+    ws.serverOpen()
+    ws.serverSend({ type: 'device.status', online: false })
+  }
+
+  // 设备离线时状态每秒在 reconnecting/authenticating 间切换：断开时长照常累计
+  it('UseConnHealth_离线循环照常累计_004', async () => {
+    vi.useFakeTimers()
+    const health = scoped()
+    const ws = connect()
+    ws.serverSend({ type: 'device.status', online: false })
+
+    for (let i = 0; i < 12; i++) await tickOffline()
+    expect(health.level.value).toBe('overlay')
+  })
+
+  // 用户发起新的建连（换设备/换码）：停滞重新计时，先给新一轮 10s 机会
+  it('UseConnHealth_新一次建连重新计时_003', async () => {
+    vi.useFakeTimers()
+    const health = scoped()
+    const ws = connect()
+    ws.serverSend({ type: 'device.status', online: false })
+    for (let i = 0; i < 12; i++) await tickOffline()
+    expect(health.level.value).toBe('overlay')
+
+    remoteTransport.connectWithToken('other-token')
+    expect(health.level.value).toBe('spinner')
+  })
 })

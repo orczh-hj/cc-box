@@ -112,6 +112,12 @@ pub struct RemoteConfig {
     pub device_id: Option<String>,
     /// 设备密钥（64 hex，注册中继用）
     pub device_key: Option<String>,
+    /// 设备码（32 hex）：持久不变的身份标识，刷新密钥不换。手机据它识别「同一台电脑」
+    pub device_code: Option<String>,
+    /// 已作废的历史 device_id（每次刷新密钥追加）。注册中继时上报，手机拿旧身份
+    /// 来连时中继直接告知「身份已作废」，不再空转重连
+    #[serde(default)]
+    pub retired_device_ids: Option<Vec<String>>,
     /// 文件传输大小上限（字节）：直连默认 200MB（局域网零流量成本）；0 = 禁用传输
     pub file_transfer_max_direct: Option<u64>,
     /// 文件传输大小上限（字节）：经中继默认 20MB（中继流量按量计费，实际消耗 ≈2.7×

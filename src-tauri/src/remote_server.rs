@@ -423,6 +423,25 @@ pub fn save_relay_config(
     Ok(())
 }
 
+/// 保存设备码与已作废的历史 device_id（整体替换），保留其他字段。
+/// 二者同次写回：刷新密钥先记作废旧身份、再换新身份，两步之间崩溃也不会丢名单
+pub fn save_device_code(
+    code: Option<&str>,
+    retired: Option<&[String]>,
+) -> anyhow::Result<()> {
+    let current = crate::store::get_app_config()?;
+    let mut remote: serde_json::Value =
+        serde_json::to_value(current.remote.clone().unwrap_or_default())?;
+    if let Some(c) = code {
+        remote["deviceCode"] = serde_json::json!(c);
+    }
+    if let Some(r) = retired {
+        remote["retiredDeviceIds"] = serde_json::json!(r);
+    }
+    crate::store::update_app_config(serde_json::json!({ "remote": remote }))?;
+    Ok(())
+}
+
 /// 保存中继已配对设备 secret 列表（整体替换），保留其他字段
 pub fn save_paired_secrets(secrets: &[String]) -> anyhow::Result<()> {
     let current = crate::store::get_app_config()?;

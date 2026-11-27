@@ -118,6 +118,10 @@ pub enum ServerMessage {
         /// 手机键盘 UI 据此显示平台键名（Alt/Option、Win/Cmd）；旧桌面不下发
         #[serde(default, skip_serializing_if = "Option::is_none")]
         platform: Option<String>,
+        /// 设备码：桌面端持久不变的身份标识（刷新密钥不换）。手机据它识别
+        /// 「同一台电脑」，重新配对后替换旧条目；旧桌面不下发
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        device_code: Option<String>,
     },
     #[serde(rename = "hello.error")]
     HelloError { error: String },

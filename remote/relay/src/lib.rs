@@ -52,6 +52,11 @@ struct AppState {
     device_keys: HashMap<String, String>,
     /// /api/pair 失败节流：IP → (连续失败次数, 锁定截止时间)
     pair_fails: HashMap<std::net::IpAddr, (u32, Option<Instant>)>,
+    /// 已作废的 device_id（桌面刷新密钥时上报的历史身份）：手机拿旧身份来连时
+    /// 直接告知「身份已作废」，不再让其空转重连。内存态，桌面每次注册重新上报
+    retired_devices: std::collections::HashSet<String>,
+    /// 作废名单的插入顺序（超上限时淘汰最旧）
+    retired_order: std::collections::VecDeque<String>,
     next_conn_id: u64,
 }
 
@@ -64,6 +69,8 @@ struct PairCode {
     secret: String,
     /// secret 来源为桌面（true）或 relay fallback 生成（false，需下发）
     from_desktop: bool,
+    /// 发起配对的电脑的设备码（随配对应答回给手机）
+    device_code: String,
     exp: Instant,
 }
 
@@ -116,6 +123,9 @@ struct PairResponse {
     token: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
+    /// 发起配对的电脑的设备码（桌面 pair.create 提供；旧版桌面缺省）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    device_code: Option<String>,
 }
 
 /// 配对失败锁定阈值：连续失败 N 次后该 IP 锁定 60s（防配对码暴力猜解）
@@ -144,7 +154,7 @@ async fn api_pair(
         .retain(|_, (_, until)| until.is_none() || *until > Some(Instant::now()));
     if let Some((fails, until)) = inner.st.pair_fails.get(&ip) {
         if *fails >= PAIR_FAIL_LIMIT && until.is_some_and(|u| u > Instant::now()) {
-            return Json(PairResponse { ok: false, token: None, error: Some("too many attempts, try later".into()) });
+            return Json(PairResponse { ok: false, token: None, error: Some("too many attempts, try later".into()), device_code: None });
         }
     }
 
@@ -154,7 +164,7 @@ async fn api_pair(
         if entry.0 >= PAIR_FAIL_LIMIT {
             entry.1 = Some(Instant::now() + PAIR_LOCKOUT);
         }
-        PairResponse { ok: false, token: None, error: Some(msg.into()) }
+        PairResponse { ok: false, token: None, error: Some(msg.into()), device_code: None }
     };
 
     // 清理过期配对码
@@ -178,7 +188,7 @@ async fn api_pair(
     }
     // 成功后清该 IP 的失败计数
     inner.st.pair_fails.remove(&ip);
-    Json(PairResponse { ok: true, token: Some(token), error: None })
+    Json(PairResponse { ok: true, token: Some(token), error: None, device_code: Some(pc.device_code).filter(|c| !c.is_empty()) })
 }
 
 // ==================== 桌面连接 /ws/device ====================
@@ -187,13 +197,23 @@ async fn api_pair(
 #[serde(tag = "type", rename_all_fields = "camelCase")]
 enum DeviceInMsg {
     #[serde(rename = "register")]
-    Register { device_id: String, device_key: String },
+    Register {
+        device_id: String,
+        device_key: String,
+        #[serde(default)]
+        device_code: Option<String>,
+        /// 已作废的历史 device_id（刷新密钥时由桌面持久保存并在每次注册时上报）
+        #[serde(default)]
+        retired_ids: Vec<String>,
+    },
     #[serde(rename = "pair.create")]
     PairCreate {
         /// token v2 的 secret（新版桌面预生成并暂存，配对成功后校验/固化；
         /// 缺省 = 旧版桌面，relay 生成并经 pair.granted 回发）
         #[serde(default)]
         secret: Option<String>,
+        #[serde(default)]
+        device_code: Option<String>,
     },
     #[serde(rename = "data")]
     Data {
@@ -236,6 +256,27 @@ const MAX_DEVICES: usize = 64;
 const MAX_CLIENTS: usize = 256;
 /// WS 单消息上限（默认 64MB 过大；应用层最大为 rpc 参数/设置导入，4MB 足够）
 const MAX_WS_MESSAGE: usize = 4 * 1024 * 1024;
+/// 作废名单上限（注册完全开放：防任意注册者灌爆内存；超出淘汰最旧）
+const MAX_RETIRED_DEVICES: usize = 4096;
+
+fn is_32_hex(s: &str) -> bool {
+    s.len() == 32 && s.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// 登记已作废的 device_id（合法形态才收；重复忽略；超上限淘汰最旧）
+fn mark_retired(st: &mut AppState, ids: impl Iterator<Item = String>) {
+    for id in ids {
+        if !is_32_hex(&id) || !st.retired_devices.insert(id.clone()) {
+            continue;
+        }
+        st.retired_order.push_back(id);
+    }
+    while st.retired_order.len() > MAX_RETIRED_DEVICES {
+        if let Some(old) = st.retired_order.pop_front() {
+            st.retired_devices.remove(&old);
+        }
+    }
+}
 
 async fn ws_device(
     State(state): State<SharedState>,
@@ -252,7 +293,7 @@ async fn handle_device(mut socket: WebSocket, state: SharedState, addr: SocketAd
         Ok(Some(Ok(Message::Text(t)))) => t,
         _ => return,
     };
-    let Ok(DeviceInMsg::Register { device_id, device_key }) =
+    let Ok(DeviceInMsg::Register { device_id, device_key, device_code: _, retired_ids }) =
         serde_json::from_str::<DeviceInMsg>(&first)
     else {
         return;
@@ -292,6 +333,8 @@ async fn handle_device(mut socket: WebSocket, state: SharedState, addr: SocketAd
             return;
         }
         let mut inner = state.lock();
+        // 记录作废名单（只收合法形态；本次注册的身份不属作废）
+        mark_retired(&mut inner.st, retired_ids.iter().filter(|id| *id != &device_id).cloned());
         // 旧连接被顶替
         inner.st.device_keys.entry(device_id.clone()).or_insert_with(|| device_key.clone());
         if let Some(old) = inner.st.devices.insert(device_id.clone(), tx.clone()) {
@@ -331,7 +374,7 @@ async fn handle_device(mut socket: WebSocket, state: SharedState, addr: SocketAd
         };
         match parsed {
             DeviceInMsg::Register { .. } => {}
-            DeviceInMsg::PairCreate { secret } => {
+            DeviceInMsg::PairCreate { secret, device_code } => {
                 // 8 位 hex（16^8 ≈ 43 亿）+ TTL 5 分钟 + /api/pair 失败锁定，抵御暴力猜解。
                 // secret 由桌面提供（校验/固化都在桌面）；旧版桌面不带时 relay 生成 fallback
                 let (secret, from_desktop) = match secret {
@@ -347,6 +390,7 @@ async fn handle_device(mut socket: WebSocket, state: SharedState, addr: SocketAd
                         device_id: device_id.clone(),
                         secret,
                         from_desktop,
+                        device_code: device_code.filter(|c| is_32_hex(c)).unwrap_or_default(),
                         exp: Instant::now() + pair_ttl,
                     },
                 );
@@ -460,7 +504,6 @@ async fn handle_client(mut socket: WebSocket, state: SharedState, addr: SocketAd
     // token v2 路由：`<device_id>.<secret>`——恰一个点、两段各 32 hex，
     // 前缀即目标桌面。secret 校验在桌面（relay 不存凭证表）。
     // 格式非法（含 v1 无点 token，relay 升级后存量手机需重扫一次）直接拒绝
-    let is_32_hex = |s: &str| s.len() == 32 && s.chars().all(|c| c.is_ascii_hexdigit());
     let device_id = match token.split_once('.') {
         Some((prefix, secret))
             if !secret.contains('.') && is_32_hex(prefix) && is_32_hex(secret) =>
@@ -476,9 +519,14 @@ async fn handle_client(mut socket: WebSocket, state: SharedState, addr: SocketAd
     };
     let device_tx = state.lock().st.devices.get(&device_id).cloned();
     let Some(device_tx) = device_tx else {
-        let _ = socket
-            .send(Message::Text(r#"{"type":"device.status","online":false}"#.into()))
-            .await;
+        // 身份已作废（桌面刷新过密钥）与单纯离线区分开：前者重连无意义，手机应直接提示重扫
+        let rotated = state.lock().st.retired_devices.contains(&device_id);
+        let status = if rotated {
+            r#"{"type":"device.status","online":false,"rotated":true}"#.to_string()
+        } else {
+            r#"{"type":"device.status","online":false}"#.to_string()
+        };
+        let _ = socket.send(Message::Text(status)).await;
         return;
     };
     // 连接数上限（认证后仍限制：防表打爆；须在 split 拥有 socket 前应答）

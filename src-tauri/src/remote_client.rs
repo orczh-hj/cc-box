@@ -198,17 +198,26 @@ pub fn verify_download_ticket(
     })
 }
 
+/// pair.create 请求体（携带预生成 secret——token v2 的校验依据；可选设备码——
+/// 配对应答回带给手机，用于识别「同一台电脑」并替换旧条目）
+fn pair_create_msg() -> serde_json::Value {
+    let mut msg = serde_json::json!({
+        "type": "pair.create",
+        "secret": new_pending_secret(),
+    });
+    if let Some(code) = device_code_and_retired().0 {
+        msg["deviceCode"] = serde_json::json!(code);
+    }
+    msg
+}
+
 /// 发送 pair.create（携带预生成 secret——token v2 的校验依据）；
 /// 中继未连接（DEVICE_TX 未挂载）或通道关闭时报错
 fn send_pair_create() -> Result<(), String> {
     let Some(tx) = DEVICE_TX.lock().clone() else {
         return Err("relay not connected".into());
     };
-    let msg = serde_json::json!({
-        "type": "pair.create",
-        "secret": new_pending_secret(),
-    });
-    tx.try_send(msg.to_string())
+    tx.try_send(pair_create_msg().to_string())
         .map_err(|_| "relay channel closed".to_string())
 }
 
@@ -350,10 +359,51 @@ pub async fn connect() {
     tokio::spawn(run_loop(url, device_id, device_key));
 }
 
+/// 已作废历史 device_id 的保留上限（每次刷新密钥追加一条，超出丢弃最旧的）
+const MAX_RETIRED_DEVICE_IDS: usize = 32;
+
+/// 设备码 + 已作废的历史 device_id（注册中继时上报）
+pub fn device_code_and_retired() -> (Option<String>, Vec<String>) {
+    let Some(remote) = crate::store::get_app_config().ok().and_then(|c| c.remote) else {
+        return (None, Vec::new());
+    };
+    // 缺失时不下发（不能回退 device_id：它会被刷新，起不到「同一台电脑」的识别作用）；
+    // ensure_device_identity 在连接前已补生成
+    let code = remote.device_code.filter(|c| is_32_hex(c));
+    let retired = remote
+        .retired_device_ids
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|id| is_32_hex(id))
+        .collect();
+    (code, retired)
+}
+
+/// 当前设备码（hello.ok 下发；中继未启用时缺省回退当前 device_id）
+pub fn current_device_code() -> Option<String> {
+    device_code_and_retired().0
+}
+
 /// 轮换设备身份（安全阻断语义）：旧 device_id 永不再上线——已配对手机的
-/// token 前缀路由 miss → 持续 offline 直至重扫；新身份注册后用户重扫新配对码即可。
+/// token 前缀路由 miss，中继据作废名单直接告知手机「身份已作废」。
 /// 配对凭证一并作废（清空持久 secret 列表与 pending）
 pub fn rotate_identity() {
+    let old_id = crate::store::get_app_config()
+        .ok()
+        .and_then(|c| c.remote)
+        .and_then(|r| r.device_id)
+        .filter(|s| is_32_hex(s));
+    let mut retired = device_code_and_retired().1;
+    if let Some(old) = old_id {
+        if !retired.contains(&old) {
+            retired.push(old);
+        }
+        if retired.len() > MAX_RETIRED_DEVICE_IDS {
+            let drop_n = retired.len() - MAX_RETIRED_DEVICE_IDS;
+            retired.drain(..drop_n);
+        }
+    }
+    let _ = crate::remote_server::save_device_code(None, Some(&retired));
     let device_id = uuid::Uuid::new_v4().simple().to_string();
     let device_key = format!(
         "{}{}",
@@ -394,6 +444,10 @@ fn ensure_device_identity() -> Result<(String, String), String> {
             )
         });
     let _ = crate::remote_server::save_relay_config(None, Some((&device_id, &device_key)));
+    // 设备码只生成一次、此后永不变（刷新密钥也不换）；旧配置缺失时补生成
+    if config.remote.as_ref().and_then(|r| r.device_code.as_ref()).filter(|c| is_32_hex(c)).is_none() {
+        let _ = crate::remote_server::save_device_code(Some(&uuid::Uuid::new_v4().simple().to_string()), None);
+    }
     Ok((device_id, device_key))
 }
 
@@ -491,11 +545,17 @@ async fn run_once(
     let (mut sink, mut stream) = ws.split();
 
     // 注册
-    let register = serde_json::json!({
+    // 注册：附带设备码与已作废的历史 device_id（手机拿旧身份来连时中继直接告知）
+    let (device_code, retired_ids) = device_code_and_retired();
+    let mut register = serde_json::json!({
         "type": "register",
         "deviceId": device_id,
         "deviceKey": device_key,
+        "retiredIds": retired_ids,
     });
+    if let Some(code) = device_code {
+        register["deviceCode"] = serde_json::json!(code);
+    }
     if sink.send(Message::Text(register.to_string())).await.is_err() {
         return RoundEnd::Disconnected;
     }
@@ -547,13 +607,7 @@ async fn run_once(
     }
     crate::gateway::sync_relay_status();
     // 申请配对码（带预生成 secret；DEVICE_TX 尚未挂载，经 out_tx 直发）
-    let _ = out_tx.try_send(
-        serde_json::json!({
-            "type": "pair.create",
-            "secret": new_pending_secret(),
-        })
-        .to_string(),
-    );
+    let _ = out_tx.try_send(pair_create_msg().to_string());
     // 挂载设备出站通道（按需重申配对码等设备侧主动请求经此发送）
     *DEVICE_TX.lock() = Some(out_tx.clone());
     log::info!("[remote] relay registered, device_id={}", device_id);

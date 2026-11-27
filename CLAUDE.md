@@ -93,7 +93,7 @@ cc-box/
 
 - 用户输入 → `onData` → `transport.sessionInput` → PTY writer → Claude CLI
 - CLI 输出 → PTY reader → `decode_output()`（UTF-8 优先，失败回退 GBK，兼容 Windows 中文子进程）→ `pty-output` 事件 → `term.write()`
-- 浏览器远程模式：TokenGate 认证（#token=/#pair=）→ WS → rpc.call 调 Tauri command（rpc_dispatch 白名单）；PTY 数据流不走 rpc，走 session.create/attach/pty.input 专用消息（attach 即订阅、独占语义）
+- 浏览器远程模式：TokenGate 认证（#token=/#pair=，首次加载与 hashchange 均生效）→ WS → rpc.call 调 Tauri command（rpc_dispatch 白名单）；PTY 数据流不走 rpc，走 session.create/attach/pty.input 专用消息（attach 即订阅、独占语义）
 - Hook 监控：`hook_server.rs` 接收 CLI hook 上报 → Rust `apply_hook_event` 单点状态机 → `hook-status` 事件 → `useStatusMonitor`（前端仅应用结果）
 - Claude CLI 启动：`platform::cli_target()` 是检查与 spawn 的唯一解析入口——配置路径可运行则用完整路径，否则 Unix 先经 `find_executable` 解析出可运行路径再 exec、Windows 用裸名交给 Git Bash；自动检测不写配置（只由用户设置/安装器写）；失败经 `pty-error` → `appStore.cliHealth` 统一展示与重试
 
@@ -276,7 +276,7 @@ UI 已浏览器化（一套 UI 走桌面 Tauri / 宽屏浏览器 / 手机浏览�
 
 ### 设备列表连通性（速查）
 
-手机设备列表（TokenGate / 首页切换弹窗）打开时，对每个**非当前**设备做一次真实 WS `hello` 探测（复用 relay/LAN 同一 `/ws` 协议，不改后端），显示在线/离线/令牌失效/无法连接：`hello.ok` → 在线、`hello.error`（非 busy）→ 令牌失效、`device.status online:false` → 离线、超时/连接失败 → 不可达。探测连接拿到结论立即关闭，不重连、不写存储；当前设备沿用主连接 `connState`。不可达条目点击被拦截并在行内说明原因，配对可直接移除；HTTPS 页面无法探测 HTTP LAN 设备（混合内容）标「无法检测」。主 UI 已就绪后连接被拒（denied）时叠加 TokenGate 覆盖层（`:auto-boot="false"`，不销毁主 UI），提供改选设备/重新输入 token。
+手机设备列表（TokenGate / 首页切换弹窗）打开时，对每个**非当前**设备做一次真实 WS `hello` 探测（复用 relay/LAN 同一 `/ws` 协议，不改后端），显示在线/离线/令牌失效/无法连接：`hello.ok` → 在线、`hello.error`（非 busy）→ 令牌失效、`device.status online:false` → 离线、超时/连接失败 → 不可达。探测连接拿到结论立即关闭，不重连、不写存储；当前设备沿用主连接 `connState`。不可达条目点击被拦截并在行内说明原因，配对可直接移除；HTTPS 页面无法探测 HTTP LAN 设备（混合内容）标「无法检测」。主 UI 已就绪后连接被拒（denied）时叠加 TokenGate 覆盖层（`:auto-boot="false"`，不销毁主 UI），提供改选设备与扫码操作指导（**不提供 token 输入**）。页面已打开时 URL 出现 `#pair=`/`#token=` 经 `hashchange` 重新应用凭证，无需刷新；断开累计超 10s 也显示指导。**设备码（`remote.deviceCode`）永不变**：桌面刷新密钥时把旧 device_id 记入 `retiredDeviceIds` 并随注册上报，relay 对名单内身份回 `rotated:true`，手机立即停止重连并提示；手机按 `hello.ok`/配对应答的设备码识别同一台电脑，重新配对后替换旧条目（不出现两台主机）。规则正本 → [remote/docs/protocol.md](remote/docs/protocol.md)「配对与凭证入口」。
 
 实现：`src/api/remote-probe.ts`（单次探测）+ `src/composables/useDeviceProbe.ts`（编排，key = `id|token`）；测试见 `tests/api/remote-probe.test.ts`、`tests/composables/useDeviceProbe.test.ts`。
 

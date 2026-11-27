@@ -5,7 +5,8 @@
  * - invoke → rpc.call（pending Promise 按 id resolve）
  * - listen → rpc.event 按 name 分发（payload 与 Tauri 事件同构）
  * - sendClient / onServerMessage → 远程协议消息直通（A5 会话层：pty.output / session.*）
- * - 30s 心跳 + 指数退避重连；hello.error（token 无效）停止重连
+ * - 30s 心跳 + 指数退避重连；hello.error（token 无效）停止重连，relay busy 按瞬态重试
+ * - URL 凭证（#token= / #pair=）在页面加载与页面已打开时的 hashchange 都会应用
  */
 
 import {
@@ -21,6 +22,7 @@ import { notifyDesktopOutdated } from '@/utils/desktop-outdated'
 import type { Transport, Unlisten, InvokeOpts } from './transport'
 import {
   addDesktop,
+  adoptDeviceCode,
   getDesktop,
   isRelayToken,
   listDesktops,
@@ -52,6 +54,28 @@ export type RemoteConnState =
   | 'closed'
 
 type EventHandler = (payload: unknown) => void
+
+/** 连接失败原因（TokenGate 据此给出针对性操作指导；null = 尚无失败） */
+export type RemoteFailReason =
+  | 'auth-invalid' // hello.error：桌面拒绝令牌（刷新密钥/设备被撤销）
+  | 'identity-rotated' // relay 告知该设备身份已作废（电脑端刷新过密钥），重连无意义
+  | 'pair-locked' // 配对失败次数过多，relay 临时锁定本 IP
+  | 'pair-device-offline' // 连接码对应的电脑不在线
+  | 'pair-rejected' // 连接码无效 / 已使用 / 已过期
+  | 'pair-network' // 配对请求本身失败（断网）
+
+/** relay `/api/pair` 的错误文案 → 失败原因（字面量以 remote/relay/src/lib.rs `api_pair` 为准） */
+export function pairFailReason(
+  error: unknown,
+): Exclude<RemoteFailReason, 'auth-invalid' | 'identity-rotated'> {
+  if (error === 'too many attempts, try later') return 'pair-locked'
+  if (error === 'device offline') return 'pair-device-offline'
+  return 'pair-rejected'
+}
+
+type PairResult =
+  | { ok: true; token: string; deviceCode?: string }
+  | { ok: false; reason: Exclude<RemoteFailReason, 'auth-invalid' | 'identity-rotated'> }
 
 /** 是否处于断开/未就绪态（回前台校验与 UI 分层共用的判定） */
 export function isDisconnectedState(s: RemoteConnState): boolean {
@@ -148,6 +172,19 @@ class RemoteTransportImpl implements Transport {
   }
   private _connState: RemoteConnState = 'closed'
 
+  private _failReason: RemoteFailReason | null = null
+  /** 最近一次连接被拒的原因；新一轮建连或连接成功时清空 */
+  get failReason(): RemoteFailReason | null {
+    return this._failReason
+  }
+
+  private _attemptSeq = 0
+  /** 建连意图序号：每次新的建连选择（URL 凭证 / 切换设备）递增。
+   *  在途的配对结果回来时序号已变 = 用户已另作选择，结果作废 */
+  get attemptSeq(): number {
+    return this._attemptSeq
+  }
+
   /** 本连接唯一标识（hello.ok 下发；null = 旧桌面端未下发） */
   get connId(): number | null {
     return this._connId
@@ -194,37 +231,7 @@ class RemoteTransportImpl implements Transport {
       this.open()
       return
     }
-    const params = new URLSearchParams(location.hash.slice(1))
-    const hashToken = params.get('token')
-    const pairCode = params.get('pair')
-
-    if (pairCode) {
-      history.replaceState(null, '', location.pathname)
-      this.setConnState('connecting')
-      // 配对码仅在 relay 服出的页面上有效——本连接必经中继
-      this._viaRelay = true
-      const token = await this.pair(pairCode)
-      if (token) {
-        const d = addDesktop({ kind: 'relay', token, origin: location.origin })
-        this.onDesktopsChanged()
-        this.connectAs(token, d.id)
-      } else {
-        this.setConnState('denied')
-      }
-      return
-    }
-
-    if (hashToken) {
-      history.replaceState(null, '', location.pathname)
-      const d = addDesktop({
-        kind: isRelayToken(hashToken) ? 'relay' : 'lan',
-        token: hashToken,
-        origin: location.origin,
-      })
-      this.onDesktopsChanged()
-      this.connectAs(hashToken, d.id)
-      return
-    }
+    if (await this.applyUrlCredentials()) return
 
     // 无 URL 参数：旧单值迁移（一次性）+ 同 origin 的最近设备自动连接。
     // 必须按 origin 过滤——当前页面属于设备 A（端口/relay 域），拿设备 B 的
@@ -238,7 +245,63 @@ class RemoteTransportImpl implements Transport {
     }
   }
 
-  /** 手动输入 token 连接（TokenGate 输入框；同样入列表便于下次使用） */
+  /** URL fragment 凭证（`#pair=` / `#token=`）→ 入列表并建连；无凭证返回 false。
+   *  页面加载（boot）与已打开页面的 hashchange 共用：地址栏打开只差 fragment 的
+   *  新配对链接是同文档导航、不重载页面，只有 hashchange 能拿到它 */
+  private async applyUrlCredentials(): Promise<boolean> {
+    const params = new URLSearchParams(location.hash.slice(1))
+    const hashToken = params.get('token')
+    const pairCode = params.get('pair')
+    if (!hashToken && !pairCode) return false
+    // 凭证只消费一次：先从地址栏抹掉（防历史记录/分享链接泄露）再发起请求
+    history.replaceState(null, '', location.pathname)
+    this._attemptSeq++
+
+    if (hashToken) {
+      const d = addDesktop({
+        kind: isRelayToken(hashToken) ? 'relay' : 'lan',
+        token: hashToken,
+        origin: location.origin,
+      })
+      this.onDesktopsChanged()
+      this.connectAs(hashToken, d.id)
+      return true
+    }
+
+    // 配对码仅在 relay 服出的页面上有效——本连接必经中继
+    this._viaRelay = true
+    // 当前连接可用时不打断它：配对失败只是「新设备没连上」，旧连接照常
+    const keepCurrent = this._connState === 'connected'
+    if (!keepCurrent) {
+      this.closeSocket()
+      this.retry = 0
+      this.setConnState('connecting')
+    }
+    const seq = this._attemptSeq
+    const result = await this.pair(pairCode)
+    if (seq !== this._attemptSeq) return true
+    if (result.ok) {
+      const d = addDesktop({ kind: 'relay', token: result.token, origin: location.origin })
+      // 同一台电脑重新配对（刷新密钥换了 device_id）：设备码不变，旧条目让位
+      if (result.deviceCode) adoptDeviceCode(location.origin, result.deviceCode, d.id)
+      this.onDesktopsChanged()
+      this.connectAs(result.token, d.id)
+    } else if (keepCurrent) {
+      this.dispatchEvent('pair-failed', { reason: result.reason })
+    } else {
+      this.fail(result.reason)
+    }
+    return true
+  }
+
+  /** 连接被拒：记录原因并进入 denied（不再重连，直到新的建连选择） */
+  private fail(reason: RemoteFailReason): void {
+    this._failReason = reason
+    this.closedByUser = true
+    this.setConnState('denied')
+  }
+
+  /** 直接以 token 建连（UI 不再提供令牌输入框；测试与脚本用，同样入列表便于下次使用） */
   connectWithToken(token: string): void {
     if (!token.trim()) return
     const t = token.trim()
@@ -268,6 +331,8 @@ class RemoteTransportImpl implements Transport {
     // 一条（双连接互踢），在途帧也可能串到新设备
     const previousId = this._activeDesktopId
     this._pendingDeviceSwitch = previousId !== null && previousId !== desktopId
+    this._attemptSeq++
+    this._failReason = null
     this.closeSocket()
     this.retry = 0
     // 旧单值 key 持续写最新值（旧版前端回滚后仍可直接连最近设备）
@@ -281,7 +346,7 @@ class RemoteTransportImpl implements Transport {
   }
 
   /** 中继配对：一次性码换长期 token v2 `<device_id>.<secret>`（仅经中继 serve 的页面可用） */
-  private async pair(code: string): Promise<string | null> {
+  private async pair(code: string): Promise<PairResult> {
     try {
       const res = await fetch('/api/pair', {
         method: 'POST',
@@ -289,12 +354,16 @@ class RemoteTransportImpl implements Transport {
         body: JSON.stringify({ code }),
       })
       const data = await res.json()
-      if (data && data.ok && typeof data.token === 'string') {
-        return data.token as string
+      if (res.ok && data && data.ok && typeof data.token === 'string') {
+        return {
+          ok: true,
+          token: data.token as string,
+          ...(typeof data.deviceCode === 'string' && data.deviceCode ? { deviceCode: data.deviceCode } : {}),
+        }
       }
-      return null
+      return { ok: false, reason: pairFailReason(data?.error) }
     } catch {
-      return null
+      return { ok: false, reason: 'pair-network' }
     }
   }
 
@@ -320,6 +389,13 @@ class RemoteTransportImpl implements Transport {
         if (document.visibilityState === 'visible') this.onResume()
       })
       window.addEventListener('focus', () => this.onResume())
+      // 已打开页面出现新的配对/令牌链接（地址栏打开、书签）：fragment 变化不重载
+      // 页面，只有 hashchange 能拿到。票据页是受限会话，不参与
+      if (this.downloadTicket === null) {
+        window.addEventListener('hashchange', () => {
+          void this.applyUrlCredentials()
+        })
+      }
     }
   }
 
@@ -410,12 +486,18 @@ class RemoteTransportImpl implements Transport {
         return
       }
       // 中继层 device.status：桌面在线状态，转成事件供 UI 订阅
-      const rawObj = raw as { type?: string; online?: boolean }
+      const rawObj = raw as { type?: string; online?: boolean; rotated?: boolean }
       if (rawObj?.type === 'device.status') {
         // 仅中继链路下发此帧——收到即为经中继的运行时证据
         this._viaRelay = true
         const online = rawObj.online === true
         this.dispatchEvent('device-status', { online })
+        // 身份已作废（电脑端刷新过密钥）：再怎么重连也回不来，直接停止并给出重扫指导
+        if (rawObj.rotated === true) {
+          this.fail('identity-rotated')
+          ws.close()
+          return
+        }
         if (!online) {
           // 设备侧已断开：relay 会移除本连接的路由但保持 WS——继续持有只会
           // 让 rpc/attach 全部黑洞（消息被 relay 丢弃，直到心跳超时才重连）。
@@ -440,13 +522,16 @@ class RemoteTransportImpl implements Transport {
       }
       if (msg.type === 'hello.ok') {
         this.retry = 0
+        this._failReason = null
         this.setConnState('connected')
         this.startPing()
         this._connId = msg.connId
         this._remotePlatform = msg.platform ?? null
-        // 设备名回填列表条目（TokenGate 展示），并清除历史失效标记
+        // 设备名回填列表条目（TokenGate 展示），并清除历史失效标记；带设备码时
+        // 记到条目上（此后这台电脑刷新密钥、重新配对，旧条目能被认出并替换）
         if (this._activeDesktopId) {
           touchDesktop(this._activeDesktopId, { name: msg.deviceName, invalid: false })
+          if (msg.deviceCode) adoptDeviceCode(location.origin, msg.deviceCode, this._activeDesktopId)
           this.onDesktopsChanged()
         }
         this.appliedRevision = msg.revision
@@ -465,8 +550,12 @@ class RemoteTransportImpl implements Transport {
         return
       }
       if (msg.type === 'hello.error') {
-        this.setConnState('denied')
-        this.closedByUser = true // token 无效不再重连
+        // relay busy（连接数上限）是瞬态：断开走既有退避重连，不判令牌失效
+        if (/busy/i.test(msg.error ?? '')) {
+          ws.close()
+          return
+        }
+        this.fail('auth-invalid')
         this._pendingDeviceSwitch = false
         // 条目标记失效（列表显示「令牌无效」角标；不删除，密钥轮换后可重扫覆盖）
         if (this._activeDesktopId) {

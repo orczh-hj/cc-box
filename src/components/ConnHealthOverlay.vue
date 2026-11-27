@@ -28,15 +28,30 @@
  * 超 60s 升级为强提示并给「切换设备」出口——自动重连仍在后台继续，出口只是
  * 兜底而非恢复的唯一路径。不提供「强制刷新」：刷新不解决传输层问题且丢失
  * 终端现场。桌面 Tauri / 票据模式不挂载本组件。
+ *
+ * 另承接 pair-failed：当前连接可用时收到失败的新配对，连接不打断，只提示。
  */
-import { computed } from 'vue'
+import { computed, onMounted, onUnmounted } from 'vue'
 import { useI18n } from 'vue-i18n'
+import { transport } from '@/api/transport'
 import { useConnHealth } from '@/composables/useConnHealth'
 import { useDeviceSwitcher } from '@/composables/useDeviceSwitcher'
+import { useToast } from '@/composables/useToast'
 
 const { t } = useI18n()
 const { level, disconnectedMs } = useConnHealth()
 const { open } = useDeviceSwitcher()
+const toast = useToast()
+
+let unlistenPairFailed: (() => void) | null = null
+onMounted(async () => {
+  unlistenPairFailed = await transport.listen('pair-failed', () => {
+    toast.error(t('gatePairFailedToast'))
+  })
+})
+onUnmounted(() => {
+  unlistenPairFailed?.()
+})
 
 const visible = computed(() => level.value === 'overlay' || level.value === 'stalled')
 const isStalled = computed(() => level.value === 'stalled')

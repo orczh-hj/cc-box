@@ -479,3 +479,69 @@ async fn RelayClient_KickOwnershipGuard_15() {
     let v = recv_of_type(&mut ph, "hello.ok").await;
     assert_eq!(v["ver"], 1);
 }
+
+/// 刷新密钥后：新身份注册时上报作废名单，手机拿旧身份来连 → device.status
+/// 带 rotated:true（前端据此停止重连并直接提示重新扫码，而不是空转）
+#[tokio::test]
+async fn Relay_RetiredIdentity_ReportsRotated_16() {
+    let port = spawn_relay(cc_box_relay::PAIR_TTL).await;
+    const OLD_ID: &str = "0000d3d4e5f6a7b8c9d0e1f2a3b4c5d6";
+    const NEVER_ID: &str = "1111d3d4e5f6a7b8c9d0e1f2a3b4c5d6";
+    let mut ws = ws_connect(port, "/ws/device").await;
+    send(
+        &mut ws,
+        json!({"type": "register", "deviceId": DEV_ID, "deviceKey": KEY_A, "retiredIds": [OLD_ID, "not-hex"]}),
+    )
+    .await;
+    recv_of_type(&mut ws, "registered").await;
+
+    // 旧身份：作废名单命中（新身份在线与否不影响判定）
+    let mut ph = ws_connect(port, "/ws").await;
+    send(&mut ph, json!({"type": "hello", "ver": 1, "client": "web", "token": format!("{}.{}", OLD_ID, SECRET_A)})).await;
+    let v = recv_of_type(&mut ph, "device.status").await;
+    assert_eq!(v["online"], false);
+    assert_eq!(v["rotated"], true);
+
+    // 从未见过且不在名单的身份：仍是普通离线（非法形态的名单项未生效）
+    let mut ph2 = ws_connect(port, "/ws").await;
+    send(&mut ph2, json!({"type": "hello", "ver": 1, "client": "web", "token": format!("{}.{}", NEVER_ID, SECRET_A)})).await;
+    let v = recv_of_type(&mut ph2, "device.status").await;
+    assert_eq!(v["online"], false);
+    assert!(v.get("rotated").is_none(), "not rotated: {}", v);
+}
+
+/// 当前注册的身份即使在 retiredIds 里也不算作废（否则自己会把自己的手机全踢成「已作废」）
+#[tokio::test]
+async fn Relay_RetiredIdentity_SelfIdIgnored_17() {
+    let port = spawn_relay(cc_box_relay::PAIR_TTL).await;
+    let mut ws = ws_connect(port, "/ws/device").await;
+    send(&mut ws, json!({"type": "register", "deviceId": DEV_ID, "deviceKey": KEY_A, "retiredIds": [DEV_ID]})).await;
+    recv_of_type(&mut ws, "registered").await;
+
+    let mut ph = ws_connect(port, "/ws").await;
+    send(&mut ph, json!({"type": "hello", "ver": 1, "client": "web", "token": format!("{}.{}", DEV_ID, SECRET_A)})).await;
+    let v = recv_of_type(&mut ph, "device.status").await;
+    assert_eq!(v["online"], true);
+}
+
+/// 配对应答带回设备码（手机据它识别「同一台电脑」）；旧版桌面不带设备码时该字段缺省
+#[tokio::test]
+async fn Relay_PairResponse_CarriesDeviceCode_18() {
+    const CODE: &str = "abcdef0123456789abcdef0123456789";
+    let port = spawn_relay(cc_box_relay::PAIR_TTL).await;
+    let mut ws = ws_connect(port, "/ws/device").await;
+    send(&mut ws, json!({"type": "register", "deviceId": DEV_ID, "deviceKey": KEY_A})).await;
+    recv_of_type(&mut ws, "registered").await;
+
+    send(&mut ws, json!({"type": "pair.create", "secret": SECRET_A, "deviceCode": CODE})).await;
+    let v = recv_of_type(&mut ws, "pair.created").await;
+    let resp: Value = serde_json::from_str(&http_post(port, "/api/pair", &json!({"code": v["code"]}).to_string()).await).unwrap();
+    assert_eq!(resp["deviceCode"], CODE);
+
+    // 旧版桌面：pair.create 不带设备码 → 应答里没有该字段
+    send(&mut ws, json!({"type": "pair.create", "secret": SECRET_A})).await;
+    let v = recv_of_type(&mut ws, "pair.created").await;
+    let resp: Value = serde_json::from_str(&http_post(port, "/api/pair", &json!({"code": v["code"]}).to_string()).await).unwrap();
+    assert_eq!(resp["ok"], true);
+    assert!(resp.get("deviceCode").is_none(), "no deviceCode: {}", resp);
+}

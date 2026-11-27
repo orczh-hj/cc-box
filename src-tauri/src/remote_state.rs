@@ -864,6 +864,8 @@ impl RemoteState {
                         download_scope,
                         // 手机键盘平台键名（Alt/Option、Win/Cmd）依据
                         platform: Some(std::env::consts::OS.to_string()),
+                        // 持久不变的设备码：手机据它识别同一台电脑（重新配对后替换旧条目）
+                        device_code: crate::remote_client::current_device_code(),
                     },
                 );
             }

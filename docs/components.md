@@ -97,6 +97,10 @@ Events：
 
 `DeviceSwitcherDialog` 全局挂载于 App.vue，只由**首页**（ProjectSelectView / 无项目时的 WelcomeView）右上角设备按钮打开（`useDeviceSwitcher` 单例状态）；终端页 IconBar 不放设备入口，避免手机底栏拥挤。`DeviceList` 复用同一列表 UI：名称、LAN/中继、令牌无效、当前设备高亮、移除配对（当前设备不显示移除按钮；其他设备 × 需二次确认）；TokenGate 也使用它。选择设备调用 `remoteTransport.activateDesktop`（同 origin 原地重连，跨 origin 跳转）。切换成功后 `remote-connected` 携带 `deviceChanged=true`，App 调用 `sessionStore.resetRemoteTabs()` 丢弃上一台设备的 Tabs/历史缓存（不 kill 远端 PTY）。
 
+### TokenGate.vue — 浏览器远程认证门
+
+两种挂载：认证完成前的首屏（`autoBoot` 默认 true，调 `remoteTransport.boot()`）与主 UI 之上的失效覆盖层（`:auto-boot="false"`，App.vue 的 `remoteAuthLost` 控制，不销毁主 UI）。内容 = 按失败原因选的标题与说明 + 分步扫码指导 + 复用的 `DeviceList`；**不提供 token 输入**。在途（连接/认证/重连）显示 spinner，断开累计超过 10s（`useConnHealth` 的 `overlay` 层级）退出 spinner 给指导，自动重连仍在后台进行。失败原因来自 `remoteTransport.failReason`；只有令牌失效才提「刷新密钥」。规则见 remote/docs/protocol.md「配对与凭证入口」。
+
 ### FilesPanel.vue — 文件传输面板（浏览器远程模式专属，IconBar `v-if="!isTauriEnv"` 守卫）
 
 上传（手机 → 桌面 `.cc-box-files/`）与下载（授权项目内文件 → 手机）两 section，状态机 idle/transferring（进度+取消）/done/error。**职责分层**：分块循环/重试≤2/取消在 `src/api/fileTransfer.ts`（uploadFile/downloadFile/quotePath），本组件只做状态机与展示。

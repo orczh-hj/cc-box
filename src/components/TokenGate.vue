@@ -2,10 +2,11 @@
   <div class="token-gate">
     <div class="gate-card">
       <h1 class="gate-title">CC-Box</h1>
-      <p class="gate-hint">{{ hint }}</p>
+      <h2 class="gate-subtitle">{{ headline.title }}</h2>
+      <p class="gate-hint">{{ headline.hint }}</p>
 
-      <!-- 连接中 / 认证中（列表保持可点：等待中可改连其他设备） -->
-      <div v-if="busy" class="gate-state">
+      <!-- 连接中 / 认证中 / 重连未超时（列表保持可点：等待中可改连其他设备） -->
+      <div v-if="inFlight && !stalled" class="gate-state">
         <span class="spinner"></span>
         <span>{{ busyText }}</span>
       </div>
@@ -22,48 +23,40 @@
         @recheck="recheck(desktops, activeId)"
       />
 
-      <!-- 需要输入 token（closed 无 token / denied 且无可用列表） -->
-      <template v-if="!busy">
-        <input
-          v-model="tokenInput"
-          class="gate-input"
-          type="text"
-          placeholder="token"
-          autocapitalize="off"
-          autocomplete="off"
-          spellcheck="false"
-          @keydown.enter="connect"
-        >
-        <button class="gate-btn" :disabled="!tokenInput.trim()" @click="connect">连接</button>
-        <p v-if="wasDenied" class="gate-error">令牌无效，请检查后重试</p>
-      </template>
+      <!-- 操作指导：未在连接，或重连停滞（自动重连仍在后台继续） -->
+      <ol v-if="!inFlight || stalled" class="gate-steps">
+        <li>{{ t('gateStepOpen') }}</li>
+        <li>{{ t(needsFreshCode ? 'gateStepScanFresh' : 'gateStepScan') }}</li>
+        <li v-if="showRotateStep">{{ t('gateStepRotate') }}</li>
+      </ol>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
-import { remoteTransport } from '@/api/remote-transport'
+import { useI18n } from 'vue-i18n'
+import { remoteTransport, type RemoteConnState, type RemoteFailReason } from '@/api/remote-transport'
 import { listDesktops, removeDesktop, type StoredDesktop } from '@/api/remote-desktops'
 import DeviceList from '@/components/remote/DeviceList.vue'
 import { useDeviceProbe } from '@/composables/useDeviceProbe'
+import { useConnHealth } from '@/composables/useConnHealth'
 
-/** autoBoot=false：作为主 UI 之上的连接失效覆盖层复用，不主动重连
- *  initialDenied：覆盖层进入时即展示「令牌失效」提示 */
+/** autoBoot=false：作为主 UI 之上的连接失效覆盖层复用，不主动重连 */
 const props = withDefaults(defineProps<{
   autoBoot?: boolean
-  initialDenied?: boolean
 }>(), {
   autoBoot: true,
-  initialDenied: false,
 })
 
 const emit = defineEmits<{ connected: [] }>()
 
-const tokenInput = ref('')
-const busy = ref(props.autoBoot)
-const wasDenied = ref(props.initialDenied)
-const connState = ref<'connecting' | 'authenticating' | 'connected' | 'reconnecting' | 'denied' | 'closed'>('closed')
+const { t } = useI18n()
+const { level } = useConnHealth()
+
+const booting = ref(props.autoBoot)
+const connState = ref<RemoteConnState>(remoteTransport.connState)
+const reason = ref<RemoteFailReason | null>(remoteTransport.failReason)
 
 // ==================== 已保存设备列表 ====================
 
@@ -85,11 +78,13 @@ watch(
   { immediate: true },
 )
 
+// ==================== 状态与指导 ====================
+
 const stateText = computed(() => {
   switch (connState.value) {
-    case 'connecting': return '连接中…'
-    case 'authenticating': return '认证中…'
-    case 'reconnecting': return '重连中…'
+    case 'connecting': return t('gateStateConnecting')
+    case 'authenticating': return t('gateStateAuthenticating')
+    case 'reconnecting': return t('gateStateReconnecting')
   }
   return ''
 })
@@ -100,9 +95,38 @@ const busyText = computed(() => {
   return name ? `${name} · ${stateText.value}` : stateText.value
 })
 
+const inFlight = computed(() => booting.value || stateText.value !== '')
+/** 断开累计超时（阈值见 useConnHealth）：退出 spinner 展示指导 */
+const stalled = computed(() => inFlight.value && (level.value === 'overlay' || level.value === 'stalled'))
+
+/** 需要新的连接码：连接码已被消费（无效/过期/设备离线时 relay 同样消费），或电脑端
+ *  身份已作废——两种情况都必须在电脑端重新生成连接码再扫。
+ *  pair-network 除外：请求没到 relay，码还在有效期内，原码重扫即可 */
+const FRESH_CODE_REASONS: ReadonlySet<RemoteFailReason> = new Set([
+  'identity-rotated',
+  'pair-locked',
+  'pair-device-offline',
+  'pair-rejected',
+])
+const needsFreshCode = computed(() => reason.value !== null && FRESH_CODE_REASONS.has(reason.value))
+
+/** 只有令牌失效才提「刷新密钥」——它会断开所有已配对设备 */
+const showRotateStep = computed(() => !stalled.value && !needsFreshCode.value)
+
+const headline = computed<{ title: string; hint: string }>(() => {
+  if (stalled.value) return { title: t('gateStalledTitle'), hint: t('gateStalledHint') }
+  const key = {
+    'auth-invalid': 'AuthInvalid',
+    'identity-rotated': 'IdentityRotated',
+    'pair-rejected': 'PairRejected',
+    'pair-device-offline': 'DeviceOffline',
+    'pair-locked': 'PairLocked',
+    'pair-network': 'PairNetwork',
+  }[reason.value ?? ''] ?? 'Pair'
+  return { title: t(`gate${key}Title`), hint: t(`gate${key}Hint`) }
+})
+
 function activate(id: string): void {
-  busy.value = true
-  wasDenied.value = false
   remoteTransport.activateDesktop(id)
 }
 
@@ -111,45 +135,23 @@ function remove(id: string): void {
   refreshDesktops()
 }
 
-const hint = computed(() =>
-  wasDenied.value
-    ? '访问令牌无效或已过期（中继升级或桌面刷新密钥后需重新配对），请重新扫码'
-    : '在桌面端 CC-Box 点击左侧「远程」按钮，扫码或粘贴访问令牌',
-)
-
 onMounted(async () => {
   remoteTransport.onDesktopsChanged = refreshDesktops
   refreshDesktops()
   remoteTransport.onConnState = (s) => {
     connState.value = s
+    // 建连意图先改原因再发状态：此处读到的总是本次状态对应的原因
+    reason.value = remoteTransport.failReason
     if (s === 'connected') {
       emit('connected')
       return
     }
-    if (s === 'denied') {
-      wasDenied.value = true
-      busy.value = false
-      return
-    }
-    // closed（无 token 可用）需要输入
-    if (s === 'closed') {
-      busy.value = false
-    }
   }
   if (props.autoBoot) {
     await remoteTransport.boot()
-  } else {
-    busy.value = false
   }
+  booting.value = false
 })
-
-function connect() {
-  const t = tokenInput.value.trim()
-  if (!t) return
-  busy.value = true
-  wasDenied.value = false
-  remoteTransport.connectWithToken(t)
-}
 </script>
 
 <style scoped>
@@ -177,6 +179,11 @@ function connect() {
   font-size: 22px;
   color: var(--text-primary, #1a1816);
 }
+.gate-subtitle {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-primary, #1a1816);
+}
 .gate-hint {
   font-size: 13px;
   line-height: 1.6;
@@ -191,6 +198,17 @@ function connect() {
   font-size: 14px;
   color: var(--text-secondary, #5a5550);
 }
+.gate-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 4px;
+  padding-left: 20px;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text-secondary, #5a5550);
+  text-align: left;
+}
 .spinner {
   width: 16px;
   height: 16px;
@@ -201,33 +219,5 @@ function connect() {
 }
 @keyframes spin {
   to { transform: rotate(360deg); }
-}
-.gate-input {
-  background: var(--bg-primary, #fff);
-  border: 1px solid var(--border-color, #d9d5cc);
-  border-radius: 8px;
-  color: var(--text-primary, #1a1816);
-  padding: 12px;
-  font-size: 14px;
-}
-.gate-input:focus {
-  outline: none;
-  border-color: var(--accent-primary, #1e3a5f);
-}
-.gate-btn {
-  background: var(--accent-primary, #1e3a5f);
-  border: none;
-  border-radius: 8px;
-  color: #fff;
-  padding: 12px;
-  font-size: 15px;
-  font-weight: 600;
-}
-.gate-btn:disabled {
-  opacity: 0.4;
-}
-.gate-error {
-  font-size: 12px;
-  color: #e74c3c;
 }
 </style>

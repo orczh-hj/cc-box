@@ -93,7 +93,7 @@ export function probeDesktop(
       )
     }
     ws.onmessage = (ev) => {
-      let msg: { type?: string; error?: string; online?: boolean }
+      let msg: { type?: string; error?: string; online?: boolean; rotated?: boolean }
       try {
         msg = JSON.parse(ev.data as string)
       } catch {
@@ -104,6 +104,9 @@ export function probeDesktop(
       } else if (msg.type === 'hello.error') {
         // relay busy 不是 token 问题；其余 hello.error 视为令牌失效
         finish(/busy/i.test(msg.error ?? '') ? 'unreachable' : 'auth-failed')
+      } else if (msg.type === 'device.status' && msg.rotated === true) {
+        // 身份已作废（电脑刷新过密钥）：等价于令牌失效，重新检测也不会恢复
+        finish('auth-failed')
       } else if (msg.type === 'device.status' && msg.online === false) {
         // 设备离线时 relay 只发这一帧并关闭连接
         finish('offline')

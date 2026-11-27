@@ -8,6 +8,7 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import {
   addDesktop,
+  adoptDeviceCode,
   deviceIdOf,
   desktopIdOf,
   getDesktop,
@@ -127,5 +128,30 @@ describe('StoredDesktops 设备列表存储', () => {
     const d = migrateLegacyToken('http://192.168.1.5:8747')
     expect(d?.kind).toBe('lan')
     expect(d?.origin).toBe('http://192.168.1.5:8747')
+  })
+
+  // ==================== 设备码（同一台电脑识别） ====================
+
+  // 刷新密钥换了 device_id（条目键变）但设备码不变：同 origin 的旧条目应被新条目取代；
+  // 别的 origin 下设备码相同的条目、没有设备码的旧条目不受影响
+  it('StoredDesktops_设备码替换同机旧条目_011', () => {
+    const code = 'abcdef0123456789abcdef0123456789'
+    const oldId = 'a'.repeat(32) + '.' + '1'.repeat(32)
+    const newId = 'b'.repeat(32) + '.' + '2'.repeat(32)
+    const relay = 'https://orczh.top:8800'
+    const a = addDesktop({ kind: 'relay', token: oldId, origin: relay + '/' })
+    touchDesktop(a.id, { deviceCode: code })
+    const b = addDesktop({ kind: 'relay', token: 'c'.repeat(32) + '.' + '3'.repeat(32), origin: 'https://other.example' })
+    touchDesktop(b.id, { deviceCode: code })
+    const c = addDesktop({ kind: 'relay', token: 'd'.repeat(32) + '.' + '4'.repeat(32), origin: relay })
+    const d = addDesktop({ kind: 'relay', token: newId, origin: relay })
+
+    adoptDeviceCode(relay, code, d.id)
+
+    const ids = listDesktops().map(x => x.id)
+    expect(ids).toHaveLength(3)
+    expect(ids).not.toContain(a.id)
+    expect(ids).toEqual(expect.arrayContaining([b.id, c.id, d.id]))
+    expect(getDesktop(d.id)?.deviceCode).toBe(code)
   })
 })

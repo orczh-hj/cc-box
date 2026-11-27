@@ -28,6 +28,9 @@ export interface StoredDesktop {
   name?: string
   /** token 被拒（hello.error）标记；重连成功清除。UI 显示「令牌无效」角标 */
   invalid?: boolean
+  /** 桌面端持久不变的设备码（hello.ok / 配对应答下发；旧桌面不下发）：刷新密钥后
+   *  device_id 会变，但设备码不变——同一台电脑重新配对时据此替换旧条目 */
+  deviceCode?: string
   savedAt: number
   lastUsedAt: number
 }
@@ -138,7 +141,7 @@ export function addDesktop(d: {
 /** 连接使用时更新 lastUsedAt；可选回填 deviceName（hello.ok）与失效标记 */
 export function touchDesktop(
   id: string,
-  patch?: { name?: string; invalid?: boolean },
+  patch?: { name?: string; invalid?: boolean; deviceCode?: string },
 ): void {
   const list = parseList()
   const idx = list.findIndex(x => x.id === id)
@@ -148,9 +151,22 @@ export function touchDesktop(
     ...prev,
     ...(patch?.name ? { name: patch.name } : {}),
     ...(patch && 'invalid' in patch ? { invalid: patch.invalid } : {}),
+    ...(patch?.deviceCode ? { deviceCode: patch.deviceCode } : {}),
     lastUsedAt: nextTs(),
   }
   saveList(list)
+}
+
+/** 把设备码记到条目上，并移除同 origin 下设备码相同的其他条目（同一台电脑
+ *  刷新密钥后重新配对：device_id 变了但设备码没变，旧条目应被新条目取代） */
+export function adoptDeviceCode(origin: string, deviceCode: string, keepId: string): void {
+  const o = origin.replace(/\/+$/, '')
+  if (!parseList().some(x => x.id === keepId)) return
+  const norm = (s: string) => s.replace(/\/+$/, '')
+  const next = parseList()
+    .filter(x => x.id === keepId || x.deviceCode !== deviceCode || norm(x.origin) !== o)
+    .map(x => (x.id === keepId ? { ...x, deviceCode } : x))
+  saveList(next)
 }
 
 export function removeDesktop(id: string): void {

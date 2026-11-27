@@ -131,12 +131,11 @@
   <ToastHost />
 </div>
 
-<!-- 浏览器模式：已进入主 UI 后连接被拒（token 失效/被刷新）→ 叠加设备选择覆盖层。
+<!-- 浏览器模式：已进入主 UI 后连接被拒（token 失效/被刷新）→ 叠加扫码指导 + 设备列表覆盖层。
      不销毁主 UI，避免启动链重复注册；连上后自动收起。 -->
 <TokenGate
   v-if="!isTauriEnv && remoteReady && remoteAuthLost"
   :auto-boot="false"
-  :initial-denied="true"
   @connected="remoteAuthLost = false"
 />
 

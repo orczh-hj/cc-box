@@ -36,7 +36,7 @@
 | type | 字段 | 说明 |
 |---|---|---|
 | `hello.ok` | `ver, deviceName, connId, controller?, revision, downloadScope?, platform?` | 认证通过（桌面设备名）。`connId` = 本连接唯一标识；`controller` = **deprecated**（全局控制权已 per-session 化，服务端恒不发/缺省，旧端缓存 UI 解析为 null=无人持有即不遮罩，勿再消费）；`revision` = 状态版本基线（旧桌面端缺省 0）；`downloadScope` = 票据连接的下载范围 `{fileName, size}`（普通连接缺省）；`platform` = 目标电脑 OS（`windows`/`macos`/`linux`），手机键盘据此显示平台键名（Alt/Option、Win/Cmd），旧桌面端缺省按 Windows 显示 |
-| `hello.error` | `error` | 认证失败 |
+| `hello.error` | `error` | 认证失败。`invalid token`（relay 格式校验或桌面拒绝 secret）→ 前端停止重连、标记设备失效、显示重新配对指导；`relay busy`（连接数上限）→ 瞬态，前端按退避重连 |
 | `sessions` | `list: RemoteSession[], revision` | 运行中会话列表 + 状态版本快照（全量刷新基线）。多实例时为设备级聚合（按 `instanceId/instanceName` 分组，见 RemoteSession）；旧桌面/单实例缺实例字段，手机端降级平铺 |
 | `projects` | `list: RemoteProject[]` | 项目列表 |
 | `session.created` | `id, path` | 新建成功（id = ptyId） |
@@ -53,6 +53,20 @@
 | `pong` | `{}` | 心跳回复 |
 | `rpc.result` | `id, ok, data?, error?` | RPC 应答 |
 | `rpc.event` | `name, payload` | 控制面事件隧道（与 Tauri 事件同构）：`state-changed`（写命令状态广播）、`session-taken-over`（会话被抢占或桌面 claim 收回，payload `{id}`；广播排除接管者）、`session-reclaimed`（会话归还桌面，桌面端清遮罩；桌面 claim 仅单发桌面，避免清掉远程刚收到的 taken-over）、`remote-session-created/closed`（会话建立/显式关闭联动）、`session-renamed`、`session-viewed`（attach 打开即已读，服务端清 pending 并双端广播）、`hook-status` 等 |
+
+## 配对与凭证入口（URL fragment）
+
+浏览器页面只经 URL fragment 取得凭证，不提供令牌输入框。优先级：`?dl=` 票据 → `#pair=<连接码>` → `#token=<令牌>` → 已保存设备中同 origin 最近一台。凭证读取后立即用 `replaceState` 从地址栏抹掉（只消费一次，不留在历史记录里）。
+
+- **页面已打开时同样生效**：地址栏打开只差 fragment 的链接是同文档导航、不重载页面，前端监听 `hashchange` 重新走同一入口（票据页除外）。首次进入页、失效覆盖层、主 UI 的离线重连循环三种状态下都会切到新凭证；票据页不响应
+- **后到的选择作废在途结果**：每次建连选择（URL 凭证、设备列表切换）递增建连序号；`/api/pair` 请求返回时序号已变则丢弃结果。连续两次凭证变化、或配在途时用户手动选了别的设备，都只认最后一个
+- **已连接时配对失败不打断现有连接**：只发本地事件 `pair-failed` 提示。未连接时进入 `denied` 并按原因给指导
+- **`/api/pair` 错误 → 失败原因**：`too many attempts, try later` → `pair-locked`；`device offline` → `pair-device-offline`；`invalid or expired code` → `pair-rejected`；请求本身失败 → `pair-network`
+- **连接码一经提交即被消费**，设备离线时也一样（relay 先移除码再查设备在线）。因此任何配对失败的指导都是「更新连接码后重扫」，不能重试同一个码
+- **中继下「刷新密钥」立即提示**：桌面端把旧 device_id 记入 `retiredDeviceIds`（持久保存，每次注册用 `retiredIds` 上报），relay 对名单内身份的 hello 回 `device.status {online:false, rotated:true}`，前端停止重连、按 `identity-rotated` 给重扫指导。名单是 relay 内存态，重启后桌面重新注册即恢复；恢复前的窗口仍是普通离线
+- **设备码（`deviceCode`）识别同一台电脑**：桌面端生成一次、永不变（刷新密钥也不换），经 `hello.ok.deviceCode` 与 `/api/pair` 应答的 `deviceCode` 下发。手机把它记在设备条目上，同 origin 下设备码相同的旧条目被新条目取代——刷新密钥后重新配对不会出现两台「主机」。旧桌面不下发，旧条目在下次连上后才拿到设备码
+
+无消息结构变更（`hello.ok` 新增可选字段，旧端忽略）。
 
 ## 会话控制权（per-session active）与 revision
 

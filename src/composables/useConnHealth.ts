@@ -29,6 +29,7 @@ export function useConnHealth() {
   const level = ref<ConnHealthLevel>('ok')
   const disconnectedMs = ref(0)
   let since: number | null = null
+  let lastAttempt = remoteTransport.attemptSeq
 
   function compute(): void {
     if (!isDisconnectedState(remoteTransport.connState)) {
@@ -37,7 +38,12 @@ export function useConnHealth() {
       level.value = 'ok'
       return
     }
-    if (since === null) since = Date.now()
+    if (since === null || lastAttempt !== remoteTransport.attemptSeq) {
+      // 新的建连选择（换设备/换码）= 新一轮等待，重新计时；设备离线时状态每秒在
+      // reconnecting/authenticating 间切换，不能按状态变化重置
+      since = Date.now()
+      lastAttempt = remoteTransport.attemptSeq
+    }
     disconnectedMs.value = Date.now() - since
     level.value = connHealthLevel(disconnectedMs.value)
   }
